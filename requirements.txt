@@ -1,5 +1,16 @@
-# AUTO Video Maker - Phase 1 Dependencies
+# AUTO Video Maker - Dependencies
+# Phase 0: Core project setup
+# Phase 1: Google Flow automation
+# Phase 2A: Local video assembly
 
+# ----- Core -----
 python-dotenv==1.1.0
+
+# ----- Testing -----
 pytest==8.3.5
+
+# ----- Data Validation (Phase 2A) -----
+pydantic==2.10.6
+
+# ----- Browser Automation (Phase 1) -----
 playwright==1.52.0
