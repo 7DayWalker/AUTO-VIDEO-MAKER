@@ -12,13 +12,23 @@ from app.config import PROJECT_ROOT
 
 # ----- Flow URLs -----
 
-# Google Flow main URL (may change over time)
-FLOW_URL = os.getenv("FLOW_URL", "https://flow.google.com")
+# Google Flow entry point
+FLOW_URL = os.getenv("FLOW_URL", "https://flow.google")
+
+# ----- Chrome Executable -----
+
+# Path to the installed Google Chrome browser.
+# Playwright will use this instead of the bundled Chromium.
+CHROME_EXECUTABLE = os.getenv(
+    "CHROME_EXECUTABLE",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+)
 
 # ----- Browser Profile -----
 
-# Persistent browser profile to preserve Google login session.
-# Stored outside Git-tracked files.
+# Dedicated persistent browser profile for automation.
+# This is separate from the user's normal Chrome profile.
+# Stored inside the project root but gitignored.
 BROWSER_PROFILE_DIR = PROJECT_ROOT / "browser_profile"
 
 # ----- Output Paths -----

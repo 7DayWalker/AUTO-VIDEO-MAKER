@@ -1,128 +1,232 @@
 """
-AUTO Video Maker - Google Flow Proof of Concept Test
+AUTO Video Maker - Google Flow Browser Access Test
 
-This script runs the full Flow automation workflow:
-1. Launches a persistent Chromium browser with saved session
-2. Opens Google Flow
-3. Handles authentication (manual login if needed)
-4. Configures and submits a test video generation
-5. Waits for generation to complete
-6. Downloads the result
-7. Validates the downloaded file
-8. Reports success or failure
+This script tests that we can:
+1. Launch Chrome with a dedicated persistent profile
+2. Navigate to Google Flow
+3. Detect authentication status
+4. Wait for manual login if needed
+5. Capture the current Flow UI
+6. Report visible UI elements
 
 Usage:
     python flow_test.py
 
 On first run, you will need to log in to Google manually in the browser window.
 Subsequent runs will reuse your saved session.
+
+NOTE: This script does NOT generate videos. It only verifies browser access.
 """
 
 import sys
+import time
 from pathlib import Path
-from datetime import datetime
 
 from playwright.sync_api import sync_playwright
 
-from app.flow.browser import log, launch_persistent_browser
-from app.flow.automation import FlowAutomation
-from app.flow.config import FLOW_TEST_OUTPUT_DIR
+from app.flow.browser import log, launch_persistent_browser, get_page, take_screenshot
+from app.flow.config import (
+    FLOW_URL,
+    FLOW_SCREENSHOTS_DIR,
+    AUTH_TIMEOUT,
+    POLL_INTERVAL,
+)
 
 
-def validate_video(filepath: Path) -> bool:
+def is_login_page(url: str) -> bool:
+    """Check if the current URL indicates a Google login page."""
+    url_lower = url.lower()
+    login_indicators = [
+        "accounts.google.com/signin",
+        "accounts.google.com/v3/signin",
+        "accounts.google.com/servicelogin",
+        "accounts.google.com/interactivelogin",
+    ]
+    return any(indicator in url_lower for indicator in login_indicators)
+
+
+def is_error_page(url: str, title: str) -> bool:
+    """Check if the page is a 404 or error page."""
+    indicators = ["404", "not found", "error"]
+    return any(ind in title.lower() for ind in indicators) or "404" in url
+
+
+def discover_ui_elements(page) -> list[dict]:
     """
-    Basic validation of a downloaded video file.
+    Discover visible interactive UI elements on the current page.
 
-    Checks:
-    - File exists
-    - File size > 0
-    - Extension is a video format
-
-    Args:
-        filepath: Path to the video file.
-
-    Returns:
-        True if validation passes, False otherwise.
+    Returns a list of dicts with element info (tag, text, aria-label, role, etc).
     """
-    log("Validating downloaded video...")
+    elements = page.evaluate("""() => {
+        const results = [];
+        // Look for buttons, links, textareas, inputs, and elements with role
+        const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [contenteditable="true"]';
+        const els = document.querySelectorAll(selectors);
+        for (const el of els) {
+            // Only visible elements
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) continue;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
 
-    if not filepath.exists():
-        log(f"VALIDATION FAILED: File does not exist: {filepath}")
-        return False
-
-    file_size = filepath.stat().st_size
-    if file_size == 0:
-        log(f"VALIDATION FAILED: File is empty (0 bytes): {filepath}")
-        return False
-
-    # Check extension
-    valid_extensions = {".mp4", ".webm", ".mov", ".avi", ".mkv"}
-    if filepath.suffix.lower() not in valid_extensions:
-        log(f"VALIDATION WARNING: Unexpected extension: {filepath.suffix}")
-        # Don't fail on this - Flow might use a different format
-
-    # Report file info
-    size_mb = file_size / (1024 * 1024)
-    log(f"File: {filepath.name}")
-    log(f"Size: {size_mb:.2f} MB ({file_size:,} bytes)")
-    log(f"Extension: {filepath.suffix}")
-    log(f"Path: {filepath}")
-
-    log("VALIDATION PASSED.")
-    return True
+            const info = {
+                tag: el.tagName.toLowerCase(),
+                text: (el.textContent || '').trim().substring(0, 100),
+                ariaLabel: el.getAttribute('aria-label') || '',
+                title: el.getAttribute('title') || '',
+                role: el.getAttribute('role') || '',
+                type: el.getAttribute('type') || '',
+                placeholder: el.getAttribute('placeholder') || '',
+                href: el.tagName === 'A' ? (el.getAttribute('href') || '').substring(0, 100) : '',
+            };
+            // Only include elements with some identifying info
+            if (info.text || info.ariaLabel || info.title || info.placeholder) {
+                results.push(info);
+            }
+        }
+        return results.slice(0, 50);  // Limit to 50 elements
+    }""")
+    return elements
 
 
 def main() -> int:
     """
-    Run the Google Flow proof-of-concept test.
+    Run the Google Flow browser access test.
 
     Returns:
         0 on success, 1 on failure.
     """
     print()
     log("=" * 50)
-    log("AUTO Video Maker - Flow Proof of Concept")
+    log("AUTO Video Maker - Flow Browser Access Test")
     log("=" * 50)
     print()
 
-    log("Starting browser...")
+    # Ensure screenshots directory exists
+    FLOW_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    log("Starting Chrome browser...")
 
     with sync_playwright() as playwright:
         # Launch persistent browser (preserves login session)
         context = launch_persistent_browser(playwright)
 
         try:
-            # Create and run the automation
-            automation = FlowAutomation(context)
-            video_path = automation.run()
+            page = get_page(context)
 
-            if video_path is None:
+            # Navigate to Flow
+            log(f"Navigating to: {FLOW_URL}")
+            page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=30000)
+
+            # Wait for page to settle
+            page.wait_for_timeout(3000)
+
+            current_url = page.url
+            page_title = page.title()
+            log(f"Current URL: {current_url}")
+            log(f"Page title: {page_title}")
+
+            # Check for 404/error
+            if is_error_page(current_url, page_title):
+                log("ERROR: Page appears to be a 404 or error page!")
+                take_screenshot(page, "error_page", FLOW_SCREENSHOTS_DIR)
                 log("")
-                log("=" * 50)
-                log("TEST FAILED")
-                log("Video generation or download did not complete.")
-                log("Check screenshots in logs/flow/ for details.")
-                log("=" * 50)
+                log("TEST FAILED - Error page detected")
                 return 1
 
-            # Validate the downloaded video
-            if validate_video(video_path):
+            # Check authentication
+            if is_login_page(current_url):
                 log("")
                 log("=" * 50)
-                log("TEST PASSED")
-                log(f"Video saved: {video_path}")
+                log("AUTHENTICATION REQUIRED")
+                log("Please log in to your Google account in the browser window.")
+                log(f"Waiting up to {AUTH_TIMEOUT} seconds...")
                 log("=" * 50)
-                return 0
+                log("")
+
+                # Wait for user to complete authentication
+                start_time = time.time()
+                while time.time() - start_time < AUTH_TIMEOUT:
+                    time.sleep(POLL_INTERVAL)
+                    current_url = page.url
+                    if not is_login_page(current_url):
+                        log("Authentication completed!")
+                        page.wait_for_timeout(3000)
+                        current_url = page.url
+                        page_title = page.title()
+                        log(f"Post-auth URL: {current_url}")
+                        log(f"Post-auth title: {page_title}")
+                        break
+                else:
+                    log("Authentication timed out!")
+                    take_screenshot(page, "auth_timeout", FLOW_SCREENSHOTS_DIR)
+                    log("TEST FAILED - Authentication timeout")
+                    return 1
             else:
+                log("Already authenticated (or no login required).")
+
+            # Take screenshot of the loaded Flow interface
+            log("")
+            log("Capturing Flow interface...")
+            page.wait_for_timeout(2000)
+
+            # Update URL/title after any redirects
+            current_url = page.url
+            page_title = page.title()
+            log(f"Final URL: {current_url}")
+            log(f"Final title: {page_title}")
+
+            screenshot_path = take_screenshot(page, "flow_interface", FLOW_SCREENSHOTS_DIR)
+
+            # Discover UI elements
+            log("")
+            log("Discovering UI elements...")
+            elements = discover_ui_elements(page)
+
+            if elements:
+                log(f"Found {len(elements)} interactive elements:")
                 log("")
-                log("=" * 50)
-                log("TEST FAILED")
-                log("Video file validation failed.")
-                log("=" * 50)
-                return 1
+                for i, el in enumerate(elements, 1):
+                    parts = [f"  {i}. <{el['tag']}>"]
+                    if el.get('text'):
+                        parts.append(f"text='{el['text'][:60]}'")
+                    if el.get('ariaLabel'):
+                        parts.append(f"aria-label='{el['ariaLabel']}'")
+                    if el.get('title'):
+                        parts.append(f"title='{el['title']}'")
+                    if el.get('role'):
+                        parts.append(f"role='{el['role']}'")
+                    if el.get('placeholder'):
+                        parts.append(f"placeholder='{el['placeholder']}'")
+                    if el.get('href'):
+                        parts.append(f"href='{el['href']}'")
+                    log(" | ".join(parts))
+            else:
+                log("No interactive elements found on the page.")
+
+            # Report results
+            log("")
+            log("=" * 50)
+            log("TEST PASSED - Flow interface accessible")
+            log(f"  URL: {current_url}")
+            log(f"  Title: {page_title}")
+            if screenshot_path:
+                log(f"  Screenshot: {screenshot_path}")
+            log(f"  UI Elements found: {len(elements)}")
+            log("=" * 50)
+
+            return 0
+
+        except Exception as e:
+            log(f"UNEXPECTED ERROR: {e}")
+            try:
+                page = get_page(context)
+                take_screenshot(page, "unexpected_error", FLOW_SCREENSHOTS_DIR)
+            except Exception:
+                pass
+            return 1
 
         finally:
-            # Close browser context
             log("Closing browser...")
             context.close()
 

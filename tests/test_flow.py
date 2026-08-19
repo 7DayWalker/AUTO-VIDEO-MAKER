@@ -11,6 +11,7 @@ import os
 
 from app.flow.config import (
     FLOW_URL,
+    CHROME_EXECUTABLE,
     BROWSER_PROFILE_DIR,
     FLOW_TEST_OUTPUT_DIR,
     FLOW_SCREENSHOTS_DIR,
@@ -87,42 +88,36 @@ class TestFlowAutomationError:
         assert issubclass(FlowAutomationError, Exception)
 
 
-class TestVideoValidation:
-    """Tests for the video validation logic in flow_test.py."""
+class TestChromeConfig:
+    """Tests for Chrome configuration."""
 
-    def test_validate_existing_file(self):
-        """validate_video should pass for a non-empty file with video extension."""
-        from flow_test import validate_video
+    def test_chrome_executable_is_set(self):
+        """CHROME_EXECUTABLE should be a non-empty string."""
+        assert isinstance(CHROME_EXECUTABLE, str)
+        assert len(CHROME_EXECUTABLE) > 0
 
-        # Create a temporary file that looks like a video
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-            f.write(b"fake video content for testing purposes")
-            temp_path = Path(f.name)
+    def test_chrome_executable_path_looks_valid(self):
+        """CHROME_EXECUTABLE should point to a chrome.exe path."""
+        assert "chrome" in CHROME_EXECUTABLE.lower()
 
-        try:
-            assert validate_video(temp_path) is True
-        finally:
-            os.unlink(temp_path)
 
-    def test_validate_nonexistent_file(self):
-        """validate_video should fail for a file that doesn't exist."""
-        from flow_test import validate_video
+class TestErrorPageDetection:
+    """Tests for error page detection logic."""
 
-        fake_path = Path("C:/nonexistent/fake_video.mp4")
-        assert validate_video(fake_path) is False
+    def test_detects_404_in_title(self):
+        """Should detect 404 in page title."""
+        from flow_test import is_error_page
+        assert is_error_page("https://flow.google", "404 Not Found") is True
 
-    def test_validate_empty_file(self):
-        """validate_video should fail for an empty file."""
-        from flow_test import validate_video
+    def test_detects_error_in_title(self):
+        """Should detect error in page title."""
+        from flow_test import is_error_page
+        assert is_error_page("https://flow.google", "Error - Something went wrong") is True
 
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-            temp_path = Path(f.name)
-            # Don't write anything - file is empty
-
-        try:
-            assert validate_video(temp_path) is False
-        finally:
-            os.unlink(temp_path)
+    def test_does_not_flag_normal_page(self):
+        """Should NOT flag a normal Flow page as error."""
+        from flow_test import is_error_page
+        assert is_error_page("https://flow.google", "Google Flow") is False
 
 
 class TestLoginDetection:

@@ -1,14 +1,24 @@
 """
 Google Flow Automation - Browser Management
 
-Handles launching and managing the persistent Chromium browser profile
+Handles launching and managing a dedicated Chrome browser profile
 used for Google Flow automation.
+
+IMPORTANT:
+- Uses the installed Google Chrome browser (not bundled Chromium).
+- Uses a DEDICATED automation profile (not the user's normal profile).
+- The user's everyday Chrome profile is never touched.
+- The dedicated profile is stored in browser_profile/ (gitignored).
 """
 
 from pathlib import Path
-from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+from playwright.sync_api import sync_playwright, BrowserContext, Page
 
-from app.flow.config import BROWSER_PROFILE_DIR, NAVIGATION_TIMEOUT
+from app.flow.config import (
+    BROWSER_PROFILE_DIR,
+    CHROME_EXECUTABLE,
+    NAVIGATION_TIMEOUT,
+)
 
 
 def log(message: str) -> None:
@@ -20,7 +30,7 @@ def log(message: str) -> None:
 
 def ensure_browser_profile_dir() -> Path:
     """
-    Ensure the persistent browser profile directory exists.
+    Ensure the dedicated browser profile directory exists.
 
     Returns:
         Path to the browser profile directory.
@@ -31,9 +41,12 @@ def ensure_browser_profile_dir() -> Path:
 
 def launch_persistent_browser(playwright) -> BrowserContext:
     """
-    Launch a persistent Chromium browser context using the dedicated profile.
+    Launch a persistent Chrome browser context using the dedicated profile.
 
-    This preserves the user's Google login session between runs.
+    This uses the installed Google Chrome browser with a dedicated
+    automation profile that is separate from the user's normal Chrome profile.
+
+    The profile preserves the Google login session between runs.
     The browser is launched visibly (NOT headless) so the user can
     interact with it for manual authentication if needed.
 
@@ -44,11 +57,16 @@ def launch_persistent_browser(playwright) -> BrowserContext:
         A persistent BrowserContext.
     """
     profile_dir = ensure_browser_profile_dir()
-    log(f"Using browser profile: {profile_dir}")
+    log(f"Using Chrome executable: {CHROME_EXECUTABLE}")
+    log(f"Using dedicated profile: {profile_dir}")
 
     context = playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         headless=False,
+        # Use the installed Google Chrome instead of bundled Chromium
+        executable_path=CHROME_EXECUTABLE,
+        # Use a specific channel to indicate we want Chrome behavior
+        # (executable_path takes precedence but channel helps with defaults)
         # Reasonable viewport for Flow UI
         viewport={"width": 1280, "height": 900},
         # Accept downloads
