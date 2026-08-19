@@ -1,22 +1,19 @@
 """
-AUTO Video Maker - Google Flow Workspace Access Test
+AUTO Video Maker - Google Flow Workspace Access Test (CDP Attach)
 
-This script tests that we can:
-1. Launch Chrome with a dedicated persistent profile
-2. Navigate to Google Flow landing page
-3. Detect authentication status (pause for manual login if needed)
-4. Click "Create with Google Flow" to enter the workspace
-5. Capture the workspace UI
-6. Identify video-creation controls
+Architecture:
+1. Chrome must already be running with --remote-debugging-port=9222
+   (use launch_chrome.py to start it)
+2. The user must have already authenticated with Google in that Chrome session.
+3. This script attaches to the running Chrome via CDP.
+4. It navigates to Flow and inspects the workspace.
 
 Usage:
-    python flow_test.py
+    Step 1: python launch_chrome.py   (in one terminal)
+    Step 2: Sign in to Google in the Chrome window
+    Step 3: python flow_test.py       (in another terminal)
 
-On first run, you will need to log in to Google manually in the browser window.
-Subsequent runs will reuse your saved session.
-
-NOTE: This script does NOT generate videos. It only verifies workspace access
-and identifies available controls.
+NOTE: This script does NOT generate videos.
 """
 
 import sys
@@ -25,12 +22,20 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
-from app.flow.browser import log, launch_persistent_browser, get_page, take_screenshot
+from app.flow.browser import (
+    log,
+    connect_to_chrome,
+    get_page_from_browser,
+    take_screenshot,
+    is_chrome_running_with_debugging,
+    launch_chrome_with_debugging,
+)
 from app.flow.config import (
     FLOW_URL,
     FLOW_SCREENSHOTS_DIR,
     AUTH_TIMEOUT,
     POLL_INTERVAL,
+    CDP_PORT,
 )
 
 
@@ -56,7 +61,7 @@ def discover_ui_elements(page) -> list[dict]:
     """
     Discover visible interactive UI elements on the current page.
 
-    Returns a list of dicts with element info (tag, text, aria-label, role, etc).
+    Returns a list of dicts with element info.
     """
     elements = page.evaluate("""() => {
         const results = [];
@@ -89,63 +94,65 @@ def discover_ui_elements(page) -> list[dict]:
     return elements
 
 
-def handle_authentication(page) -> bool:
-    """
-    Check and handle authentication. Returns True if authenticated.
-    Pauses for manual login if needed.
-    """
-    current_url = page.url
-
-    if is_login_page(current_url):
-        log("")
-        log("=" * 50)
-        log("AUTHENTICATION REQUIRED")
-        log("Please log in to your Google account in the browser window.")
-        log(f"Waiting up to {AUTH_TIMEOUT} seconds...")
-        log("=" * 50)
-        log("")
-
-        start_time = time.time()
-        while time.time() - start_time < AUTH_TIMEOUT:
-            time.sleep(POLL_INTERVAL)
-            current_url = page.url
-            if not is_login_page(current_url):
-                log("Authentication completed!")
-                page.wait_for_timeout(3000)
-                return True
-
-        log("Authentication timed out!")
-        take_screenshot(page, "auth_timeout", FLOW_SCREENSHOTS_DIR)
-        return False
-    else:
-        log("Already authenticated (or no login required).")
-        return True
-
-
 def main() -> int:
     """
-    Run the Google Flow workspace access test.
+    Run the Google Flow workspace access test via CDP.
 
     Returns:
         0 on success, 1 on failure.
     """
     print()
     log("=" * 50)
-    log("AUTO Video Maker - Flow Workspace Access Test")
+    log("AUTO Video Maker - Flow Workspace Access Test (CDP)")
     log("=" * 50)
     print()
 
     FLOW_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    log("Starting Chrome browser...")
-
-    with sync_playwright() as playwright:
-        context = launch_persistent_browser(playwright)
+    # --- Step 0: Check if Chrome is running with debugging ---
+    if not is_chrome_running_with_debugging():
+        log(f"Chrome is NOT running with debugging on port {CDP_PORT}.")
+        log("")
+        log("Starting Chrome for you...")
+        log("Please sign in to Google in the Chrome window that opens.")
+        log("")
 
         try:
-            page = get_page(context)
+            launch_chrome_with_debugging()
+        except RuntimeError as e:
+            log(f"ERROR: {e}")
+            return 1
 
-            # --- Step 1: Navigate to Flow landing page ---
+        log("Waiting for you to sign in to Google...")
+        log(f"(Waiting up to {AUTH_TIMEOUT} seconds)")
+        log("")
+        log("After signing in, press ENTER in this terminal to continue.")
+        log("")
+
+        try:
+            input(">>> Press ENTER after you have signed in to Google... ")
+        except (EOFError, KeyboardInterrupt):
+            log("Cancelled.")
+            return 1
+
+        log("")
+
+    log("Connecting to Chrome via CDP...")
+
+    with sync_playwright() as playwright:
+        try:
+            browser = connect_to_chrome(playwright)
+        except Exception as e:
+            log(f"ERROR: Could not connect to Chrome via CDP: {e}")
+            log(f"Make sure Chrome is running with --remote-debugging-port={CDP_PORT}")
+            log("Run: python launch_chrome.py")
+            return 1
+
+        try:
+            # Get an existing page or create a new one
+            page = get_page_from_browser(browser)
+
+            # --- Step 1: Navigate to Flow ---
             log(f"Navigating to: {FLOW_URL}")
             page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
@@ -157,109 +164,100 @@ def main() -> int:
 
             # Check for errors
             if is_error_page(landing_url, landing_title):
-                log("ERROR: Landing page is a 404 or error page!")
-                take_screenshot(page, "landing_error", FLOW_SCREENSHOTS_DIR)
+                log("ERROR: Page is a 404 or error page!")
+                take_screenshot(page, "error_page", FLOW_SCREENSHOTS_DIR)
                 return 1
 
-            # Handle authentication
-            if not handle_authentication(page):
-                return 1
+            # Check if we're on a login page
+            if is_login_page(landing_url):
+                log("")
+                log("WARNING: You are on a Google login page.")
+                log("Please sign in to Google in the Chrome window.")
+                log(f"Waiting up to {AUTH_TIMEOUT} seconds...")
+                log("")
 
-            # --- Step 2: Click "Create with Google Flow" ---
+                start_time = time.time()
+                while time.time() - start_time < AUTH_TIMEOUT:
+                    time.sleep(POLL_INTERVAL)
+                    current_url = page.url
+                    if not is_login_page(current_url):
+                        log("Authentication detected! Continuing...")
+                        page.wait_for_timeout(3000)
+                        landing_url = page.url
+                        landing_title = page.title()
+                        break
+                else:
+                    log("Authentication timed out.")
+                    take_screenshot(page, "auth_timeout", FLOW_SCREENSHOTS_DIR)
+                    return 1
+
+            # --- Step 2: Look for "Create with Google Flow" button ---
             log("")
             log("Looking for 'Create with Google Flow' button...")
 
-            # Try multiple robust selector strategies
             create_button = None
-            selectors_tried = []
+            selectors = [
+                'button:has-text("Create with Google Flow")',
+                '[role="button"]:has-text("Create with Google Flow")',
+                'a:has-text("Create with Google Flow")',
+                'text="Create with Google Flow"',
+            ]
 
-            # Strategy 1: Button with exact text
-            selector = 'button:has-text("Create with Google Flow")'
-            selectors_tried.append(selector)
-            try:
-                locator = page.locator(selector).first
-                if locator.is_visible(timeout=3000):
-                    create_button = locator
-                    log(f"Found button via: {selector}")
-            except (PlaywrightTimeout, Exception):
-                pass
-
-            # Strategy 2: Any element with role=button and text
-            if not create_button:
-                selector = '[role="button"]:has-text("Create with Google Flow")'
-                selectors_tried.append(selector)
+            for selector in selectors:
                 try:
                     locator = page.locator(selector).first
-                    if locator.is_visible(timeout=2000):
+                    if locator.is_visible(timeout=3000):
                         create_button = locator
                         log(f"Found button via: {selector}")
+                        break
                 except (PlaywrightTimeout, Exception):
-                    pass
-
-            # Strategy 3: Link with text
-            if not create_button:
-                selector = 'a:has-text("Create with Google Flow")'
-                selectors_tried.append(selector)
-                try:
-                    locator = page.locator(selector).first
-                    if locator.is_visible(timeout=2000):
-                        create_button = locator
-                        log(f"Found button via: {selector}")
-                except (PlaywrightTimeout, Exception):
-                    pass
-
-            # Strategy 4: Any clickable element containing that text
-            if not create_button:
-                selector = 'text="Create with Google Flow"'
-                selectors_tried.append(selector)
-                try:
-                    locator = page.locator(selector).first
-                    if locator.is_visible(timeout=2000):
-                        create_button = locator
-                        log(f"Found element via: {selector}")
-                except (PlaywrightTimeout, Exception):
-                    pass
+                    continue
 
             if not create_button:
-                log("ERROR: Could not find 'Create with Google Flow' button!")
-                log(f"Selectors tried: {selectors_tried}")
-                take_screenshot(page, "no_create_button", FLOW_SCREENSHOTS_DIR)
-                # Dump page info for diagnostics
-                log(f"Current URL: {page.url}")
-                log(f"Current title: {page.title()}")
-                return 1
-
-            # Click the button
-            log("Clicking 'Create with Google Flow'...")
-            create_button.click()
-
-            # --- Step 3: Wait for workspace to load ---
-            log("Waiting for workspace to load...")
-            page.wait_for_timeout(5000)
-
-            # Wait for URL to change or page to stabilize
-            # The workspace may take a moment to load
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
-
-            # Check if we got redirected to login
-            if is_login_page(page.url):
-                log("Authentication required to access workspace.")
-                if not handle_authentication(page):
-                    return 1
+                # Maybe we're already in the workspace
+                log("Could not find 'Create with Google Flow' button.")
+                log("Checking if we're already in the workspace...")
+                take_screenshot(page, "current_state", FLOW_SCREENSHOTS_DIR)
+            else:
+                # Click it
+                log("Clicking 'Create with Google Flow'...")
+                create_button.click()
+                log("Waiting for workspace to load...")
                 page.wait_for_timeout(5000)
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
 
+            # --- Step 3: Check for auth redirect after clicking ---
+            if is_login_page(page.url):
+                log("")
+                log("Authentication required for workspace.")
+                log("Please sign in in the Chrome window...")
+                log(f"Waiting up to {AUTH_TIMEOUT} seconds...")
+
+                start_time = time.time()
+                while time.time() - start_time < AUTH_TIMEOUT:
+                    time.sleep(POLL_INTERVAL)
+                    if not is_login_page(page.url):
+                        log("Authentication complete!")
+                        page.wait_for_timeout(5000)
+                        break
+                else:
+                    log("Authentication timed out.")
+                    take_screenshot(page, "workspace_auth_timeout", FLOW_SCREENSHOTS_DIR)
+                    return 1
+
+            # --- Step 4: Record workspace state ---
             workspace_url = page.url
             workspace_title = page.title()
             log(f"Workspace URL: {workspace_url}")
             log(f"Workspace title: {workspace_title}")
 
-            # --- Step 4: Capture workspace screenshot ---
+            # --- Step 5: Capture screenshot ---
             log("")
             log("Capturing workspace interface...")
             screenshot_path = take_screenshot(page, "flow_workspace", FLOW_SCREENSHOTS_DIR)
 
-            # --- Step 5: Discover workspace UI elements ---
+            # --- Step 6: Discover UI elements ---
             log("")
             log("Discovering workspace UI elements...")
             elements = discover_ui_elements(page)
@@ -287,12 +285,12 @@ def main() -> int:
                         parts.append(f"data-testid='{el['dataTestId']}'")
                     log(" | ".join(parts))
             else:
-                log("No interactive elements found in workspace.")
+                log("No interactive elements found.")
 
-            # --- Step 6: Report results ---
+            # --- Step 7: Report ---
             log("")
             log("=" * 50)
-            log("TEST PASSED - Flow workspace accessible")
+            log("TEST PASSED - Flow workspace accessible via CDP")
             log(f"  Landing URL: {landing_url}")
             log(f"  Workspace URL: {workspace_url}")
             log(f"  Workspace Title: {workspace_title}")
@@ -306,15 +304,15 @@ def main() -> int:
         except Exception as e:
             log(f"UNEXPECTED ERROR: {type(e).__name__}: {e}")
             try:
-                page = get_page(context)
-                take_screenshot(page, "unexpected_error", FLOW_SCREENSHOTS_DIR)
+                take_screenshot(get_page_from_browser(browser), "unexpected_error", FLOW_SCREENSHOTS_DIR)
             except Exception:
                 pass
             return 1
 
         finally:
-            log("Closing browser...")
-            context.close()
+            # Disconnect (don't close — Chrome stays running)
+            log("Disconnecting from Chrome (Chrome stays open)...")
+            browser.close()
 
 
 if __name__ == "__main__":

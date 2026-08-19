@@ -12,6 +12,7 @@ import os
 from app.flow.config import (
     FLOW_URL,
     CHROME_EXECUTABLE,
+    CDP_PORT,
     BROWSER_PROFILE_DIR,
     FLOW_TEST_OUTPUT_DIR,
     FLOW_SCREENSHOTS_DIR,
@@ -99,6 +100,38 @@ class TestChromeConfig:
     def test_chrome_executable_path_looks_valid(self):
         """CHROME_EXECUTABLE should point to a chrome.exe path."""
         assert "chrome" in CHROME_EXECUTABLE.lower()
+
+    def test_cdp_port_is_valid(self):
+        """CDP_PORT should be a valid port number."""
+        assert isinstance(CDP_PORT, int)
+        assert 1024 <= CDP_PORT <= 65535
+
+    def test_cdp_port_default(self):
+        """CDP_PORT should default to 9222."""
+        assert CDP_PORT == 9222
+
+
+class TestCDPConnection:
+    """Tests for CDP connection helpers."""
+
+    def test_get_chrome_launch_command(self):
+        """get_chrome_launch_command should return a valid command list."""
+        from app.flow.browser import get_chrome_launch_command
+        cmd = get_chrome_launch_command()
+        assert isinstance(cmd, list)
+        assert len(cmd) > 0
+        assert CHROME_EXECUTABLE in cmd[0]
+        # Should contain the debugging port flag
+        port_flag = f"--remote-debugging-port={CDP_PORT}"
+        assert port_flag in cmd
+        # Should contain user-data-dir flag
+        assert any("--user-data-dir=" in arg for arg in cmd)
+
+    def test_is_chrome_running_returns_bool(self):
+        """is_chrome_running_with_debugging should return a boolean."""
+        from app.flow.browser import is_chrome_running_with_debugging
+        result = is_chrome_running_with_debugging()
+        assert isinstance(result, bool)
 
 
 class TestErrorPageDetection:

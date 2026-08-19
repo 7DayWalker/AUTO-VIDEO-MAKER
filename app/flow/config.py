@@ -24,6 +24,12 @@ CHROME_EXECUTABLE = os.getenv(
     r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 )
 
+# ----- Chrome DevTools Protocol (CDP) -----
+
+# Port for Chrome remote debugging (localhost only).
+# Playwright attaches to Chrome via this port after user authenticates manually.
+CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
+
 # ----- Browser Profile -----
 
 # Dedicated persistent browser profile for automation.

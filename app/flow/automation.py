@@ -29,7 +29,7 @@ from app.flow.config import (
     FLOW_TEST_OUTPUT_DIR,
     FLOW_SCREENSHOTS_DIR,
 )
-from app.flow.browser import log, take_screenshot, get_page
+from app.flow.browser import log, take_screenshot, get_page_from_browser as get_page
 
 
 class FlowAutomationError(Exception):
