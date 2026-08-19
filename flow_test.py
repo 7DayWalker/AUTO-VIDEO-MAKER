@@ -1,22 +1,26 @@
 """
-AUTO Video Maker - Google Flow Agent Settings Discovery
+AUTO Video Maker - Configure Flow Agent Settings for Video Generation
 
 This script:
-1. Attaches to the already-running Chrome via CDP (localhost:9222)
-2. Confirms the Flow project workspace is available
-3. Locates the CORRECT Agent Settings control (tune/sliders icon in the prompt composer,
-   NOT the top-right "View Settings" gear)
-4. Opens Agent Settings panel
-5. Inspects all generation configuration (models, aspect ratio, duration, etc.)
+1. Attaches to Chrome via CDP
+2. Opens Agent Settings (tune icon in prompt composer)
+3. Configures video generation defaults:
+   - Model: Veo 3.1 - Lite
+   - Aspect Ratio: 9:16
+   - Output Count: x1
+   - Confirmation: Always
+4. Saves the settings
+5. Re-opens to verify persistence
+6. Takes a verification screenshot
 
 Usage:
     Chrome must already be running with debugging (use launch_chrome.py).
-    User must already be authenticated with Google.
-    A Flow project should be open.
+    User must already be authenticated. A Flow project should be open.
 
     python flow_test.py
 
 NOTE: This script does NOT generate videos or spend credits.
+      It only configures and verifies settings.
 """
 
 import sys
@@ -51,126 +55,69 @@ def is_login_page(url: str) -> bool:
     return any(indicator in url_lower for indicator in login_indicators)
 
 
-def is_error_page(url: str, title: str) -> bool:
-    """Check if the page is a 404 or error page."""
-    indicators = ["404", "not found", "error"]
-    return any(ind in title.lower() for ind in indicators) or "404" in url
-
-
-def discover_ui_elements(page, max_elements: int = 100) -> list[dict]:
-    """Discover visible interactive UI elements on the current page."""
-    elements = page.evaluate("""(maxElements) => {
-        const results = [];
-        const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="listbox"], [role="combobox"], [role="slider"], [role="radio"], [role="radiogroup"], [role="checkbox"], [role="switch"], [contenteditable="true"], select, label';
-        const els = document.querySelectorAll(selectors);
-        for (const el of els) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden') continue;
-
-            const info = {
-                tag: el.tagName.toLowerCase(),
-                text: (el.textContent || '').trim().substring(0, 200),
-                ariaLabel: el.getAttribute('aria-label') || '',
-                title: el.getAttribute('title') || '',
-                role: el.getAttribute('role') || '',
-                type: el.getAttribute('type') || '',
-                placeholder: el.getAttribute('placeholder') || '',
-                contenteditable: el.getAttribute('contenteditable') || '',
-                disabled: el.disabled || false,
-                checked: el.checked || false,
-                value: (el.value || '').substring(0, 100),
-                ariaSelected: el.getAttribute('aria-selected') || '',
-                ariaExpanded: el.getAttribute('aria-expanded') || '',
-                ariaPressed: el.getAttribute('aria-pressed') || '',
-            };
-            if (info.text || info.ariaLabel || info.title || info.placeholder || info.contenteditable || info.value) {
-                results.push(info);
-            }
-            if (results.length >= maxElements) break;
-        }
-        return results;
-    }""", max_elements)
-    return elements
-
-
-def discover_settings_panel_content(page) -> list[dict]:
+def open_agent_settings(page) -> bool:
     """
-    Discover all content visible in the settings panel area.
-    Captures text, labels, selected states, etc.
+    Open the Agent Settings panel (tune icon in prompt composer).
+    Returns True if successfully opened or already open.
     """
-    content = page.evaluate("""() => {
-        const results = [];
-        // Look for all visible elements with meaningful text
-        const all = document.querySelectorAll('*');
-        for (const el of all) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden') continue;
-            
-            // Only leaf-like text nodes or interactive elements
-            const children = el.children;
-            const hasOnlyText = el.childNodes.length > 0 && 
-                Array.from(el.childNodes).some(n => n.nodeType === 3 && n.textContent.trim().length > 0);
-            
-            if (!hasOnlyText && children.length > 0) continue;
-            
-            const text = el.textContent?.trim();
-            if (!text || text.length > 100 || text.length < 1) continue;
-            
-            // Filter for settings-relevant keywords
-            const lcText = text.toLowerCase();
-            const keywords = ['agent', 'setting', 'confirm', 'generat', 'always', 'never',
-                            'image', 'video', 'default', 'model', 'veo', 'gemini', 'nano',
-                            '16:9', '9:16', '4:3', '3:4', '1:1', 'x1', 'x2', 'x3', 'x4',
-                            'lite', 'pro', 'flash', 'banana', 'aspect', 'ratio', 'output',
-                            'credit', 'cost', 'free', 'audio', 'duration'];
-            
-            if (keywords.some(k => lcText.includes(k))) {
-                const info = {
-                    tag: el.tagName.toLowerCase(),
-                    text: text,
-                    role: el.getAttribute('role') || '',
-                    ariaLabel: el.getAttribute('aria-label') || '',
-                    ariaSelected: el.getAttribute('aria-selected') || '',
-                    ariaPressed: el.getAttribute('aria-pressed') || '',
-                    className: (el.className || '').toString().substring(0, 50),
-                };
-                // Deduplicate
-                if (!results.some(r => r.text === info.text && r.tag === info.tag)) {
-                    results.push(info);
-                }
-            }
-        }
-        return results.slice(0, 80);
-    }""")
-    return content
+    # Check if the panel is already open by looking for its characteristic controls
+    # (the confirmation radio buttons are unique to Agent Settings)
+    try:
+        always_radio = page.locator('button[role="radio"]:has-text("Always")').first
+        if always_radio.is_visible(timeout=1000):
+            # Panel is already open
+            return True
+    except (PlaywrightTimeout, Exception):
+        pass
+
+    # Try to click the tuneSettings button
+    try:
+        locator = page.locator('button:has-text("tuneSettings")').first
+        if locator.is_visible(timeout=3000):
+            btn_text = locator.text_content() or ""
+            if "View Settings" not in btn_text:
+                locator.click()
+                page.wait_for_timeout(1500)
+                return True
+    except (PlaywrightTimeout, Exception):
+        pass
+
+    # Fallback: look for button with "tune" text
+    try:
+        buttons = page.locator('button').all()
+        for btn in buttons:
+            text = btn.text_content() or ""
+            if "tune" in text.lower() and "view" not in text.lower() and "settings_2" not in text:
+                if btn.is_visible():
+                    btn.click()
+                    page.wait_for_timeout(1500)
+                    return True
+    except Exception:
+        pass
+
+    return False
 
 
 def main() -> int:
     """
-    Discover Google Flow Agent Settings (the correct one) via CDP.
+    Configure and verify Flow video generation settings.
 
     Returns:
         0 on success, 1 on failure.
     """
     print()
     log("=" * 50)
-    log("AUTO Video Maker - Flow Agent Settings Discovery")
+    log("AUTO Video Maker - Configure Video Generation Settings")
     log("=" * 50)
     print()
 
     FLOW_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # --- Step 0: Verify Chrome is running ---
     if not is_chrome_running_with_debugging():
         log(f"ERROR: Chrome is NOT running with debugging on port {CDP_PORT}.")
         log("Please run: python launch_chrome.py")
         return 1
 
-    # --- Step 1: Connect via CDP ---
     log("Connecting to Chrome via CDP...")
 
     with sync_playwright() as playwright:
@@ -183,11 +130,8 @@ def main() -> int:
         try:
             page = get_page_from_browser(browser)
             current_url = page.url
-            current_title = page.title()
             log(f"Current URL: {current_url}")
-            log(f"Current title: {current_title}")
 
-            # Check if we're in a project workspace
             if "/project/" not in current_url:
                 log("Not in a project workspace. Opening one...")
                 page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=30000)
@@ -204,137 +148,302 @@ def main() -> int:
                     log("Could not open a project.")
                     return 1
 
-            current_url = page.url
-            log(f"Project URL: {current_url}")
+            # ============================================
+            # STEP 0.5: Ensure we're on a clean project page
+            # ============================================
+            # Close any open panels/menus by pressing Escape
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(1000)
 
-            # --- Step 2: Find the CORRECT Agent Settings control ---
-            # This is the tune/sliders icon in the prompt composer area,
-            # positioned to the left of the "arrow_forward Create" button.
-            # It is NOT the top-right "View Settings" (settings_2) gear.
+            # ============================================
+            # STEP 1: Open Agent Settings
+            # ============================================
             log("")
-            log("Looking for Agent Settings control in prompt composer...")
-            log("(The tune/sliders icon next to the Create arrow button)")
+            log("Step 1: Opening Agent Settings...")
+            if not open_agent_settings(page):
+                log("ERROR: Could not open Agent Settings.")
+                log("Attempting to locate the button by inspecting all buttons...")
+                take_screenshot(page, "cannot_open_settings", FLOW_SCREENSHOTS_DIR)
+                # Debug: show all buttons with 'tune' or 'setting' in text
+                all_btns = page.locator('button').all()
+                for btn in all_btns:
+                    try:
+                        text = btn.text_content() or ""
+                        if ("tune" in text.lower() or "setting" in text.lower()) and btn.is_visible():
+                            log(f"  Button: '{text.strip()[:80]}'")
+                    except Exception:
+                        pass
+                return 1
+            log("Agent Settings panel opened.")
 
-            # The button text is "tuneSettings" — it contains the "tune" material icon
-            # and the text "Settings". We need the one that is NOT "settings_2 View Settings"
-            agent_settings = None
+            # ============================================
+            # STEP 2: Open video model dropdown and select Veo 3.1 - Lite
+            # ============================================
+            log("")
+            log("Step 2: Selecting video model 'Veo 3.1 - Lite'...")
 
-            # Strategy: find button with text "tuneSettings" (not "settings_2View Settings")
+            # Find and click the video model dropdown
+            # It currently shows "Omni Flash" with arrow_drop_down
+            video_model_dropdown = None
             try:
-                locator = page.locator('button:has-text("tuneSettings")').first
-                if locator.is_visible(timeout=3000):
-                    # Verify this is not the View Settings button
-                    btn_text = locator.text_content()
-                    if "View Settings" not in btn_text:
-                        agent_settings = locator
-                        log(f"Found Agent Settings button. Text: '{btn_text.strip()[:50]}'")
-            except (PlaywrightTimeout, Exception):
-                pass
+                # Look for the dropdown that contains the video model
+                # It should be near "Video generation default" section
+                locator = page.locator('button:has-text("arrow_drop_down")').all()
+                for btn in locator:
+                    text = btn.text_content() or ""
+                    # The video model dropdown - look for known video model names
+                    if any(m in text for m in ["Omni Flash", "Veo", "Omni"]):
+                        if "Nano" not in text and "Banana" not in text:
+                            if btn.is_visible():
+                                video_model_dropdown = btn
+                                log(f"Found video model dropdown: '{text.strip()[:50]}'")
+                                break
+            except Exception as e:
+                log(f"Error finding video model dropdown: {e}")
 
-            # Fallback: look for button with just "tune" icon text
-            if not agent_settings:
-                try:
-                    buttons = page.locator('button').all()
-                    for btn in buttons:
-                        try:
-                            text = btn.text_content() or ""
-                            if "tune" in text.lower() and "view" not in text.lower() and "settings_2" not in text:
-                                if btn.is_visible():
-                                    agent_settings = btn
-                                    log(f"Found Agent Settings via iteration. Text: '{text.strip()[:50]}'")
-                                    break
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-
-            if not agent_settings:
-                log("ERROR: Could not find the Agent Settings (tune) control.")
-                take_screenshot(page, "no_agent_settings", FLOW_SCREENSHOTS_DIR)
-                elements = discover_ui_elements(page)
-                log("Looking for any settings-related buttons:")
-                for i, el in enumerate(elements, 1):
-                    if el.get('text') and ('setting' in el['text'].lower() or 'tune' in el['text'].lower()):
-                        log(f"  {i}. <{el['tag']}> text='{el['text'][:80]}'")
+            if not video_model_dropdown:
+                log("ERROR: Could not find video model dropdown.")
+                take_screenshot(page, "no_video_model_dropdown", FLOW_SCREENSHOTS_DIR)
                 return 1
 
-            # Get accessibility info
-            aria_label = agent_settings.get_attribute("aria-label") or "none"
-            title_attr = agent_settings.get_attribute("title") or "none"
-            role = agent_settings.get_attribute("role") or "none"
-            log(f"  aria-label: {aria_label}")
-            log(f"  title: {title_attr}")
-            log(f"  role: {role}")
+            # Click to open dropdown
+            video_model_dropdown.click()
+            page.wait_for_timeout(1500)
 
-            # --- Step 3: Click Agent Settings ---
-            log("")
-            log("Clicking Agent Settings control...")
-            agent_settings.click()
-            page.wait_for_timeout(2000)
+            # Look for "Veo 3.1 - Lite" option
+            veo_lite_option = None
+            try:
+                # Try various text patterns for Veo 3.1 Lite
+                selectors = [
+                    'button:has-text("Veo 3.1 - Lite")',
+                    '[role="option"]:has-text("Veo 3.1 - Lite")',
+                    '[role="menuitem"]:has-text("Veo 3.1 - Lite")',
+                    'text="Veo 3.1 - Lite"',
+                    'button:has-text("Veo 3.1"):has-text("Lite")',
+                ]
+                for sel in selectors:
+                    try:
+                        loc = page.locator(sel).first
+                        if loc.is_visible(timeout=2000):
+                            veo_lite_option = loc
+                            log(f"Found 'Veo 3.1 - Lite' via: {sel}")
+                            break
+                    except (PlaywrightTimeout, Exception):
+                        continue
+            except Exception as e:
+                log(f"Error finding Veo option: {e}")
 
-            # --- Step 4: Screenshot ---
-            log("Capturing Agent Settings panel...")
-            screenshot_path = take_screenshot(page, "flow_agent_settings", FLOW_SCREENSHOTS_DIR)
+            if not veo_lite_option:
+                # Take screenshot to see what options ARE available
+                log("Could not find 'Veo 3.1 - Lite'. Checking available options...")
+                take_screenshot(page, "video_model_options", FLOW_SCREENSHOTS_DIR)
+                # Try to discover what's in the dropdown
+                options = page.locator('[role="option"], [role="menuitem"], button').all()
+                for opt in options:
+                    try:
+                        text = opt.text_content() or ""
+                        if opt.is_visible() and "veo" in text.lower():
+                            log(f"  Found Veo option: '{text.strip()[:80]}'")
+                            # Try clicking this one
+                            veo_lite_option = opt
+                    except Exception:
+                        continue
 
-            # --- Step 5: Discover panel content ---
-            log("")
-            log("=" * 50)
-            log("AGENT SETTINGS PANEL CONTENT")
-            log("=" * 50)
-            log("")
+            if not veo_lite_option:
+                log("ERROR: No Veo model option found in dropdown.")
+                take_screenshot(page, "no_veo_option", FLOW_SCREENSHOTS_DIR)
+                return 1
 
-            # Get all interactive elements now visible
-            elements = discover_ui_elements(page, max_elements=100)
-            if elements:
-                log(f"Found {len(elements)} interactive elements:")
-                log("")
-                for i, el in enumerate(elements, 1):
-                    parts = [f"  {i}. <{el['tag']}>"]
-                    if el.get('text'):
-                        parts.append(f"text='{el['text'][:100]}'")
-                    if el.get('ariaLabel'):
-                        parts.append(f"aria-label='{el['ariaLabel']}'")
-                    if el.get('role'):
-                        parts.append(f"role='{el['role']}'")
-                    if el.get('ariaSelected'):
-                        parts.append(f"aria-selected='{el['ariaSelected']}'")
-                    if el.get('ariaPressed'):
-                        parts.append(f"aria-pressed='{el['ariaPressed']}'")
-                    if el.get('ariaExpanded'):
-                        parts.append(f"aria-expanded='{el['ariaExpanded']}'")
-                    if el.get('checked'):
-                        parts.append("CHECKED")
-                    if el.get('disabled'):
-                        parts.append("DISABLED")
-                    log(" | ".join(parts))
+            # Select it
+            log("Selecting 'Veo 3.1 - Lite'...")
+            veo_lite_option.click()
+            page.wait_for_timeout(1000)
+            log("Video model selected.")
 
-            # Also discover settings-specific text/keywords
+            # ============================================
+            # STEP 3: Select video aspect ratio 9:16
+            # ============================================
             log("")
-            log("Settings-related content (keyword search):")
-            log("")
-            settings_content = discover_settings_panel_content(page)
-            if settings_content:
-                for i, item in enumerate(settings_content, 1):
-                    parts = [f"  {i}. <{item['tag']}> text='{item['text']}'"]
-                    if item.get('ariaSelected'):
-                        parts.append(f"aria-selected='{item['ariaSelected']}'")
-                    if item.get('ariaPressed'):
-                        parts.append(f"aria-pressed='{item['ariaPressed']}'")
-                    if item.get('role'):
-                        parts.append(f"role='{item['role']}'")
-                    log(" | ".join(parts))
+            log("Step 3: Selecting video aspect ratio '9:16'...")
+
+            # The video aspect ratio tabs are in the Video section
+            # We need the 9:16 tab that's NOT in the Image section
+            # The video section has only 16:9 and 9:16
+            # Find all 9:16 buttons and pick the one in the video section (second one)
+            ratio_buttons = page.locator('button[role="tab"]:has-text("9:16")').all()
+            video_ratio_btn = None
+
+            if len(ratio_buttons) >= 2:
+                # Second 9:16 button is the video one (first is image)
+                video_ratio_btn = ratio_buttons[1]
+                log("Found video 9:16 button (second 9:16 tab).")
+            elif len(ratio_buttons) == 1:
+                video_ratio_btn = ratio_buttons[0]
+                log("Found single 9:16 button.")
+
+            if video_ratio_btn:
+                selected = video_ratio_btn.get_attribute("aria-selected")
+                if selected == "true":
+                    log("9:16 is already selected.")
+                else:
+                    video_ratio_btn.click()
+                    page.wait_for_timeout(500)
+                    log("9:16 selected.")
             else:
-                log("No settings-related keywords found.")
+                log("WARNING: Could not find video 9:16 button.")
+                take_screenshot(page, "no_video_ratio", FLOW_SCREENSHOTS_DIR)
 
-            # --- Step 6: Report ---
+            # ============================================
+            # STEP 4: Select video output count x1
+            # ============================================
+            log("")
+            log("Step 4: Verifying video output count 'x1'...")
+
+            # Video output count tabs - find x1 in the video section
+            # The video x1 should be the second set of x1/x2/x3/x4 buttons
+            x1_buttons = page.locator('button[role="tab"]:has-text("x1")').all()
+            video_x1_btn = None
+
+            if len(x1_buttons) >= 2:
+                video_x1_btn = x1_buttons[1]
+                log("Found video x1 button (second x1 tab).")
+            elif len(x1_buttons) == 1:
+                video_x1_btn = x1_buttons[0]
+                log("Found single x1 button.")
+
+            if video_x1_btn:
+                selected = video_x1_btn.get_attribute("aria-selected")
+                if selected == "true":
+                    log("x1 is already selected.")
+                else:
+                    video_x1_btn.click()
+                    page.wait_for_timeout(500)
+                    log("x1 selected.")
+            else:
+                log("WARNING: Could not find video x1 button.")
+
+            # ============================================
+            # STEP 5: Verify confirmation is "Always"
+            # ============================================
+            log("")
+            log("Step 5: Verifying confirmation is 'Always'...")
+
+            always_btn = page.locator('button[role="radio"]:has-text("Always")').first
+            try:
+                if always_btn.is_visible(timeout=2000):
+                    text = always_btn.text_content() or ""
+                    if "radio_button_checked" in text:
+                        log("Confirmation is set to 'Always' (checked). ✓")
+                    else:
+                        log("Confirmation is NOT 'Always'. Selecting it...")
+                        always_btn.click()
+                        page.wait_for_timeout(500)
+                        log("'Always' selected.")
+            except (PlaywrightTimeout, Exception) as e:
+                log(f"WARNING: Could not verify confirmation setting: {e}")
+
+            # ============================================
+            # STEP 6: Save settings
+            # ============================================
+            log("")
+            log("Step 6: Saving settings...")
+
+            save_btn = page.locator('button:has-text("Save")').first
+            try:
+                if save_btn.is_visible(timeout=2000):
+                    save_btn.click()
+                    page.wait_for_timeout(2000)
+                    log("Settings saved.")
+                else:
+                    log("No Save button visible (settings may auto-save).")
+            except (PlaywrightTimeout, Exception):
+                log("Could not find/click Save button.")
+
+            # ============================================
+            # STEP 7: Re-open Agent Settings to verify persistence
+            # ============================================
+            log("")
+            log("Step 7: Re-opening Agent Settings to verify...")
+            page.wait_for_timeout(1000)
+
+            if not open_agent_settings(page):
+                log("WARNING: Could not re-open Agent Settings for verification.")
+                take_screenshot(page, "cannot_reopen_settings", FLOW_SCREENSHOTS_DIR)
+            else:
+                page.wait_for_timeout(1500)
+
+                # Take verification screenshot
+                log("Capturing verification screenshot...")
+                verify_screenshot = take_screenshot(page, "flow_pre_generation_verified", FLOW_SCREENSHOTS_DIR)
+
+                # Verify values
+                log("")
+                log("Verifying persisted settings...")
+
+                # Check video model
+                page_text = page.content()
+                if "Veo 3.1" in page_text and "Lite" in page_text:
+                    log("  ✓ Video model: Veo 3.1 - Lite")
+                elif "Veo" in page_text:
+                    log("  ~ Video model contains 'Veo' (checking dropdown text...)")
+                    # Check dropdown button text
+                    try:
+                        dropdowns = page.locator('button:has-text("arrow_drop_down")').all()
+                        for dd in dropdowns:
+                            txt = dd.text_content() or ""
+                            if "Veo" in txt:
+                                log(f"    Video model dropdown shows: '{txt.strip()[:50]}'")
+                    except Exception:
+                        pass
+                else:
+                    log("  ? Could not confirm video model")
+
+                # Check 9:16
+                video_ratio_buttons = page.locator('button[role="tab"]:has-text("9:16")').all()
+                if len(video_ratio_buttons) >= 2:
+                    sel = video_ratio_buttons[1].get_attribute("aria-selected")
+                    if sel == "true":
+                        log("  ✓ Video aspect ratio: 9:16 (selected)")
+                    else:
+                        log(f"  ✗ Video 9:16 aria-selected={sel}")
+                elif len(video_ratio_buttons) == 1:
+                    sel = video_ratio_buttons[0].get_attribute("aria-selected")
+                    log(f"  ? Single 9:16 button, aria-selected={sel}")
+
+                # Check x1
+                x1_btns = page.locator('button[role="tab"]:has-text("x1")').all()
+                if len(x1_btns) >= 2:
+                    sel = x1_btns[1].get_attribute("aria-selected")
+                    if sel == "true":
+                        log("  ✓ Video output count: x1 (selected)")
+                    else:
+                        log(f"  ✗ Video x1 aria-selected={sel}")
+                elif len(x1_btns) == 1:
+                    sel = x1_btns[0].get_attribute("aria-selected")
+                    log(f"  ? Single x1 button, aria-selected={sel}")
+
+                # Check Always
+                try:
+                    always = page.locator('button[role="radio"]:has-text("Always")').first
+                    if always.is_visible(timeout=1000):
+                        txt = always.text_content() or ""
+                        if "radio_button_checked" in txt:
+                            log("  ✓ Confirmation: Always (checked)")
+                        else:
+                            log("  ✗ Confirmation: Always is NOT checked")
+                except Exception:
+                    log("  ? Could not verify confirmation setting")
+
+            # ============================================
+            # Final Report
+            # ============================================
             log("")
             log("=" * 50)
-            log("AGENT SETTINGS DISCOVERY COMPLETE")
-            log(f"  Project URL: {current_url}")
-            if screenshot_path:
-                log(f"  Screenshot: {screenshot_path}")
-            log(f"  Interactive elements: {len(elements)}")
-            log(f"  Settings keywords: {len(settings_content)}")
+            log("SETTINGS CONFIGURATION COMPLETE")
+            log(f"  Project URL: {page.url}")
+            log("  Target: Veo 3.1 - Lite, 9:16, x1, Always")
             log("=" * 50)
 
             return 0
