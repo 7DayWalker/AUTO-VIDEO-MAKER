@@ -182,13 +182,19 @@ def create_test_voiceover(
     
     Uses a lower frequency to simulate speech-like audio.
     """
-    # Use multiple frequencies to create a more complex sound
+    # Simple sine wave at speech-like frequency
+    # Use libmp3lame for .mp3 output
+    ext = output_path.suffix.lower()
+    if ext == ".mp3":
+        codec = "libmp3lame"
+    else:
+        codec = AUDIO_CODEC
+    
     args = [
         "-y",
         "-f", "lavfi",
         "-i", f"sine=frequency=200:duration={duration}",
-        "-af", "volume=0.5,lowpass=f=3000",
-        "-c:a", AUDIO_CODEC,
+        "-c:a", codec,
         "-b:a", "128k",
         str(output_path),
     ]
@@ -206,6 +212,13 @@ def create_test_music(
     
     Uses a chord-like combination of frequencies.
     """
+    # Use libmp3lame for .mp3 output
+    ext = output_path.suffix.lower()
+    if ext == ".mp3":
+        codec = "libmp3lame"
+    else:
+        codec = AUDIO_CODEC
+    
     # Create a simple chord (C major: C4, E4, G4)
     args = [
         "-y",
@@ -217,7 +230,7 @@ def create_test_music(
         "-i", f"sine=frequency=392.00:duration={duration}",  # G4
         "-filter_complex", "[0:a][1:a][2:a]amix=inputs=3:normalize=0,volume=0.3[out]",
         "-map", "[out]",
-        "-c:a", AUDIO_CODEC,
+        "-c:a", codec,
         "-b:a", "128k",
         str(output_path),
     ]
