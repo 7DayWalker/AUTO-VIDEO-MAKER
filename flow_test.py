@@ -1,22 +1,22 @@
 """
-AUTO Video Maker - Google Flow Generation Settings Discovery
+AUTO Video Maker - Google Flow Create Menu Discovery
 
 This script:
 1. Attaches to the already-running Chrome via CDP (localhost:9222)
 2. Confirms the Flow project workspace is available
-3. Opens the Settings panel
-4. Inspects all generation settings (models, duration, aspect ratio, etc.)
-5. Reports findings
+3. Locates and opens the "add_2 Create" dropdown menu
+4. Inspects all menu items/options
+5. Reports creation modes and generation settings exposed
 
 Usage:
     Chrome must already be running with debugging (use launch_chrome.py).
     User must already be authenticated with Google.
-    A Flow project must be open.
+    A Flow project should be open.
 
     python flow_test.py
 
 NOTE: This script does NOT generate videos or spend credits.
-      It only discovers settings.
+      It only discovers the Create menu options.
 """
 
 import sys
@@ -58,12 +58,10 @@ def is_error_page(url: str, title: str) -> bool:
 
 
 def discover_ui_elements(page, max_elements: int = 100) -> list[dict]:
-    """
-    Discover visible interactive UI elements on the current page.
-    """
+    """Discover visible interactive UI elements on the current page."""
     elements = page.evaluate("""(maxElements) => {
         const results = [];
-        const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [role="option"], [role="listbox"], [role="combobox"], [role="slider"], [role="radio"], [role="checkbox"], [role="switch"], [contenteditable="true"], select, label';
+        const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="listbox"], [role="combobox"], [role="slider"], [role="radio"], [role="checkbox"], [role="switch"], [contenteditable="true"], select, label, li';
         const els = document.querySelectorAll(selectors);
         for (const el of els) {
             const rect = el.getBoundingClientRect();
@@ -87,6 +85,7 @@ def discover_ui_elements(page, max_elements: int = 100) -> list[dict]:
                 value: (el.value || '').substring(0, 100),
                 ariaSelected: el.getAttribute('aria-selected') || '',
                 ariaExpanded: el.getAttribute('aria-expanded') || '',
+                ariaHaspopup: el.getAttribute('aria-haspopup') || '',
             };
             if (info.text || info.ariaLabel || info.title || info.placeholder || info.contenteditable || info.value) {
                 results.push(info);
@@ -98,66 +97,71 @@ def discover_ui_elements(page, max_elements: int = 100) -> list[dict]:
     return elements
 
 
-def discover_panel_elements(page, panel_selector: str = None, max_elements: int = 100) -> list[dict]:
+def discover_menu_items(page) -> list[dict]:
     """
-    Discover elements within a specific panel/popover area, or the full page if no selector.
-    Focus on settings-related controls.
+    Discover items that appear to be part of a dropdown/popover menu.
+    Looks for elements that appeared after the dropdown opened.
     """
-    # Get all visible text content that might be settings labels/values
-    text_content = page.evaluate("""() => {
+    items = page.evaluate("""() => {
         const results = [];
-        // Get all text nodes that look like settings
-        const walker = document.createTreeWalker(
-            document.body,
-            NodeFilter.SHOW_ELEMENT,
-            null,
-            false
-        );
-        let node;
-        while (node = walker.nextNode()) {
-            const rect = node.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-            const style = window.getComputedStyle(node);
-            if (style.display === 'none' || style.visibility === 'hidden') continue;
-
-            const text = node.textContent?.trim();
-            if (!text || text.length > 200 || text.length < 2) continue;
-
-            // Look for settings-like content
-            const lcText = text.toLowerCase();
-            const keywords = ['model', 'veo', 'gemini', 'duration', 'aspect', 'ratio', 'resolution',
-                            'quality', 'output', 'count', 'credit', 'cost', 'audio', 'video',
-                            'image', 'mode', 'style', 'fps', 'frame', '9:16', '16:9', '1:1',
-                            'portrait', 'landscape', 'square', 'ingredient', 'reference',
-                            'seconds', 'sec', '4s', '5s', '6s', '8s', 'flash', 'pro'];
-            if (keywords.some(k => lcText.includes(k))) {
-                const info = {
-                    tag: node.tagName.toLowerCase(),
-                    text: text.substring(0, 150),
-                    ariaLabel: node.getAttribute('aria-label') || '',
-                    role: node.getAttribute('role') || '',
-                };
-                // Deduplicate
-                if (!results.some(r => r.text === info.text)) {
-                    results.push(info);
-                }
+        // Look for menu-like containers (popover, menu, listbox, dialog)
+        const menuSelectors = '[role="menu"], [role="listbox"], [role="dialog"], [data-floating-ui-portal], [class*="popover"], [class*="dropdown"], [class*="menu"]';
+        const menus = document.querySelectorAll(menuSelectors);
+        
+        // Also look for any newly visible interactive elements
+        const allInteractive = 'button, [role="menuitem"], [role="option"], [role="menuitemradio"], li, a';
+        
+        for (const menu of menus) {
+            const items_in_menu = menu.querySelectorAll(allInteractive);
+            for (const el of items_in_menu) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                
+                results.push({
+                    tag: el.tagName.toLowerCase(),
+                    text: (el.textContent || '').trim().substring(0, 150),
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    title: el.getAttribute('title') || '',
+                    role: el.getAttribute('role') || '',
+                    disabled: el.disabled || false,
+                });
             }
         }
+        
+        // If no menus found, look for any element with menu-related roles
+        if (results.length === 0) {
+            const roleItems = document.querySelectorAll('[role="menuitem"], [role="option"], [role="menuitemradio"]');
+            for (const el of roleItems) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                results.push({
+                    tag: el.tagName.toLowerCase(),
+                    text: (el.textContent || '').trim().substring(0, 150),
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    title: el.getAttribute('title') || '',
+                    role: el.getAttribute('role') || '',
+                    disabled: el.disabled || false,
+                });
+            }
+        }
+        
         return results.slice(0, 50);
     }""")
-    return text_content
+    return items
 
 
 def main() -> int:
     """
-    Discover Google Flow generation settings via CDP.
+    Discover the Google Flow Create menu options via CDP.
 
     Returns:
         0 on success, 1 on failure.
     """
     print()
     log("=" * 50)
-    log("AUTO Video Maker - Flow Generation Settings Discovery")
+    log("AUTO Video Maker - Flow Create Menu Discovery")
     log("=" * 50)
     print()
 
@@ -188,134 +192,144 @@ def main() -> int:
 
             # Check if we're in a project workspace
             if "/project/" not in current_url:
-                log("Not in a project workspace. Looking for a project to open...")
-                # Try to navigate to Flow and open a new project
+                log("Not in a project workspace. Opening a new project...")
                 page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(3000)
 
                 if is_login_page(page.url):
-                    log("ERROR: Authentication expired. Please sign in again.")
+                    log("ERROR: Authentication expired.")
                     return 1
 
-                # Click New project
                 try:
                     new_proj = page.locator('button:has-text("New project")').first
                     if new_proj.is_visible(timeout=5000):
                         new_proj.click()
                         page.wait_for_timeout(5000)
                 except Exception:
-                    log("Could not find New project button.")
+                    log("Could not open a project.")
                     take_screenshot(page, "no_project", FLOW_SCREENSHOTS_DIR)
                     return 1
 
             current_url = page.url
-            current_title = page.title()
             log(f"Project URL: {current_url}")
-            log(f"Project title: {current_title}")
 
-            # --- Step 2: Find and click Settings ---
+            # --- Step 2: Find the Create dropdown ---
             log("")
-            log("Looking for 'Settings' control...")
+            log("Looking for 'add_2 Create' dropdown control...")
 
-            settings_button = None
-            settings_selectors = [
-                'button:has-text("Settings")',
-                'button:has-text("tuneSettings")',
-                'button:has-text("tune")',
-                '[aria-label*="Settings"]',
-                '[aria-label*="settings"]',
-                '[title*="Settings"]',
+            create_dropdown = None
+            create_selectors = [
+                'button:has-text("add_2Create")',
+                'button:has-text("add_2 Create")',
             ]
 
-            for selector in settings_selectors:
+            for selector in create_selectors:
                 try:
                     locator = page.locator(selector).first
                     if locator.is_visible(timeout=3000):
-                        settings_button = locator
-                        log(f"Found Settings via: {selector}")
+                        create_dropdown = locator
+                        log(f"Found Create dropdown via: {selector}")
                         break
                 except (PlaywrightTimeout, Exception):
                     continue
 
-            if not settings_button:
-                log("ERROR: Could not find Settings control.")
-                take_screenshot(page, "no_settings", FLOW_SCREENSHOTS_DIR)
-                # Show what IS available
+            # Fallback: look for aria-expanded button near Create text
+            if not create_dropdown:
+                try:
+                    # The button contains "add_2" icon text + "Create"
+                    locator = page.locator('button').filter(has_text="Create").filter(has_text="add").first
+                    if locator.is_visible(timeout=3000):
+                        create_dropdown = locator
+                        log("Found Create dropdown via button filter (add + Create)")
+                except (PlaywrightTimeout, Exception):
+                    pass
+
+            if not create_dropdown:
+                log("ERROR: Could not find the 'add_2 Create' dropdown.")
+                take_screenshot(page, "no_create_dropdown", FLOW_SCREENSHOTS_DIR)
                 elements = discover_ui_elements(page)
                 log(f"Available elements ({len(elements)}):")
                 for i, el in enumerate(elements, 1):
-                    if el.get('text'):
-                        log(f"  {i}. <{el['tag']}> text='{el['text'][:60]}'")
+                    if el.get('text') and 'create' in el['text'].lower():
+                        log(f"  {i}. <{el['tag']}> text='{el['text'][:80]}' aria-expanded='{el.get('ariaExpanded', '')}'")
                 return 1
 
-            # --- Step 3: Click Settings ---
-            log("Clicking Settings...")
-            settings_button.click()
+            # Check current aria-expanded state
+            expanded = create_dropdown.get_attribute("aria-expanded")
+            log(f"Current aria-expanded state: {expanded}")
+
+            # --- Step 3: Click to open the dropdown ---
+            log("Clicking Create dropdown to open menu...")
+            create_dropdown.click()
             page.wait_for_timeout(2000)
 
-            # --- Step 4: Screenshot the settings panel ---
-            log("Capturing settings panel...")
-            settings_screenshot = take_screenshot(page, "flow_generation_settings", FLOW_SCREENSHOTS_DIR)
+            # Verify it opened
+            expanded_after = create_dropdown.get_attribute("aria-expanded")
+            log(f"After click aria-expanded: {expanded_after}")
 
-            # --- Step 5: Discover settings controls ---
+            # --- Step 4: Screenshot the menu ---
+            log("Capturing Create menu...")
+            menu_screenshot = take_screenshot(page, "flow_create_menu", FLOW_SCREENSHOTS_DIR)
+
+            # --- Step 5: Discover menu items ---
             log("")
             log("=" * 50)
-            log("DISCOVERING GENERATION SETTINGS")
+            log("DISCOVERING CREATE MENU ITEMS")
             log("=" * 50)
             log("")
 
-            # First, get all interactive elements visible now
-            elements = discover_ui_elements(page, max_elements=100)
-            if elements:
-                log(f"Found {len(elements)} interactive elements in settings view:")
+            # Try to find menu-specific items
+            menu_items = discover_menu_items(page)
+            if menu_items:
+                log(f"Found {len(menu_items)} menu items:")
                 log("")
-                for i, el in enumerate(elements, 1):
+                for i, item in enumerate(menu_items, 1):
+                    parts = [f"  {i}. <{item['tag']}>"]
+                    if item.get('text'):
+                        parts.append(f"text='{item['text'][:100]}'")
+                    if item.get('ariaLabel'):
+                        parts.append(f"aria-label='{item['ariaLabel']}'")
+                    if item.get('role'):
+                        parts.append(f"role='{item['role']}'")
+                    if item.get('disabled'):
+                        parts.append("DISABLED")
+                    log(" | ".join(parts))
+            else:
+                log("No specific menu items found via menu selectors.")
+
+            # Also get full page interactive elements to catch anything
+            log("")
+            log("Full interactive elements after menu opened:")
+            log("")
+            all_elements = discover_ui_elements(page, max_elements=100)
+            if all_elements:
+                log(f"Found {len(all_elements)} total interactive elements:")
+                log("")
+                for i, el in enumerate(all_elements, 1):
                     parts = [f"  {i}. <{el['tag']}>"]
                     if el.get('text'):
                         parts.append(f"text='{el['text'][:80]}'")
                     if el.get('ariaLabel'):
                         parts.append(f"aria-label='{el['ariaLabel']}'")
-                    if el.get('title'):
-                        parts.append(f"title='{el['title']}'")
                     if el.get('role'):
                         parts.append(f"role='{el['role']}'")
-                    if el.get('placeholder'):
-                        parts.append(f"placeholder='{el['placeholder']}'")
-                    if el.get('contenteditable'):
-                        parts.append(f"contenteditable='{el['contenteditable']}'")
-                    if el.get('value'):
-                        parts.append(f"value='{el['value']}'")
-                    if el.get('ariaSelected'):
-                        parts.append(f"aria-selected='{el['ariaSelected']}'")
                     if el.get('ariaExpanded'):
                         parts.append(f"aria-expanded='{el['ariaExpanded']}'")
-                    if el.get('checked'):
-                        parts.append("CHECKED")
+                    if el.get('ariaSelected'):
+                        parts.append(f"aria-selected='{el['ariaSelected']}'")
                     if el.get('disabled'):
                         parts.append("DISABLED")
                     log(" | ".join(parts))
 
-            # Also search for settings-related text content
-            log("")
-            log("Searching for settings-related keywords...")
-            settings_text = discover_panel_elements(page)
-            if settings_text:
-                log(f"Found {len(settings_text)} settings-related text elements:")
-                log("")
-                for i, item in enumerate(settings_text, 1):
-                    log(f"  {i}. <{item['tag']}> text='{item['text'][:100]}'")
-            else:
-                log("No settings-related keywords found in page text.")
-
-            # --- Step 6: Final report ---
+            # --- Step 6: Report ---
             log("")
             log("=" * 50)
-            log("SETTINGS DISCOVERY COMPLETE")
+            log("CREATE MENU DISCOVERY COMPLETE")
             log(f"  Project URL: {current_url}")
-            if settings_screenshot:
-                log(f"  Screenshot: {settings_screenshot}")
-            log(f"  Interactive elements: {len(elements)}")
-            log(f"  Settings keywords found: {len(settings_text)}")
+            if menu_screenshot:
+                log(f"  Screenshot: {menu_screenshot}")
+            log(f"  Menu items found: {len(menu_items)}")
+            log(f"  Total elements: {len(all_elements)}")
             log("=" * 50)
 
             return 0
