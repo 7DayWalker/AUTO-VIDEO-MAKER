@@ -14,3 +14,6 @@ pydantic==2.10.6
 
 # ----- Browser Automation (Phase 1) -----
 playwright==1.52.0
+
+# ----- HTTP Requests (Phase 2B) -----
+requests==2.32.4
