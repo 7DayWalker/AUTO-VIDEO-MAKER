@@ -1,22 +1,29 @@
 """
-AUTO Video Maker - Video Configuration Discovery (Standard Prompt Box)
+AUTO Video Maker - Phase 1 Second Generation Test (Standard Video Workflow)
 
-This script:
-1. Connects to Chrome via CDP
-2. Ensures Agent is OFF
-3. Opens the generation settings panel
-4. Switches to VIDEO tab
-5. Discovers all video-specific controls (models, ratios, duration, cost)
-6. Opens model dropdown to list available video models
-7. Reports exact selectors for automation
+This script performs ONE controlled video generation using the STANDARD Flow
+prompt box with Agent OFF.
+
+Configuration:
+- Agent: OFF
+- Type: Video
+- Model: Veo 3.1 - Lite
+- Aspect: 9:16
+- Duration: 4s
+- Output: x1
 
 Usage:
     python flow_test.py
 
-NOTE: Does NOT generate anything or spend credits.
+IMPORTANT: This generates EXACTLY ONE video. Do not run repeatedly.
 """
 
 import sys
+import time
+import json
+import subprocess
+import re
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
@@ -28,48 +35,47 @@ from app.flow.browser import (
     take_screenshot,
     is_chrome_running_with_debugging,
 )
-from app.flow.config import FLOW_SCREENSHOTS_DIR, CDP_PORT
+from app.flow.config import (
+    FLOW_SCREENSHOTS_DIR,
+    FLOW_TEST_OUTPUT_DIR,
+    CDP_PORT,
+    GENERATION_TIMEOUT,
+    DOWNLOAD_TIMEOUT,
+    POLL_INTERVAL,
+)
+
+TEST_PROMPT = (
+    "Create a cinematic vertical video of a small futuristic red sports car slowly "
+    "driving through a rain-soaked neon city at night. Wet asphalt reflects colorful "
+    "city lights. The camera smoothly tracks alongside the car at low height. "
+    "Realistic reflections, cinematic lighting, subtle atmospheric rain, "
+    "photorealistic detail, natural motion, no text, no logos."
+)
+
+ACCOUNT_BALANCE = 50  # Verified by user: 50 AI credits
 
 
-def discover_ui_elements(page, max_elements=120):
-    """Discover visible interactive UI elements."""
-    return page.evaluate("""(maxElements) => {
-        const results = [];
-        const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="listbox"], [role="combobox"], [role="slider"], [role="radio"], [role="radiogroup"], [role="checkbox"], [role="switch"], [contenteditable="true"], select, label';
-        const els = document.querySelectorAll(selectors);
-        for (const el of els) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden') continue;
-            const info = {
-                tag: el.tagName.toLowerCase(),
-                text: (el.textContent || '').trim().substring(0, 150),
-                ariaLabel: el.getAttribute('aria-label') || '',
-                role: el.getAttribute('role') || '',
-                ariaSelected: el.getAttribute('aria-selected') || '',
-                ariaPressed: el.getAttribute('aria-pressed') || '',
-                ariaExpanded: el.getAttribute('aria-expanded') || '',
-                placeholder: el.getAttribute('placeholder') || '',
-                contenteditable: el.getAttribute('contenteditable') || '',
-            };
-            if (info.text || info.ariaLabel || info.placeholder || info.contenteditable) {
-                results.push(info);
-            }
-            if (results.length >= maxElements) break;
-        }
-        return results;
-    }""", max_elements)
+def find_visible_button(page, text_contains):
+    """Find a visible button containing the given text."""
+    for btn in page.locator('button').all():
+        try:
+            text = (btn.text_content() or "").strip()
+            if btn.is_visible() and text_contains in text:
+                return btn, text
+        except Exception:
+            continue
+    return None, None
 
 
 def main():
     print()
     log("=" * 60)
-    log("Video Configuration Discovery - Standard Prompt Box")
+    log("PHASE 1 - SECOND GENERATION TEST (Standard Video)")
     log("=" * 60)
     print()
 
     FLOW_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    FLOW_TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     if not is_chrome_running_with_debugging():
         log(f"ERROR: Chrome not running on port {CDP_PORT}.")
@@ -88,53 +94,54 @@ def main():
             page = get_page_from_browser(browser)
             log(f"URL: {page.url}")
 
+            # Navigate to Flow project if needed
             if "/project/" not in page.url:
-                log("Not in a Flow project. Navigating to Flow...")
+                log("Not in a Flow project. Navigating...")
                 page.goto("https://flow.google", wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(3000)
-                # Try to open existing project or create new one
                 try:
                     new_proj = page.locator('button:has-text("New project")').first
                     if new_proj.is_visible(timeout=5000):
                         new_proj.click()
                         page.wait_for_timeout(5000)
-                        log(f"Opened new project: {page.url}")
                 except Exception:
-                    log("ERROR: Could not open a project.")
+                    log("ERROR: Could not open project.")
                     return 1
 
             # Close any open panels
             page.keyboard.press("Escape")
             page.wait_for_timeout(500)
 
-            # ---- Ensure Agent is OFF ----
+            # ============================================
+            # STEP 1: Ensure Agent is OFF
+            # ============================================
             log("")
-            log("Ensuring Agent is OFF...")
-            agent_btn = page.locator('button:has-text("Agent")').first
-            try:
-                if agent_btn.is_visible(timeout=2000):
-                    pressed = agent_btn.get_attribute("aria-pressed")
-                    if pressed == "true":
-                        agent_btn.click()
-                        page.wait_for_timeout(1500)
-                        log("Agent turned OFF.")
-                    else:
-                        log("Agent already OFF.")
-            except Exception:
-                log("Could not verify Agent state.")
+            log("Step 1: Ensuring Agent is OFF...")
+            agent_btn, _ = find_visible_button(page, "Agent")
+            if agent_btn:
+                pressed = agent_btn.get_attribute("aria-pressed")
+                if pressed == "true":
+                    agent_btn.click()
+                    page.wait_for_timeout(1500)
+                    log("Agent turned OFF.")
+                else:
+                    log("Agent already OFF.")
+            else:
+                log("WARNING: Agent button not found.")
 
-            # ---- Open generation settings dropdown ----
+            # ============================================
+            # STEP 2: Open generation settings
+            # ============================================
             log("")
-            log("Opening generation settings dropdown...")
+            log("Step 2: Opening generation settings...")
             settings_btn = None
-            all_btns = page.locator('button').all()
-            for btn in all_btns:
+            for btn in page.locator('button').all():
                 try:
                     text = (btn.text_content() or "").strip()
-                    if btn.is_visible() and ("Nano" in text or "Veo" in text or "Omni" in text):
-                        if "crop" in text or "x1" in text or "x2" in text or "x3" in text:
+                    if btn.is_visible() and ("Nano" in text or "Veo" in text or "Omni" in text or "Video" in text):
+                        if "crop" in text or "x1" in text or "x2" in text or "x3" in text or "x4" in text:
                             settings_btn = btn
-                            log(f"Found: '{text[:60]}'")
+                            log(f"Found settings: '{text[:60]}'")
                             break
                 except Exception:
                     continue
@@ -144,193 +151,402 @@ def main():
                 take_screenshot(page, "no_settings", FLOW_SCREENSHOTS_DIR)
                 return 1
 
-            # Check if already expanded
             expanded = settings_btn.get_attribute("aria-expanded")
             if expanded != "true":
                 settings_btn.click()
                 page.wait_for_timeout(1500)
 
-            # ---- Switch to VIDEO tab ----
+            # ============================================
+            # STEP 3: Select VIDEO tab
+            # ============================================
             log("")
-            log("Switching to VIDEO tab...")
+            log("Step 3: Selecting VIDEO tab...")
             video_tab = page.locator('button[role="tab"]:has-text("videocamVideo")').first
             try:
                 if video_tab.is_visible(timeout=3000):
-                    selected = video_tab.get_attribute("aria-selected")
-                    log(f"Video tab current state: aria-selected={selected}")
-                    if selected != "true":
+                    if video_tab.get_attribute("aria-selected") != "true":
                         video_tab.click()
                         page.wait_for_timeout(2000)
                         log("Video tab selected.")
                     else:
                         log("Video tab already selected.")
-                else:
-                    log("ERROR: Video tab not visible.")
-                    take_screenshot(page, "no_video_tab", FLOW_SCREENSHOTS_DIR)
-                    return 1
             except PlaywrightTimeout:
                 log("ERROR: Video tab not found.")
                 return 1
 
-            # ---- Screenshot the video configuration ----
+            # ============================================
+            # STEP 4: Select model Veo 3.1 - Lite
+            # ============================================
             log("")
-            log("Capturing video configuration panel...")
-            screenshot = take_screenshot(page, "flow_video_standard_configuration", FLOW_SCREENSHOTS_DIR)
-
-            # ---- Discover all controls ----
-            log("")
-            log("=" * 60)
-            log("VIDEO GENERATION CONTROLS")
-            log("=" * 60)
-            log("")
-
-            elements = discover_ui_elements(page, max_elements=120)
-            log(f"Found {len(elements)} interactive elements:")
-            log("")
-            for i, el in enumerate(elements, 1):
-                parts = [f"  {i}. <{el['tag']}>"]
-                if el.get('text'):
-                    parts.append(f"text='{el['text'][:90]}'")
-                if el.get('ariaLabel'):
-                    parts.append(f"aria-label='{el['ariaLabel']}'")
-                if el.get('role'):
-                    parts.append(f"role='{el['role']}'")
-                if el.get('ariaSelected'):
-                    parts.append(f"selected='{el['ariaSelected']}'")
-                if el.get('ariaPressed'):
-                    parts.append(f"pressed='{el['ariaPressed']}'")
-                if el.get('ariaExpanded'):
-                    parts.append(f"expanded='{el['ariaExpanded']}'")
-                if el.get('contenteditable'):
-                    parts.append(f"contenteditable='{el['contenteditable']}'")
-                log(" | ".join(parts))
-
-            # ---- Open model dropdown ----
-            log("")
-            log("Opening video model dropdown...")
+            log("Step 4: Selecting model 'Veo 3.1 - Lite'...")
             model_dropdown = None
             for btn in page.locator('button').all():
                 try:
                     text = (btn.text_content() or "").strip()
                     if btn.is_visible() and "arrow_drop_down" in text:
-                        # Skip the ones that are not model selectors
                         if any(m in text for m in ["Veo", "Omni", "Nano", "Gemini", "Flash"]):
                             model_dropdown = btn
-                            log(f"Found model dropdown: '{text[:60]}'")
+                            log(f"Found model dropdown: '{text[:50]}'")
                             break
                 except Exception:
                     continue
 
-            if model_dropdown:
+            if not model_dropdown:
+                log("ERROR: Model dropdown not found.")
+                return 1
+
+            current_model_text = model_dropdown.text_content() or ""
+            if "Veo 3.1 - Lite" in current_model_text:
+                log("Model already set to Veo 3.1 - Lite.")
+            else:
                 model_dropdown.click()
                 page.wait_for_timeout(1500)
+                veo_lite = page.locator('[role="menuitem"]:has-text("Veo 3.1 - Lite")').first
+                try:
+                    if veo_lite.is_visible(timeout=3000):
+                        veo_lite.click()
+                        page.wait_for_timeout(1000)
+                        log("Veo 3.1 - Lite selected.")
+                    else:
+                        log("ERROR: Veo 3.1 - Lite option not found.")
+                        return 1
+                except PlaywrightTimeout:
+                    log("ERROR: Veo 3.1 - Lite option not found.")
+                    return 1
 
-                # Screenshot model options
-                take_screenshot(page, "flow_video_model_options", FLOW_SCREENSHOTS_DIR)
-
-                # Discover dropdown items
-                log("")
-                log("Video model options:")
-                model_options = page.evaluate("""() => {
-                    const results = [];
-                    const els = document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], button');
-                    for (const el of els) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width === 0 || rect.height === 0) continue;
-                        const style = window.getComputedStyle(el);
-                        if (style.display === 'none' || style.visibility === 'hidden') continue;
-                        const text = (el.textContent || '').trim();
-                        const lc = text.toLowerCase();
-                        if (lc.includes('veo') || lc.includes('omni') || lc.includes('nano') || lc.includes('gemini') || lc.includes('flash') || lc.includes('banana')) {
-                            if (text.length < 80) {
-                                results.push({
-                                    text: text,
-                                    role: el.getAttribute('role') || '',
-                                    ariaSelected: el.getAttribute('aria-selected') || '',
-                                    tag: el.tagName.toLowerCase(),
-                                });
-                            }
-                        }
-                    }
-                    return results;
-                }""")
-
-                for i, opt in enumerate(model_options, 1):
-                    parts = [f"  {i}. <{opt['tag']}> text='{opt['text']}'"]
-                    if opt.get('role'):
-                        parts.append(f"role='{opt['role']}'")
-                    if opt.get('ariaSelected'):
-                        parts.append(f"selected='{opt['ariaSelected']}'")
-                    log(" | ".join(parts))
-
-                # Close dropdown by pressing Escape
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(500)
-            else:
-                log("Could not find model dropdown.")
-
-            # ---- Look for generation cost text ----
+            # ============================================
+            # STEP 5: Select aspect ratio 9:16
+            # ============================================
             log("")
-            log("Looking for generation cost / credit information...")
-            credit_text = page.evaluate("""() => {
-                const results = [];
+            log("Step 5: Selecting aspect ratio 9:16...")
+            ratio_btn = page.locator('button[role="tab"]:has-text("crop_9_169:16")').first
+            try:
+                if ratio_btn.is_visible(timeout=3000):
+                    if ratio_btn.get_attribute("aria-selected") != "true":
+                        ratio_btn.click()
+                        page.wait_for_timeout(500)
+                        log("9:16 selected.")
+                    else:
+                        log("9:16 already selected.")
+            except PlaywrightTimeout:
+                log("ERROR: 9:16 button not found.")
+                return 1
+
+            # ============================================
+            # STEP 6: Select duration 4s
+            # ============================================
+            log("")
+            log("Step 6: Selecting duration 4s...")
+            dur_btn = page.locator('button[role="tab"]:has-text("4s")').first
+            try:
+                if dur_btn.is_visible(timeout=3000):
+                    if dur_btn.get_attribute("aria-selected") != "true":
+                        dur_btn.click()
+                        page.wait_for_timeout(500)
+                        log("4s selected.")
+                    else:
+                        log("4s already selected.")
+            except PlaywrightTimeout:
+                log("ERROR: 4s button not found.")
+                return 1
+
+            # ============================================
+            # STEP 7: Select output count x1
+            # ============================================
+            log("")
+            log("Step 7: Selecting output count x1...")
+            x1_btn = page.locator('button[role="tab"]:has-text("x1")').first
+            try:
+                if x1_btn.is_visible(timeout=3000):
+                    if x1_btn.get_attribute("aria-selected") != "true":
+                        x1_btn.click()
+                        page.wait_for_timeout(500)
+                        log("x1 selected.")
+                    else:
+                        log("x1 already selected.")
+            except PlaywrightTimeout:
+                log("ERROR: x1 button not found.")
+                return 1
+
+            # ============================================
+            # STEP 8: Read generation cost
+            # ============================================
+            log("")
+            log("Step 8: Reading generation cost...")
+            page.wait_for_timeout(500)
+            cost_text = page.evaluate("""() => {
                 const all = document.querySelectorAll('*');
                 for (const el of all) {
                     const rect = el.getBoundingClientRect();
                     if (rect.width === 0 || rect.height === 0) continue;
                     const style = window.getComputedStyle(el);
                     if (style.display === 'none' || style.visibility === 'hidden') continue;
-                    if (el.children.length > 2) continue;
                     const text = (el.textContent || '').trim();
-                    if (text.toLowerCase().includes('credit') && text.length < 60) {
-                        if (!results.includes(text)) results.push(text);
+                    if (text.toLowerCase().includes('generating will use') && text.length < 60) {
+                        return text;
                     }
                 }
-                return results;
+                return null;
             }""")
-            if credit_text:
-                for txt in credit_text:
-                    log(f"  Credit text: '{txt}'")
-            else:
-                log("  No credit-related text found on page.")
 
-            # ---- Look for duration/length controls ----
+            if cost_text:
+                log(f"GENERATION COST: '{cost_text}'")
+                match = re.search(r'(\d+)', cost_text)
+                if match:
+                    cost = int(match.group(1))
+                    log(f"ACCOUNT BALANCE: {ACCOUNT_BALANCE} AI credits")
+                    if cost > ACCOUNT_BALANCE:
+                        log(f"ERROR: Generation cost ({cost}) exceeds balance ({ACCOUNT_BALANCE}). STOPPING.")
+                        return 1
+                    log(f"Cost ({cost}) <= Balance ({ACCOUNT_BALANCE}). Safe to proceed.")
+            else:
+                log("WARNING: Could not read generation cost text.")
+
+            # Close the settings panel by pressing Escape or clicking outside
             log("")
-            log("Looking for duration/length controls...")
-            duration_elements = page.evaluate("""() => {
-                const results = [];
-                const all = document.querySelectorAll('button, [role="tab"], [role="slider"]');
-                for (const el of all) {
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width === 0 || rect.height === 0) continue;
-                    const style = window.getComputedStyle(el);
-                    if (style.display === 'none' || style.visibility === 'hidden') continue;
-                    const text = (el.textContent || '').trim();
-                    const lc = text.toLowerCase();
-                    if (lc.match(/\\d+s/) || lc.includes('duration') || lc.includes('length') || lc.includes('sec')) {
-                        results.push({text: text, role: el.getAttribute('role') || '', ariaSelected: el.getAttribute('aria-selected') || ''});
-                    }
-                }
-                return results;
-            }""")
-            if duration_elements:
-                for i, el in enumerate(duration_elements, 1):
-                    log(f"  {i}. text='{el['text']}' role='{el['role']}' selected='{el.get('ariaSelected', '')}'")
-            else:
-                log("  No duration controls found.")
+            log("Closing settings panel...")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(1000)
 
-            # ---- Final report ----
+            # ============================================
+            # STEP 9: Pre-generation verification screenshot
+            # ============================================
+            log("")
+            log("Step 9: Capturing pre-generation verification...")
+            take_screenshot(page, "flow_video_pre_generation", FLOW_SCREENSHOTS_DIR)
+
+            log("")
+            log("Verifying settings:")
+            page_text = page.content()
+            log(f"  Veo 3.1 - Lite in page: {'Veo 3.1 - Lite' in page_text}")
+            log(f"  Video tab: {'videocamVideo' in page_text}")
+            log(f"  9:16: {'crop_9_169:16' in page_text}")
+            log(f"  4s: {'4s' in page_text}")
+            log(f"  x1: {'x1' in page_text}")
+
+            # ============================================
+            # STEP 10: Enter prompt
+            # ============================================
+            log("")
+            log("Step 10: Entering prompt...")
+            prompt_box = page.locator('div[role="textbox"][contenteditable="true"]').first
+            try:
+                if not prompt_box.is_visible(timeout=5000):
+                    log("ERROR: Prompt textbox not visible.")
+                    return 1
+            except PlaywrightTimeout:
+                log("ERROR: Prompt textbox not found.")
+                return 1
+
+            prompt_box.click()
+            page.wait_for_timeout(500)
+            prompt_box.fill(TEST_PROMPT)
+            page.wait_for_timeout(1000)
+
+            entered = prompt_box.text_content() or ""
+            if "futuristic red sports car" in entered:
+                log("Prompt entered successfully.")
+            else:
+                log("Fill may not have worked. Trying keyboard...")
+                prompt_box.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.type(TEST_PROMPT, delay=5)
+                page.wait_for_timeout(500)
+
+            take_screenshot(page, "flow_video_prompt", FLOW_SCREENSHOTS_DIR)
+
+            # ============================================
+            # STEP 11: Click Generate/Create
+            # ============================================
+            log("")
+            log("Step 11: Clicking Generate/Create...")
+            submit_btn = page.locator('button:has-text("arrow_forwardCreate")').first
+            try:
+                if not submit_btn.is_visible(timeout=3000):
+                    log("ERROR: Create button not visible.")
+                    return 1
+            except PlaywrightTimeout:
+                log("ERROR: Create button not found.")
+                return 1
+
+            submit_btn.click()
+            page.wait_for_timeout(3000)
+
+            # ============================================
+            # STEP 12: Monitor generation
+            # ============================================
             log("")
             log("=" * 60)
-            log("VIDEO CONFIGURATION DISCOVERY COMPLETE")
-            log(f"  Screenshot: {screenshot}")
+            log("GENERATION_STARTED - Monitoring...")
+            log("=" * 60)
+            take_screenshot(page, "flow_video_generation_started", FLOW_SCREENSHOTS_DIR)
+
+            start_time = time.time()
+            generation_complete = False
+            flow_error = False
+
+            while time.time() - start_time < GENERATION_TIMEOUT:
+                elapsed = int(time.time() - start_time)
+
+                # Check for explicit error
+                page_text = page.content().lower()
+                if "something went wrong" in page_text:
+                    log("")
+                    log("FLOW_GENERATION_ERROR: 'Something went wrong. Please try again.'")
+                    take_screenshot(page, "flow_video_generation_error", FLOW_SCREENSHOTS_DIR)
+                    flow_error = True
+                    break
+
+                # Check for completed video asset
+                try:
+                    dl_btn = page.locator('button:has-text("download")').first
+                    if dl_btn.is_visible(timeout=1000):
+                        log(f"Download button detected! ({elapsed}s elapsed)")
+                        generation_complete = True
+                        break
+
+                    dl_btn2 = page.locator('button:has-text("Download")').first
+                    if dl_btn2.is_visible(timeout=500):
+                        log(f"Download button detected! ({elapsed}s elapsed)")
+                        generation_complete = True
+                        break
+                except Exception:
+                    pass
+
+                if elapsed > 0 and elapsed % 30 == 0:
+                    log(f"Still waiting... ({elapsed}s elapsed)")
+
+                time.sleep(POLL_INTERVAL)
+
+            if flow_error:
+                log("")
+                log("TEST STOPPED: Flow reported a generation error.")
+                log("No retry will be attempted.")
+                return 1
+
+            if not generation_complete:
+                log("")
+                log(f"GENERATION_TIMEOUT after {GENERATION_TIMEOUT}s.")
+                log("No objective evidence of a completed video asset.")
+                take_screenshot(page, "generation_timeout", FLOW_SCREENSHOTS_DIR)
+                return 1
+
+            log("")
+            log("GENERATION_COMPLETED - Objective evidence found.")
+            take_screenshot(page, "flow_video_generation_complete", FLOW_SCREENSHOTS_DIR)
+
+            # ============================================
+            # STEP 13: Download
+            # ============================================
+            log("")
+            log("=" * 60)
+            log("DOWNLOAD_STARTED")
+            log("=" * 60)
+
+            downloaded_path = None
+            download_selectors = [
+                'button:has-text("download")',
+                'button:has-text("Download")',
+                '[aria-label*="Download"]',
+                '[aria-label*="download"]',
+                'button:has-text("file_download")',
+            ]
+
+            for selector in download_selectors:
+                try:
+                    dl_btn = page.locator(selector).first
+                    if dl_btn.is_visible(timeout=3000):
+                        log(f"Found download control: {selector}")
+                        with page.expect_download(timeout=DOWNLOAD_TIMEOUT * 1000) as download_info:
+                            dl_btn.click()
+                        download = download_info.value
+                        log(f"Download started: {download.suggested_filename}")
+
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        ext = Path(download.suggested_filename or "video.mp4").suffix or ".mp4"
+                        filename = f"flow_veo31_lite_9x16_4s_{timestamp}{ext}"
+                        save_path = FLOW_TEST_OUTPUT_DIR / filename
+                        download.save_as(str(save_path))
+                        downloaded_path = save_path
+                        log(f"DOWNLOAD_COMPLETED: {save_path}")
+                        break
+                except PlaywrightTimeout:
+                    log(f"Download timed out with: {selector}")
+                    continue
+                except Exception as e:
+                    log(f"Download failed with {selector}: {e}")
+                    continue
+
+            if not downloaded_path:
+                log("ERROR: Could not download video.")
+                take_screenshot(page, "download_failed", FLOW_SCREENSHOTS_DIR)
+                return 1
+
+            take_screenshot(page, "flow_download_complete", FLOW_SCREENSHOTS_DIR)
+
+            # ============================================
+            # STEP 14: Validate
+            # ============================================
+            log("")
+            log("=" * 60)
+            log("VALIDATING VIDEO")
+            log("=" * 60)
+
+            if not downloaded_path.exists():
+                log("FAILED: File does not exist.")
+                return 1
+
+            size = downloaded_path.stat().st_size
+            log(f"File: {downloaded_path.name}")
+            log(f"Size: {size / (1024*1024):.2f} MB ({size:,} bytes)")
+
+            if size == 0:
+                log("FAILED: File is empty.")
+                return 1
+
+            with open(downloaded_path, "rb") as f:
+                header = f.read(12)
+            if b"ftyp" in header:
+                log("MP4 container: Valid (ftyp detected)")
+            else:
+                log(f"WARNING: MP4 header not detected. First bytes: {header[:4]}")
+
+            try:
+                result = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_format", "-show_streams", str(downloaded_path)],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    if "format" in data:
+                        log(f"Duration: {data['format'].get('duration', 'unknown')}s")
+                        log(f"Format: {data['format'].get('format_name', 'unknown')}")
+                    for stream in data.get("streams", []):
+                        if stream.get("codec_type") == "video":
+                            log(f"Resolution: {stream.get('width')}x{stream.get('height')}")
+                            log(f"Codec: {stream.get('codec_name', 'unknown')}")
+                    log("ffprobe validation: PASSED")
+                else:
+                    log("ffprobe not available or failed. Basic validation only.")
+            except (FileNotFoundError, Exception):
+                log("ffprobe not available. Basic validation only.")
+
+            # ============================================
+            # FINAL RESULT
+            # ============================================
+            log("")
+            log("=" * 60)
+            log("PHASE 1 SECOND GENERATION TEST: PASSED ✓")
+            log(f"  Video: {downloaded_path}")
+            log(f"  Size: {size / (1024*1024):.2f} MB")
             log("=" * 60)
             return 0
 
         except Exception as e:
-            log(f"ERROR: {type(e).__name__}: {e}")
+            log(f"UNEXPECTED ERROR: {type(e).__name__}: {e}")
             try:
-                take_screenshot(get_page_from_browser(browser), "error", FLOW_SCREENSHOTS_DIR)
+                take_screenshot(get_page_from_browser(browser), "unexpected_error", FLOW_SCREENSHOTS_DIR)
             except Exception:
                 pass
             return 1
