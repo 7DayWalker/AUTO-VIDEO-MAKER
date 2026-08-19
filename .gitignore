@@ -1,0 +1,50 @@
+# ===== AUTO Video Maker .gitignore =====
+
+# ----- Environment & Secrets -----
+.env
+*.env
+!.env.example
+
+# ----- Python Virtual Environments -----
+venv/
+.venv/
+env/
+ENV/
+
+# ----- Python Bytecode -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ----- Python Distribution / Packaging -----
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ----- pytest -----
+.pytest_cache/
+
+# ----- IDE -----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ----- OS Files -----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ----- Credentials (never commit secrets) -----
+credentials/
+
+# ----- Generated Videos & Output -----
+output/
+
+# ----- Logs -----
+logs/
+
+# ----- Project Working Files (generated content) -----
+projects/
