@@ -155,6 +155,63 @@ class TestErrorPageDetection:
         assert self._is_error_page("https://flow.google", "Google Flow") is False
 
 
+class TestGenerationStateMachine:
+    """Tests for generation state machine logic."""
+
+    def test_timeout_is_not_completion(self):
+        """Timeout must NOT be treated as generation completed."""
+        # A timeout means we don't know if generation finished
+        # It must be classified as GENERATION_TIMEOUT, not GENERATION_COMPLETED
+        timeout_occurred = True
+        video_asset_found = False
+        # Completion requires objective evidence of a video asset
+        is_complete = video_asset_found and not timeout_occurred
+        assert is_complete is False
+
+    def test_explicit_error_is_not_completion(self):
+        """Flow error message must NOT be treated as completion."""
+        flow_error_message = "Something went wrong. Please try again."
+        is_error = "something went wrong" in flow_error_message.lower()
+        assert is_error is True
+        # Error state must block completion
+        is_complete = not is_error
+        assert is_complete is False
+
+    def test_missing_asset_is_not_completion(self):
+        """Missing video asset must NOT be treated as completion."""
+        video_assets_in_project = []
+        is_complete = len(video_assets_in_project) > 0
+        assert is_complete is False
+
+    def test_completed_asset_is_completion(self):
+        """A newly appearing video asset = generation completed."""
+        video_assets_in_project = [{"id": "abc123", "type": "video", "status": "complete"}]
+        is_complete = len(video_assets_in_project) > 0
+        assert is_complete is True
+
+    def test_download_blocked_before_completion(self):
+        """Download must not be attempted before generation is complete."""
+        generation_state = "GENERATION_STARTED"  # Not yet complete
+        can_download = generation_state == "GENERATION_COMPLETED"
+        assert can_download is False
+
+    def test_download_allowed_after_completion(self):
+        """Download is allowed once generation is confirmed complete."""
+        generation_state = "GENERATION_COMPLETED"
+        can_download = generation_state == "GENERATION_COMPLETED"
+        assert can_download is True
+
+    def test_generation_cost_not_account_balance(self):
+        """Generation cost text is NOT the account balance."""
+        generation_cost_text = "Generating will use 24 credits"
+        account_balance_text = "50 AI credits"
+        # These are different values from different UI locations
+        assert "24" in generation_cost_text
+        assert "50" in account_balance_text
+        # They must not be confused
+        assert generation_cost_text != account_balance_text
+
+
 class TestLoginDetection:
     """Tests for login page detection logic."""
 

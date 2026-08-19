@@ -1,25 +1,22 @@
 """
-AUTO Video Maker - Standard Prompt Box Settings Discovery (Agent OFF)
+AUTO Video Maker - Video Configuration Discovery (Standard Prompt Box)
 
 This script:
 1. Connects to Chrome via CDP
-2. Confirms the standard prompt box (Agent OFF)
-3. Opens the generation settings dropdown (model/ratio/count compact control)
-4. Discovers all available generation options
-5. Reports exact selectors for Video mode automation
+2. Ensures Agent is OFF
+3. Opens the generation settings panel
+4. Switches to VIDEO tab
+5. Discovers all video-specific controls (models, ratios, duration, cost)
+6. Opens model dropdown to list available video models
+7. Reports exact selectors for automation
 
 Usage:
-    Chrome must already be running with debugging (use launch_chrome.py).
-    User must already be authenticated. A Flow project should be open.
-    Agent must be OFF (previous run turned it off).
-
     python flow_test.py
 
-NOTE: This does NOT generate anything or spend credits.
+NOTE: Does NOT generate anything or spend credits.
 """
 
 import sys
-import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
@@ -31,16 +28,12 @@ from app.flow.browser import (
     take_screenshot,
     is_chrome_running_with_debugging,
 )
-from app.flow.config import (
-    FLOW_URL,
-    FLOW_SCREENSHOTS_DIR,
-    CDP_PORT,
-)
+from app.flow.config import FLOW_SCREENSHOTS_DIR, CDP_PORT
 
 
 def discover_ui_elements(page, max_elements=120):
     """Discover visible interactive UI elements."""
-    elements = page.evaluate("""(maxElements) => {
+    return page.evaluate("""(maxElements) => {
         const results = [];
         const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="listbox"], [role="combobox"], [role="slider"], [role="radio"], [role="radiogroup"], [role="checkbox"], [role="switch"], [contenteditable="true"], select, label';
         const els = document.querySelectorAll(selectors);
@@ -67,13 +60,12 @@ def discover_ui_elements(page, max_elements=120):
         }
         return results;
     }""", max_elements)
-    return elements
 
 
 def main():
     print()
     log("=" * 60)
-    log("Standard Prompt Box - Generation Settings Discovery")
+    log("Video Configuration Discovery - Standard Prompt Box")
     log("=" * 60)
     print()
 
@@ -97,68 +89,98 @@ def main():
             log(f"URL: {page.url}")
 
             if "/project/" not in page.url:
-                log("ERROR: Not in a Flow project.")
-                return 1
+                log("Not in a Flow project. Navigating to Flow...")
+                page.goto("https://flow.google", wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+                # Try to open existing project or create new one
+                try:
+                    new_proj = page.locator('button:has-text("New project")').first
+                    if new_proj.is_visible(timeout=5000):
+                        new_proj.click()
+                        page.wait_for_timeout(5000)
+                        log(f"Opened new project: {page.url}")
+                except Exception:
+                    log("ERROR: Could not open a project.")
+                    return 1
 
             # Close any open panels
             page.keyboard.press("Escape")
             page.wait_for_timeout(500)
 
-            # Verify Agent is OFF
+            # ---- Ensure Agent is OFF ----
+            log("")
+            log("Ensuring Agent is OFF...")
             agent_btn = page.locator('button:has-text("Agent")').first
             try:
                 if agent_btn.is_visible(timeout=2000):
                     pressed = agent_btn.get_attribute("aria-pressed")
-                    log(f"Agent button aria-pressed: {pressed}")
                     if pressed == "true":
-                        log("Agent is ON. Turning OFF...")
                         agent_btn.click()
                         page.wait_for_timeout(1500)
+                        log("Agent turned OFF.")
+                    else:
+                        log("Agent already OFF.")
             except Exception:
-                pass
+                log("Could not verify Agent state.")
 
-            # Find the compact settings dropdown
-            # It shows current settings like "Nano Banana 2 crop_16_9 x2"
+            # ---- Open generation settings dropdown ----
             log("")
-            log("Looking for generation settings dropdown...")
-
+            log("Opening generation settings dropdown...")
             settings_btn = None
-            # Look for button containing model name + crop info
             all_btns = page.locator('button').all()
             for btn in all_btns:
                 try:
                     text = (btn.text_content() or "").strip()
-                    # This button contains model name + aspect ratio icon + count
-                    if btn.is_visible() and ("Nano" in text or "Veo" in text or "Omni" in text or "Gemini" in text):
-                        if "crop" in text or "x1" in text or "x2" in text or "x3" in text or "x4" in text:
+                    if btn.is_visible() and ("Nano" in text or "Veo" in text or "Omni" in text):
+                        if "crop" in text or "x1" in text or "x2" in text or "x3" in text:
                             settings_btn = btn
-                            log(f"Found settings dropdown: '{text[:60]}'")
+                            log(f"Found: '{text[:60]}'")
                             break
                 except Exception:
                     continue
 
             if not settings_btn:
-                log("ERROR: Could not find the generation settings dropdown.")
-                take_screenshot(page, "no_gen_settings_dropdown", FLOW_SCREENSHOTS_DIR)
-                elements = discover_ui_elements(page)
-                log(f"All {len(elements)} elements:")
-                for i, el in enumerate(elements, 1):
-                    log(f"  {i}. <{el['tag']}> text='{el['text'][:80]}'")
+                log("ERROR: Cannot find settings dropdown.")
+                take_screenshot(page, "no_settings", FLOW_SCREENSHOTS_DIR)
                 return 1
 
-            # Click to open the settings panel
-            log("Clicking settings dropdown...")
-            settings_btn.click()
-            page.wait_for_timeout(2000)
+            # Check if already expanded
+            expanded = settings_btn.get_attribute("aria-expanded")
+            if expanded != "true":
+                settings_btn.click()
+                page.wait_for_timeout(1500)
 
-            # Take screenshot
-            screenshot = take_screenshot(page, "flow_standard_gen_settings_open", FLOW_SCREENSHOTS_DIR)
-            log(f"Screenshot: {screenshot}")
+            # ---- Switch to VIDEO tab ----
+            log("")
+            log("Switching to VIDEO tab...")
+            video_tab = page.locator('button[role="tab"]:has-text("videocamVideo")').first
+            try:
+                if video_tab.is_visible(timeout=3000):
+                    selected = video_tab.get_attribute("aria-selected")
+                    log(f"Video tab current state: aria-selected={selected}")
+                    if selected != "true":
+                        video_tab.click()
+                        page.wait_for_timeout(2000)
+                        log("Video tab selected.")
+                    else:
+                        log("Video tab already selected.")
+                else:
+                    log("ERROR: Video tab not visible.")
+                    take_screenshot(page, "no_video_tab", FLOW_SCREENSHOTS_DIR)
+                    return 1
+            except PlaywrightTimeout:
+                log("ERROR: Video tab not found.")
+                return 1
 
-            # Discover all elements now visible
+            # ---- Screenshot the video configuration ----
+            log("")
+            log("Capturing video configuration panel...")
+            screenshot = take_screenshot(page, "flow_video_standard_configuration", FLOW_SCREENSHOTS_DIR)
+
+            # ---- Discover all controls ----
             log("")
             log("=" * 60)
-            log("GENERATION SETTINGS PANEL CONTROLS")
+            log("VIDEO GENERATION CONTROLS")
             log("=" * 60)
             log("")
 
@@ -183,10 +205,74 @@ def main():
                     parts.append(f"contenteditable='{el['contenteditable']}'")
                 log(" | ".join(parts))
 
-            # Also look for generation-specific keywords
+            # ---- Open model dropdown ----
             log("")
-            log("Generation-related text visible:")
-            gen_text = page.evaluate("""() => {
+            log("Opening video model dropdown...")
+            model_dropdown = None
+            for btn in page.locator('button').all():
+                try:
+                    text = (btn.text_content() or "").strip()
+                    if btn.is_visible() and "arrow_drop_down" in text:
+                        # Skip the ones that are not model selectors
+                        if any(m in text for m in ["Veo", "Omni", "Nano", "Gemini", "Flash"]):
+                            model_dropdown = btn
+                            log(f"Found model dropdown: '{text[:60]}'")
+                            break
+                except Exception:
+                    continue
+
+            if model_dropdown:
+                model_dropdown.click()
+                page.wait_for_timeout(1500)
+
+                # Screenshot model options
+                take_screenshot(page, "flow_video_model_options", FLOW_SCREENSHOTS_DIR)
+
+                # Discover dropdown items
+                log("")
+                log("Video model options:")
+                model_options = page.evaluate("""() => {
+                    const results = [];
+                    const els = document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], button');
+                    for (const el of els) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        const text = (el.textContent || '').trim();
+                        const lc = text.toLowerCase();
+                        if (lc.includes('veo') || lc.includes('omni') || lc.includes('nano') || lc.includes('gemini') || lc.includes('flash') || lc.includes('banana')) {
+                            if (text.length < 80) {
+                                results.push({
+                                    text: text,
+                                    role: el.getAttribute('role') || '',
+                                    ariaSelected: el.getAttribute('aria-selected') || '',
+                                    tag: el.tagName.toLowerCase(),
+                                });
+                            }
+                        }
+                    }
+                    return results;
+                }""")
+
+                for i, opt in enumerate(model_options, 1):
+                    parts = [f"  {i}. <{opt['tag']}> text='{opt['text']}'"]
+                    if opt.get('role'):
+                        parts.append(f"role='{opt['role']}'")
+                    if opt.get('ariaSelected'):
+                        parts.append(f"selected='{opt['ariaSelected']}'")
+                    log(" | ".join(parts))
+
+                # Close dropdown by pressing Escape
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+            else:
+                log("Could not find model dropdown.")
+
+            # ---- Look for generation cost text ----
+            log("")
+            log("Looking for generation cost / credit information...")
+            credit_text = page.evaluate("""() => {
                 const results = [];
                 const all = document.querySelectorAll('*');
                 for (const el of all) {
@@ -194,33 +280,59 @@ def main():
                     if (rect.width === 0 || rect.height === 0) continue;
                     const style = window.getComputedStyle(el);
                     if (style.display === 'none' || style.visibility === 'hidden') continue;
-                    if (el.children.length > 3) continue;
+                    if (el.children.length > 2) continue;
                     const text = (el.textContent || '').trim();
-                    if (!text || text.length > 60 || text.length < 2) continue;
-                    const lc = text.toLowerCase();
-                    const kw = ['video', 'image', 'veo', 'gemini', 'nano', 'omni', 'flash',
-                               '4s', '5s', '6s', '8s', '10s', 'duration', 'length',
-                               '16:9', '9:16', '4:3', '3:4', '1:1',
-                               'portrait', 'landscape', 'orientation',
-                               'x1', 'x2', 'x3', 'x4', 'generate', 'model', 'type'];
-                    if (kw.some(k => lc.includes(k))) {
-                        if (!results.some(r => r === text)) results.push(text);
+                    if (text.toLowerCase().includes('credit') && text.length < 60) {
+                        if (!results.includes(text)) results.push(text);
                     }
                 }
-                return results.slice(0, 40);
+                return results;
             }""")
-            for i, txt in enumerate(gen_text, 1):
-                log(f"  {i}. '{txt}'")
+            if credit_text:
+                for txt in credit_text:
+                    log(f"  Credit text: '{txt}'")
+            else:
+                log("  No credit-related text found on page.")
 
+            # ---- Look for duration/length controls ----
+            log("")
+            log("Looking for duration/length controls...")
+            duration_elements = page.evaluate("""() => {
+                const results = [];
+                const all = document.querySelectorAll('button, [role="tab"], [role="slider"]');
+                for (const el of all) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+                    const text = (el.textContent || '').trim();
+                    const lc = text.toLowerCase();
+                    if (lc.match(/\\d+s/) || lc.includes('duration') || lc.includes('length') || lc.includes('sec')) {
+                        results.push({text: text, role: el.getAttribute('role') || '', ariaSelected: el.getAttribute('aria-selected') || ''});
+                    }
+                }
+                return results;
+            }""")
+            if duration_elements:
+                for i, el in enumerate(duration_elements, 1):
+                    log(f"  {i}. text='{el['text']}' role='{el['role']}' selected='{el.get('ariaSelected', '')}'")
+            else:
+                log("  No duration controls found.")
+
+            # ---- Final report ----
             log("")
             log("=" * 60)
-            log("DISCOVERY COMPLETE")
+            log("VIDEO CONFIGURATION DISCOVERY COMPLETE")
+            log(f"  Screenshot: {screenshot}")
             log("=" * 60)
             return 0
 
         except Exception as e:
             log(f"ERROR: {type(e).__name__}: {e}")
-            take_screenshot(get_page_from_browser(browser), "error", FLOW_SCREENSHOTS_DIR)
+            try:
+                take_screenshot(get_page_from_browser(browser), "error", FLOW_SCREENSHOTS_DIR)
+            except Exception:
+                pass
             return 1
         finally:
             log("Disconnecting...")
