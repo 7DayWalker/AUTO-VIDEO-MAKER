@@ -17,3 +17,6 @@ playwright==1.52.0
 
 # ----- HTTP Requests (Phase 2B) -----
 requests==2.32.4
+
+# ----- TTS Voice Generation (Phase 2C) -----
+edge-tts==6.1.12
