@@ -1,5 +1,5 @@
-# AUTO Video Maker - Phase 0 Dependencies
-# Only dependencies actually needed for the current phase
+# AUTO Video Maker - Phase 1 Dependencies
 
 python-dotenv==1.1.0
 pytest==8.3.5
+playwright==1.52.0

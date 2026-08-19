@@ -48,3 +48,9 @@ logs/
 
 # ----- Project Working Files (generated content) -----
 projects/
+
+# ----- Playwright Browser Profile (session data) -----
+browser_profile/
+
+# ----- Flow Automation Logs/Screenshots -----
+logs/flow/

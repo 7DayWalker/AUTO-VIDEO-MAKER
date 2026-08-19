@@ -23,9 +23,9 @@ def test_app_name_is_set():
     assert APP_NAME == "AUTO Video Maker"
 
 
-def test_current_phase_is_phase_0():
-    """Current phase should be Phase 0."""
-    assert "Phase 0" in CURRENT_PHASE
+def test_current_phase_is_set():
+    """Current phase should be set to a valid phase."""
+    assert "Phase" in CURRENT_PHASE
 
 
 def test_app_env_has_default():

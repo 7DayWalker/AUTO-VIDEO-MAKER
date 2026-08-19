@@ -23,7 +23,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 # ----- General Settings -----
 
 APP_NAME = "AUTO Video Maker"
-CURRENT_PHASE = "Phase 0 — Project Foundation"
+CURRENT_PHASE = "Phase 1 — Google Flow Proof of Concept"
 APP_ENV = os.getenv("APP_ENV", "development")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
