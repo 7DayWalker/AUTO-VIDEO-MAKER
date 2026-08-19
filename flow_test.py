@@ -1,12 +1,13 @@
 """
-AUTO Video Maker - Google Flow Create Menu Discovery
+AUTO Video Maker - Google Flow Agent Settings Discovery
 
 This script:
 1. Attaches to the already-running Chrome via CDP (localhost:9222)
 2. Confirms the Flow project workspace is available
-3. Locates and opens the "add_2 Create" dropdown menu
-4. Inspects all menu items/options
-5. Reports creation modes and generation settings exposed
+3. Locates the CORRECT Agent Settings control (tune/sliders icon in the prompt composer,
+   NOT the top-right "View Settings" gear)
+4. Opens Agent Settings panel
+5. Inspects all generation configuration (models, aspect ratio, duration, etc.)
 
 Usage:
     Chrome must already be running with debugging (use launch_chrome.py).
@@ -16,7 +17,6 @@ Usage:
     python flow_test.py
 
 NOTE: This script does NOT generate videos or spend credits.
-      It only discovers the Create menu options.
 """
 
 import sys
@@ -61,7 +61,7 @@ def discover_ui_elements(page, max_elements: int = 100) -> list[dict]:
     """Discover visible interactive UI elements on the current page."""
     elements = page.evaluate("""(maxElements) => {
         const results = [];
-        const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="listbox"], [role="combobox"], [role="slider"], [role="radio"], [role="checkbox"], [role="switch"], [contenteditable="true"], select, label, li';
+        const selectors = 'button, a[href], textarea, input, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"], [role="listbox"], [role="combobox"], [role="slider"], [role="radio"], [role="radiogroup"], [role="checkbox"], [role="switch"], [contenteditable="true"], select, label';
         const els = document.querySelectorAll(selectors);
         for (const el of els) {
             const rect = el.getBoundingClientRect();
@@ -71,21 +71,19 @@ def discover_ui_elements(page, max_elements: int = 100) -> list[dict]:
 
             const info = {
                 tag: el.tagName.toLowerCase(),
-                text: (el.textContent || '').trim().substring(0, 150),
+                text: (el.textContent || '').trim().substring(0, 200),
                 ariaLabel: el.getAttribute('aria-label') || '',
                 title: el.getAttribute('title') || '',
                 role: el.getAttribute('role') || '',
                 type: el.getAttribute('type') || '',
                 placeholder: el.getAttribute('placeholder') || '',
-                href: el.tagName === 'A' ? (el.getAttribute('href') || '').substring(0, 150) : '',
                 contenteditable: el.getAttribute('contenteditable') || '',
-                dataTestId: el.getAttribute('data-test-id') || el.getAttribute('data-testid') || '',
                 disabled: el.disabled || false,
                 checked: el.checked || false,
                 value: (el.value || '').substring(0, 100),
                 ariaSelected: el.getAttribute('aria-selected') || '',
                 ariaExpanded: el.getAttribute('aria-expanded') || '',
-                ariaHaspopup: el.getAttribute('aria-haspopup') || '',
+                ariaPressed: el.getAttribute('aria-pressed') || '',
             };
             if (info.text || info.ariaLabel || info.title || info.placeholder || info.contenteditable || info.value) {
                 results.push(info);
@@ -97,71 +95,70 @@ def discover_ui_elements(page, max_elements: int = 100) -> list[dict]:
     return elements
 
 
-def discover_menu_items(page) -> list[dict]:
+def discover_settings_panel_content(page) -> list[dict]:
     """
-    Discover items that appear to be part of a dropdown/popover menu.
-    Looks for elements that appeared after the dropdown opened.
+    Discover all content visible in the settings panel area.
+    Captures text, labels, selected states, etc.
     """
-    items = page.evaluate("""() => {
+    content = page.evaluate("""() => {
         const results = [];
-        // Look for menu-like containers (popover, menu, listbox, dialog)
-        const menuSelectors = '[role="menu"], [role="listbox"], [role="dialog"], [data-floating-ui-portal], [class*="popover"], [class*="dropdown"], [class*="menu"]';
-        const menus = document.querySelectorAll(menuSelectors);
-        
-        // Also look for any newly visible interactive elements
-        const allInteractive = 'button, [role="menuitem"], [role="option"], [role="menuitemradio"], li, a';
-        
-        for (const menu of menus) {
-            const items_in_menu = menu.querySelectorAll(allInteractive);
-            for (const el of items_in_menu) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
-                
-                results.push({
+        // Look for all visible elements with meaningful text
+        const all = document.querySelectorAll('*');
+        for (const el of all) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) continue;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            
+            // Only leaf-like text nodes or interactive elements
+            const children = el.children;
+            const hasOnlyText = el.childNodes.length > 0 && 
+                Array.from(el.childNodes).some(n => n.nodeType === 3 && n.textContent.trim().length > 0);
+            
+            if (!hasOnlyText && children.length > 0) continue;
+            
+            const text = el.textContent?.trim();
+            if (!text || text.length > 100 || text.length < 1) continue;
+            
+            // Filter for settings-relevant keywords
+            const lcText = text.toLowerCase();
+            const keywords = ['agent', 'setting', 'confirm', 'generat', 'always', 'never',
+                            'image', 'video', 'default', 'model', 'veo', 'gemini', 'nano',
+                            '16:9', '9:16', '4:3', '3:4', '1:1', 'x1', 'x2', 'x3', 'x4',
+                            'lite', 'pro', 'flash', 'banana', 'aspect', 'ratio', 'output',
+                            'credit', 'cost', 'free', 'audio', 'duration'];
+            
+            if (keywords.some(k => lcText.includes(k))) {
+                const info = {
                     tag: el.tagName.toLowerCase(),
-                    text: (el.textContent || '').trim().substring(0, 150),
-                    ariaLabel: el.getAttribute('aria-label') || '',
-                    title: el.getAttribute('title') || '',
+                    text: text,
                     role: el.getAttribute('role') || '',
-                    disabled: el.disabled || false,
-                });
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    ariaSelected: el.getAttribute('aria-selected') || '',
+                    ariaPressed: el.getAttribute('aria-pressed') || '',
+                    className: (el.className || '').toString().substring(0, 50),
+                };
+                // Deduplicate
+                if (!results.some(r => r.text === info.text && r.tag === info.tag)) {
+                    results.push(info);
+                }
             }
         }
-        
-        // If no menus found, look for any element with menu-related roles
-        if (results.length === 0) {
-            const roleItems = document.querySelectorAll('[role="menuitem"], [role="option"], [role="menuitemradio"]');
-            for (const el of roleItems) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-                results.push({
-                    tag: el.tagName.toLowerCase(),
-                    text: (el.textContent || '').trim().substring(0, 150),
-                    ariaLabel: el.getAttribute('aria-label') || '',
-                    title: el.getAttribute('title') || '',
-                    role: el.getAttribute('role') || '',
-                    disabled: el.disabled || false,
-                });
-            }
-        }
-        
-        return results.slice(0, 50);
+        return results.slice(0, 80);
     }""")
-    return items
+    return content
 
 
 def main() -> int:
     """
-    Discover the Google Flow Create menu options via CDP.
+    Discover Google Flow Agent Settings (the correct one) via CDP.
 
     Returns:
         0 on success, 1 on failure.
     """
     print()
     log("=" * 50)
-    log("AUTO Video Maker - Flow Create Menu Discovery")
+    log("AUTO Video Maker - Flow Agent Settings Discovery")
     log("=" * 50)
     print()
 
@@ -192,14 +189,12 @@ def main() -> int:
 
             # Check if we're in a project workspace
             if "/project/" not in current_url:
-                log("Not in a project workspace. Opening a new project...")
+                log("Not in a project workspace. Opening one...")
                 page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(3000)
-
                 if is_login_page(page.url):
                     log("ERROR: Authentication expired.")
                     return 1
-
                 try:
                     new_proj = page.locator('button:has-text("New project")').first
                     if new_proj.is_visible(timeout=5000):
@@ -207,129 +202,139 @@ def main() -> int:
                         page.wait_for_timeout(5000)
                 except Exception:
                     log("Could not open a project.")
-                    take_screenshot(page, "no_project", FLOW_SCREENSHOTS_DIR)
                     return 1
 
             current_url = page.url
             log(f"Project URL: {current_url}")
 
-            # --- Step 2: Find the Create dropdown ---
+            # --- Step 2: Find the CORRECT Agent Settings control ---
+            # This is the tune/sliders icon in the prompt composer area,
+            # positioned to the left of the "arrow_forward Create" button.
+            # It is NOT the top-right "View Settings" (settings_2) gear.
             log("")
-            log("Looking for 'add_2 Create' dropdown control...")
+            log("Looking for Agent Settings control in prompt composer...")
+            log("(The tune/sliders icon next to the Create arrow button)")
 
-            create_dropdown = None
-            create_selectors = [
-                'button:has-text("add_2Create")',
-                'button:has-text("add_2 Create")',
-            ]
+            # The button text is "tuneSettings" — it contains the "tune" material icon
+            # and the text "Settings". We need the one that is NOT "settings_2 View Settings"
+            agent_settings = None
 
-            for selector in create_selectors:
+            # Strategy: find button with text "tuneSettings" (not "settings_2View Settings")
+            try:
+                locator = page.locator('button:has-text("tuneSettings")').first
+                if locator.is_visible(timeout=3000):
+                    # Verify this is not the View Settings button
+                    btn_text = locator.text_content()
+                    if "View Settings" not in btn_text:
+                        agent_settings = locator
+                        log(f"Found Agent Settings button. Text: '{btn_text.strip()[:50]}'")
+            except (PlaywrightTimeout, Exception):
+                pass
+
+            # Fallback: look for button with just "tune" icon text
+            if not agent_settings:
                 try:
-                    locator = page.locator(selector).first
-                    if locator.is_visible(timeout=3000):
-                        create_dropdown = locator
-                        log(f"Found Create dropdown via: {selector}")
-                        break
-                except (PlaywrightTimeout, Exception):
-                    continue
-
-            # Fallback: look for aria-expanded button near Create text
-            if not create_dropdown:
-                try:
-                    # The button contains "add_2" icon text + "Create"
-                    locator = page.locator('button').filter(has_text="Create").filter(has_text="add").first
-                    if locator.is_visible(timeout=3000):
-                        create_dropdown = locator
-                        log("Found Create dropdown via button filter (add + Create)")
-                except (PlaywrightTimeout, Exception):
+                    buttons = page.locator('button').all()
+                    for btn in buttons:
+                        try:
+                            text = btn.text_content() or ""
+                            if "tune" in text.lower() and "view" not in text.lower() and "settings_2" not in text:
+                                if btn.is_visible():
+                                    agent_settings = btn
+                                    log(f"Found Agent Settings via iteration. Text: '{text.strip()[:50]}'")
+                                    break
+                        except Exception:
+                            continue
+                except Exception:
                     pass
 
-            if not create_dropdown:
-                log("ERROR: Could not find the 'add_2 Create' dropdown.")
-                take_screenshot(page, "no_create_dropdown", FLOW_SCREENSHOTS_DIR)
+            if not agent_settings:
+                log("ERROR: Could not find the Agent Settings (tune) control.")
+                take_screenshot(page, "no_agent_settings", FLOW_SCREENSHOTS_DIR)
                 elements = discover_ui_elements(page)
-                log(f"Available elements ({len(elements)}):")
+                log("Looking for any settings-related buttons:")
                 for i, el in enumerate(elements, 1):
-                    if el.get('text') and 'create' in el['text'].lower():
-                        log(f"  {i}. <{el['tag']}> text='{el['text'][:80]}' aria-expanded='{el.get('ariaExpanded', '')}'")
+                    if el.get('text') and ('setting' in el['text'].lower() or 'tune' in el['text'].lower()):
+                        log(f"  {i}. <{el['tag']}> text='{el['text'][:80]}'")
                 return 1
 
-            # Check current aria-expanded state
-            expanded = create_dropdown.get_attribute("aria-expanded")
-            log(f"Current aria-expanded state: {expanded}")
+            # Get accessibility info
+            aria_label = agent_settings.get_attribute("aria-label") or "none"
+            title_attr = agent_settings.get_attribute("title") or "none"
+            role = agent_settings.get_attribute("role") or "none"
+            log(f"  aria-label: {aria_label}")
+            log(f"  title: {title_attr}")
+            log(f"  role: {role}")
 
-            # --- Step 3: Click to open the dropdown ---
-            log("Clicking Create dropdown to open menu...")
-            create_dropdown.click()
+            # --- Step 3: Click Agent Settings ---
+            log("")
+            log("Clicking Agent Settings control...")
+            agent_settings.click()
             page.wait_for_timeout(2000)
 
-            # Verify it opened
-            expanded_after = create_dropdown.get_attribute("aria-expanded")
-            log(f"After click aria-expanded: {expanded_after}")
+            # --- Step 4: Screenshot ---
+            log("Capturing Agent Settings panel...")
+            screenshot_path = take_screenshot(page, "flow_agent_settings", FLOW_SCREENSHOTS_DIR)
 
-            # --- Step 4: Screenshot the menu ---
-            log("Capturing Create menu...")
-            menu_screenshot = take_screenshot(page, "flow_create_menu", FLOW_SCREENSHOTS_DIR)
-
-            # --- Step 5: Discover menu items ---
+            # --- Step 5: Discover panel content ---
             log("")
             log("=" * 50)
-            log("DISCOVERING CREATE MENU ITEMS")
+            log("AGENT SETTINGS PANEL CONTENT")
             log("=" * 50)
             log("")
 
-            # Try to find menu-specific items
-            menu_items = discover_menu_items(page)
-            if menu_items:
-                log(f"Found {len(menu_items)} menu items:")
+            # Get all interactive elements now visible
+            elements = discover_ui_elements(page, max_elements=100)
+            if elements:
+                log(f"Found {len(elements)} interactive elements:")
                 log("")
-                for i, item in enumerate(menu_items, 1):
-                    parts = [f"  {i}. <{item['tag']}>"]
-                    if item.get('text'):
-                        parts.append(f"text='{item['text'][:100]}'")
-                    if item.get('ariaLabel'):
-                        parts.append(f"aria-label='{item['ariaLabel']}'")
-                    if item.get('role'):
-                        parts.append(f"role='{item['role']}'")
-                    if item.get('disabled'):
-                        parts.append("DISABLED")
-                    log(" | ".join(parts))
-            else:
-                log("No specific menu items found via menu selectors.")
-
-            # Also get full page interactive elements to catch anything
-            log("")
-            log("Full interactive elements after menu opened:")
-            log("")
-            all_elements = discover_ui_elements(page, max_elements=100)
-            if all_elements:
-                log(f"Found {len(all_elements)} total interactive elements:")
-                log("")
-                for i, el in enumerate(all_elements, 1):
+                for i, el in enumerate(elements, 1):
                     parts = [f"  {i}. <{el['tag']}>"]
                     if el.get('text'):
-                        parts.append(f"text='{el['text'][:80]}'")
+                        parts.append(f"text='{el['text'][:100]}'")
                     if el.get('ariaLabel'):
                         parts.append(f"aria-label='{el['ariaLabel']}'")
                     if el.get('role'):
                         parts.append(f"role='{el['role']}'")
-                    if el.get('ariaExpanded'):
-                        parts.append(f"aria-expanded='{el['ariaExpanded']}'")
                     if el.get('ariaSelected'):
                         parts.append(f"aria-selected='{el['ariaSelected']}'")
+                    if el.get('ariaPressed'):
+                        parts.append(f"aria-pressed='{el['ariaPressed']}'")
+                    if el.get('ariaExpanded'):
+                        parts.append(f"aria-expanded='{el['ariaExpanded']}'")
+                    if el.get('checked'):
+                        parts.append("CHECKED")
                     if el.get('disabled'):
                         parts.append("DISABLED")
                     log(" | ".join(parts))
 
+            # Also discover settings-specific text/keywords
+            log("")
+            log("Settings-related content (keyword search):")
+            log("")
+            settings_content = discover_settings_panel_content(page)
+            if settings_content:
+                for i, item in enumerate(settings_content, 1):
+                    parts = [f"  {i}. <{item['tag']}> text='{item['text']}'"]
+                    if item.get('ariaSelected'):
+                        parts.append(f"aria-selected='{item['ariaSelected']}'")
+                    if item.get('ariaPressed'):
+                        parts.append(f"aria-pressed='{item['ariaPressed']}'")
+                    if item.get('role'):
+                        parts.append(f"role='{item['role']}'")
+                    log(" | ".join(parts))
+            else:
+                log("No settings-related keywords found.")
+
             # --- Step 6: Report ---
             log("")
             log("=" * 50)
-            log("CREATE MENU DISCOVERY COMPLETE")
+            log("AGENT SETTINGS DISCOVERY COMPLETE")
             log(f"  Project URL: {current_url}")
-            if menu_screenshot:
-                log(f"  Screenshot: {menu_screenshot}")
-            log(f"  Menu items found: {len(menu_items)}")
-            log(f"  Total elements: {len(all_elements)}")
+            if screenshot_path:
+                log(f"  Screenshot: {screenshot_path}")
+            log(f"  Interactive elements: {len(elements)}")
+            log(f"  Settings keywords: {len(settings_content)}")
             log("=" * 50)
 
             return 0
