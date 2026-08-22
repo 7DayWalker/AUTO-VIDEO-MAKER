@@ -91,19 +91,11 @@ def validate_audio_file(file_path: Path) -> AudioValidationResult:
         data = json.loads(result.stdout)
         
     except FileNotFoundError:
-        # FFprobe not available - do basic validation
-        logger.warning("FFprobe not available, performing basic validation only")
-        warnings.append("FFprobe not available - limited validation")
-        
-        # Check file extension
-        ext = file_path.suffix.lower()
-        if ext not in {".mp3", ".wav", ".m4a", ".aac", ".ogg"}:
-            errors.append(f"Unknown audio format: {ext}")
-        
+        # The production contract requires FFprobe to confirm a playable stream.
+        logger.error("FFprobe is not available; audio cannot be accepted")
         return AudioValidationResult(
-            valid=len(errors) == 0,
-            errors=errors,
-            warnings=warnings,
+            valid=False,
+            errors=["FFprobe executable not found; audio validation is unavailable"],
             file_size=file_size,
         )
     

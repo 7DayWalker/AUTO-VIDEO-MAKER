@@ -59,6 +59,17 @@ FLOW_SCENE_DOWNLOAD_TIMEOUT = int(os.getenv("FLOW_SCENE_DOWNLOAD_TIMEOUT", "120"
 # Polling interval (seconds)
 FLOW_SCENE_POLL_INTERVAL = int(os.getenv("FLOW_SCENE_POLL_INTERVAL", "5"))
 
+# Maximum number of CDP reconnect attempts while a submitted generation is
+# being polled. Reconnects never submit Create again.
+FLOW_SCENE_MAX_POLL_RECOVERY_ATTEMPTS = int(
+    os.getenv("FLOW_SCENE_MAX_POLL_RECOVERY_ATTEMPTS", "2")
+)
+
+# Heartbeat interval for long-running generation polling.
+FLOW_SCENE_HEARTBEAT_INTERVAL = int(
+    os.getenv("FLOW_SCENE_HEARTBEAT_INTERVAL", "30")
+)
+
 
 # ----- Duration Tolerance -----
 
@@ -89,5 +100,7 @@ def get_scene_config() -> dict:
         "timeout": FLOW_SCENE_TIMEOUT,
         "download_timeout": FLOW_SCENE_DOWNLOAD_TIMEOUT,
         "poll_interval": FLOW_SCENE_POLL_INTERVAL,
+        "max_poll_recovery_attempts": FLOW_SCENE_MAX_POLL_RECOVERY_ATTEMPTS,
+        "heartbeat_interval": FLOW_SCENE_HEARTBEAT_INTERVAL,
         "duration_tolerance": FLOW_SCENE_DURATION_TOLERANCE,
     }

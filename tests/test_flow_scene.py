@@ -6,6 +6,7 @@ Tests mock Flow interactions where necessary.
 """
 
 import pytest
+import json
 from pathlib import Path
 from pydantic import ValidationError
 
@@ -27,8 +28,10 @@ from app.flow.scene_models import (
     SceneManifest,
     SceneManifestEntry,
     FlowUIState,
+    FlowHealthResult,
 )
 from app.flow.scene_generator import (
+    FlowSceneGenerator,
     FlowSceneError,
     FlowConnectionError,
     FlowAuthenticationError,
@@ -36,6 +39,613 @@ from app.flow.scene_generator import (
     FlowCreditError,
     validate_video_file,
 )
+
+
+class _FakeLocator:
+    """Small sync-Playwright-compatible locator for production-path tests."""
+    def __init__(self, text=""):
+        self.text = text
+        self.clicks = 0
+        self.fills = []
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        return self
+
+    @property
+    def first(self):
+        return self
+
+    @property
+    def last(self):
+        return self
+
+    def wait_for(self, state=None, timeout=None):
+        return None
+
+    def is_visible(self, timeout=None):
+        return True
+
+    def is_editable(self, timeout=None):
+        return True
+
+    def get_attribute(self, name):
+        return None
+
+    def click(self):
+        self.clicks += 1
+
+    def fill(self, value):
+        self.fills.append(value)
+        self.text = value
+
+    def inner_text(self):
+        return self.text
+
+
+class _FakePage:
+    def __init__(self):
+        self.url = "https://labs.google/fx/tools/flow/project/test"
+        self.locators = {}
+        self.create_clicked = 0
+
+    def title(self):
+        return "Fake Flow Project"
+
+    def locator(self, selector):
+        if selector not in self.locators:
+            self.locators[selector] = _FakeLocator()
+        return self.locators[selector]
+
+    def wait_for_timeout(self, value):
+        return None
+
+    def screenshot(self, path):
+        Path(path).write_bytes(b"fake screenshot")
+
+
+class _HealthPage(_FakePage):
+    def __init__(self, html, url="https://labs.google/fx/tools/flow/project/test"):
+        super().__init__()
+        self.html = html
+        self.url = url
+        self.reloads = 0
+
+    def content(self):
+        return self.html
+
+    def reload(self, **kwargs):
+        self.reloads += 1
+
+
+def _healthy_html():
+    return (
+        '<button>Veo 3.1 - Lite</button><button>9:16</button>'
+        '<span>4s</span><button>Create</button>'
+        '<div role="textbox" contenteditable="true"></div>'
+    )
+
+
+def _configure_health_page(page, html=None):
+    """Configure only selectors represented by the synthetic HTML."""
+    page.html = html if html is not None else page.html
+
+    def locator(selector):
+        if selector == '[role="textbox"][contenteditable="true"]':
+            return _FakeLocator()
+        if selector == 'button:has-text("Create")':
+            return _FakeLocator()
+        return type("EmptyLocator", (), {
+            "count": lambda self: 0,
+            "first": property(lambda self: self),
+        })()
+
+    page.locator = locator
+
+
+def _forensic_payload():
+    path = Path("logs/flow_diagnostic/forensic_project_initial_data_20260821_092828.json")
+    if not path.exists():
+        pytest.skip("forensic Flow fixture is not present")
+    return json.loads(path.read_text(encoding="utf-8"))["endpoint_json"]
+
+
+def test_flow_health_classifies_healthy_page_without_clicking(tmp_path, monkeypatch):
+    page = _HealthPage(_healthy_html())
+    _configure_health_page(page)
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = page
+    generator.browser = object()
+    generator.playwright = object()
+    monkeypatch.setattr("app.flow.scene_generator.cdp_endpoint_diagnostics", lambda: {"available": True})
+
+    result = generator.inspect_flow_health(page.url)
+
+    assert isinstance(result, FlowHealthResult)
+    assert result.classification == "GENERATION_SURFACE_READY"
+    assert result.healthy is True
+    assert result.create_button["found"] is True
+    assert not any(locator.clicks for locator in page.locators.values())
+
+
+def test_flow_health_does_not_promote_unusable_page_text_to_blocking_error(tmp_path, monkeypatch):
+    page = _HealthPage(
+        "Application error: a client-side exception has occurred",
+    )
+    _configure_health_page(page)
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = page
+    generator.browser = object()
+    generator.playwright = object()
+    monkeypatch.setattr("app.flow.scene_generator.cdp_endpoint_diagnostics", lambda: {"available": True})
+
+    result = generator.inspect_flow_health(page.url)
+
+    assert result.classification == "GENERATION_SURFACE_READY"
+    assert result.blocking_error_elements == []
+
+
+def test_loading_health_poll_rechecks_page(tmp_path, monkeypatch):
+    page = _HealthPage("Loading...")
+    def loading_locator(selector):
+        return type("EmptyLocator", (), {
+            "count": lambda self: 0,
+            "first": property(lambda self: self),
+        })()
+    page.locator = loading_locator
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = page
+    generator.browser = object()
+    generator.playwright = object()
+    monkeypatch.setattr("app.flow.scene_generator.cdp_endpoint_diagnostics", lambda: {"available": True})
+    monkeypatch.setattr("app.flow.scene_generator.HEALTH_TIMEOUT", 1)
+    monkeypatch.setattr("app.flow.scene_generator.HEALTH_POLL_INTERVAL", 0)
+
+    calls = {"count": 0}
+    original = generator.inspect_flow_health
+
+    def eventually_healthy(expected_url=None):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            page.html = _healthy_html()
+            _configure_health_page(page)
+        return original(expected_url)
+
+    generator.inspect_flow_health = eventually_healthy
+    result = generator._poll_for_healthy(page.url)
+
+    assert result.classification == "GENERATION_SURFACE_READY"
+    assert calls["count"] >= 2
+
+
+def test_unhealthy_health_recovery_is_bounded(tmp_path, monkeypatch):
+    page = _HealthPage("Something went wrong")
+    page.locator = lambda selector: type("EmptyLocator", (), {
+        "count": lambda self: 0,
+        "first": property(lambda self: self),
+    })()
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = page
+    generator.browser = object()
+    generator.playwright = object()
+    monkeypatch.setattr("app.flow.scene_generator.cdp_endpoint_diagnostics", lambda: {"available": True})
+    monkeypatch.setattr("app.flow.scene_generator.MAX_REFRESH_ATTEMPTS", 1)
+    monkeypatch.setattr("app.flow.scene_generator.MAX_RESTART_ATTEMPTS", 0)
+
+    result = generator.ensure_flow_healthy(page.url)
+
+    assert result.classification == "GENERATION_SURFACE_UNAVAILABLE"
+    assert page.reloads == 1
+    assert generator._refresh_attempts == 1
+
+
+def _control_ready(kind="prompt"):
+    return {
+        "found": True, "attached": True, "visible": True,
+        "editable": kind == "prompt", "enabled": kind == "create",
+        "stable": True, "in_viewport": True,
+        "pointer_interactable": True, "unobstructed": True,
+    }
+
+
+def _classify(error_elements=None, prompt=None, create=None):
+    return FlowSceneGenerator._classify_health_evidence(
+        expected_url="https://labs.google/flow/project/1",
+        actual_url="https://labs.google/flow/project/1",
+        cdp_available=True,
+        browser_connected=True,
+        loading=[],
+        prompt_state=prompt or _control_ready("prompt"),
+        create_state=create or _control_ready("create"),
+        error_elements=error_elements or [],
+        page_available=True,
+    )
+
+
+def test_health_hidden_serialized_and_aggregate_errors_are_ready():
+    result = _classify([
+        {"term": "network error", "context_classification": "BACKGROUND_ERROR"},
+        {"term": "something went wrong", "context_classification": "STALE_ERROR_ELEMENT"},
+    ])
+    assert result["classification"] == "GENERATION_SURFACE_READY"
+    assert result["blocking_error_elements"] == []
+    assert result["detected_error_text"] == ["network error", "something went wrong"]
+
+
+def test_health_blocking_overlay_is_fatal():
+    result = _classify([{
+        "term": "something went wrong",
+        "context_classification": "BLOCKING_APPLICATION_ERROR",
+        "intersects_controls": True,
+        "modal_ancestor": {"role": "dialog"},
+    }])
+    assert result["classification"] == "BLOCKING_APPLICATION_ERROR"
+    assert result["overlay_state"]["blocking"] is True
+
+
+def test_health_prompt_unavailable():
+    prompt = _control_ready("prompt")
+    prompt["visible"] = False
+    prompt["stable"] = False
+    result = _classify(prompt=prompt)
+    assert result["classification"] == "GENERATION_SURFACE_UNAVAILABLE"
+
+
+def test_health_create_disabled():
+    create = _control_ready("create")
+    create["enabled"] = False
+    create["stable"] = False
+    result = _classify(create=create)
+    assert result["classification"] == "GENERATION_SURFACE_UNAVAILABLE"
+
+
+def test_health_non_blocking_visible_message_keeps_surface_ready():
+    result = _classify([{
+        "term": "something went wrong",
+        "context_classification": "NON_BLOCKING_ERROR_MESSAGE",
+        "intersects_controls": False,
+    }])
+    assert result["classification"] == "GENERATION_SURFACE_READY"
+    assert result["error_classification"] == "NON_BLOCKING_ERROR_MESSAGE"
+
+
+def test_health_stale_url_has_priority():
+    result = FlowSceneGenerator._classify_health_evidence(
+        expected_url="https://labs.google/flow/project/expected",
+        actual_url="https://labs.google/flow/project/other",
+        cdp_available=True, browser_connected=True, loading=[],
+        prompt_state=_control_ready("prompt"), create_state=_control_ready("create"),
+        error_elements=[], page_available=True,
+    )
+    assert result["classification"] == "STALE"
+
+
+def test_forensic_project_payload_exposes_durable_media_identity():
+    """The saved GET fixture supplies IDs and the scoped redirect URL."""
+    snapshot = FlowSceneGenerator._parse_project_snapshot(_forensic_payload())
+    assert snapshot["project_id"] == "4236a954-2c94-4942-b298-fe9ffc74b950"
+    assert snapshot["media_ids"]
+    first = snapshot["media"][0]
+    assert first["workflow_id"]
+    assert first["operation_name"] == first["media_id"]
+    assert first["media_blob_size"] > 0
+    assert first["redirect_url"].endswith(f"name={first['media_id']}")
+    assert first["prompt_values"]
+
+
+def test_correlator_excludes_baseline_and_requires_exact_prompt():
+    """A visible old asset or unmatched new asset is never selected."""
+    payload = _forensic_payload()
+    snapshot = FlowSceneGenerator._parse_project_snapshot(payload)
+    generator = FlowSceneGenerator()
+    generator._baseline_snapshot = {"media_ids": [snapshot["media_ids"][0]]}
+    prompt = snapshot["media"][1]["media_title"]
+    generator._submission_context = {"prompt": prompt, "submitted_at": "2026-08-21T00:00:00Z"}
+
+    result = generator._correlate_submission(snapshot)
+
+    assert result["correlation"] == "exact_prompt"
+    assert result["selected"]["media_id"] != snapshot["media_ids"][0]
+    assert result["selected"]["media_id"] == snapshot["media_ids"][1]
+
+
+def test_correlator_returns_unresolved_for_unrelated_new_asset():
+    generator = FlowSceneGenerator()
+    generator._baseline_snapshot = {"media_ids": []}
+    generator._submission_context = {"prompt": "the exact requested asset"}
+    snapshot = {"media": [{
+        "media_id": "unrelated-media", "prompt_values": ["another prompt"],
+        "media_blob_size": 999, "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+    }]}
+    result = generator._correlate_submission(snapshot)
+    assert result["selected"] is None
+    assert result["correlation"] == "unresolved"
+
+
+def test_global_failure_text_is_background_only(tmp_path):
+    """Page text alone cannot terminate a submitted generation."""
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = _HealthPage("generation failed please try again")
+    generator._baseline_snapshot = {"media_ids": []}
+    generator._submission_context = {"prompt": "requested"}
+    generator._capture_project_snapshot = lambda: {"media": [], "media_ids": []}
+    evidence = generator._generation_evidence()
+    assert evidence["authoritative_failure"] is False
+    assert evidence["authoritative_success"] is False
+    assert evidence["background"]["page_error_terms"]
+
+
+def test_polling_state_outage_is_unknown_not_timeout(tmp_path, monkeypatch):
+    """Repeated GET-only state loss is an explicit reconciliation outcome."""
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = _FakePage()
+    generator._capture_project_snapshot = lambda: {
+        "media": [], "media_ids": [], "error": "fixture GET unavailable"
+    }
+    monkeypatch.setattr("app.flow.scene_generator.FLOW_SCENE_TIMEOUT", 1)
+    monkeypatch.setattr("app.flow.scene_generator.FLOW_SCENE_POLL_INTERVAL", 0)
+    monkeypatch.setattr("app.flow.scene_generator.FLOW_SCENE_MAX_POLL_RECOVERY_ATTEMPTS", 1)
+    monkeypatch.setattr("app.flow.scene_generator.take_screenshot", lambda *args, **kwargs: None)
+
+    completed, error = generator._wait_for_completion()
+
+    assert completed is False
+    assert "UNKNOWN_RECONCILIATION_REQUIRED" in error
+    assert "TIMEOUT" not in error
+
+
+def test_submission_checkpoint_has_identity_and_prepared_is_not_submitted(tmp_path):
+    """Prepared intent remains zero-credit until the mocked click returns."""
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = _FakePage()
+    generator._submission_id = "attempt-123"
+    generator._baseline_snapshot = {"project_id": "project", "media_ids": ["old-media"]}
+    generator._assets_before_generation = ["old-media"]
+    checkpoints = []
+    assert generator._submit_generation(checkpoints.append) is True
+    assert checkpoints[0]["state"] == "PREPARED"
+    assert checkpoints[0]["submission_id"] == "attempt-123"
+    assert checkpoints[1]["state"] == "SUBMITTED"
+    assert checkpoints[1]["submission_id"] == "attempt-123"
+    assert checkpoints[1]["assets_before"] == ["old-media"]
+
+
+def test_production_prompt_path_reacquires_and_reads_back(tmp_path):
+    """Verification and entry use fresh candidates and never submit."""
+    page = _FakePage()
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = page
+    generator.ui_state.connected = True
+
+    # Simulate Flow replacing the editor between verification and entry by
+    # returning a new locator object for the same selector each time.
+    original_locator = page.locator
+    calls = {"textbox": 0}
+
+    def rerendering_locator(selector):
+        if selector == '[role="textbox"][contenteditable="true"]':
+            calls["textbox"] += 1
+            locator = _FakeLocator()
+            page.locators[f"{selector}:{calls['textbox']}"] = locator
+            return locator
+        return original_locator(selector)
+
+    page.locator = rerendering_locator
+    assert generator._verify_prompt_input() is True
+    assert generator._enter_prompt("A verified prompt") is True
+    assert calls["textbox"] >= 2
+    assert generator._last_prompt_diagnostics["selected"]["stable"] is True
+    assert not any(locator.clicks for locator in page.locators.values() if hasattr(locator, "clicks") and locator.clicks > 1)
+
+
+def test_ui_only_verification_finds_create_without_clicking(tmp_path):
+    """The UI-only generator path records Create discovery but never clicks."""
+    page = _FakePage()
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    generator.page = page
+    generator.ui_state.connected = True
+    generator.ui_state.prompt_ready = True
+    generator.verify_settings = lambda: generator.ui_state
+    generator._verify_prompt_input = lambda: True
+
+    result = generator.verify_ui_only(
+        SceneGenerationRequest(
+            project_id="test",
+            scene_id="scene_01",
+            sequence=1,
+            visual_prompt="A verified prompt",
+        )
+    )
+
+    assert result.success is True
+    assert result.status == "dry_run"
+    assert result.verification["prompt_entered"] is True
+    assert result.verification["prompt_read_back"] is True
+    assert result.verification["create_button_found"] is True
+    assert result.verification["create_clicked"] is False
+    assert result.verification["credits_consumed"] == 0
+
+
+class _SnapshotPage(_FakePage):
+    def __init__(self, response, url="https://labs.google/fx/tools/flow/project/4236a954-2c94-4942-b298-fe9ffc74b950"):
+        super().__init__()
+        self.url = url
+        self.response = response
+        self.evaluate_calls = []
+
+    def evaluate(self, script, *args):
+        self.evaluate_calls.append((script, args))
+        return self.response
+
+
+def _snapshot_generator(page, hint=None):
+    generator = FlowSceneGenerator()
+    generator.page = page
+    generator._expected_project_url = page.url
+    generator._resume_asset_hint = hint
+    generator._capture_dom_tiles = lambda: []
+    return generator
+
+
+def test_project_snapshot_get_retrieval_preserves_request_and_response_diagnostics():
+    payload = {
+        "result": {"data": {"json": {
+            "projectId": "4236a954-2c94-4942-b298-fe9ffc74b950",
+            "projectContents": {"workflows": [], "media": []},
+        }}}
+    }
+    page = _SnapshotPage({
+        "status": 200, "ok": True, "body": payload,
+        "body_text": json.dumps(payload), "content_type": "application/json",
+    })
+    generator = _snapshot_generator(page)
+
+    snapshot = generator._capture_project_snapshot()
+
+    assert snapshot["endpoint_status"] == 200
+    assert snapshot["project_id"] == "4236a954-2c94-4942-b298-fe9ffc74b950"
+    assert snapshot["endpoint_diagnostics"]["method"] == "GET"
+    assert snapshot["endpoint_diagnostics"]["project_id"] == snapshot["project_id"]
+    assert snapshot["endpoint_diagnostics"]["response_body"] == payload
+    assert page.evaluate_calls[0][1][0] == snapshot["endpoint"]
+
+
+def test_project_snapshot_malformed_success_is_safe_and_not_authoritative():
+    page = _SnapshotPage({
+        "status": 200, "ok": True, "body": {"unexpected": "shape"},
+        "body_text": '{"unexpected":"shape"}', "content_type": "application/json",
+    })
+    generator = _snapshot_generator(page)
+
+    snapshot = generator._capture_project_snapshot()
+
+    assert snapshot["media"] == []
+    assert snapshot["media_ids"] == []
+    assert snapshot["project_id"] is None
+    assert "error" not in snapshot
+
+
+def test_project_snapshot_http_400_keeps_useful_diagnostics():
+    page = _SnapshotPage({
+        "status": 400, "ok": False, "body": {"error": "invalid project"},
+        "body_text": '{"error":"invalid project"}',
+        "content_type": "application/json",
+    })
+    generator = _snapshot_generator(page)
+
+    snapshot = generator._capture_project_snapshot()
+
+    assert snapshot["endpoint_status"] == 400
+    assert snapshot["endpoint_diagnostics"]["status"] == 400
+    assert snapshot["endpoint_diagnostics"]["response_text"] == '{"error":"invalid project"}'
+    assert "projectInitialData HTTP 400" in snapshot["error"]
+    assert "invalid project" in snapshot["error"]
+    assert snapshot["endpoint_diagnostics"]["project_id"] == "4236a954-2c94-4942-b298-fe9ffc74b950"
+
+
+def test_project_snapshot_http_400_uses_only_exact_persisted_media_hint():
+    media_id = "baf6af99-1110-485d-87f0-25210f101ec8"
+    hint = {
+        "media_id": media_id,
+        "project_id": "4236a954-2c94-4942-b298-fe9ffc74b950",
+        "workflow_id": "workflow-exact",
+        "prompt_values": ["requested prompt"],
+        "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+        "media_blob_size": 2243264,
+        "redirect_url": f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={media_id}",
+    }
+    page = _SnapshotPage({
+        "status": 400, "ok": False, "body": {"error": "temporarily unavailable"},
+        "body_text": '{"error":"temporarily unavailable"}',
+        "content_type": "application/json",
+    })
+    generator = _snapshot_generator(page, hint)
+    generator._capture_dom_tiles = lambda: [{
+        "index": 99, "src": hint["redirect_url"], "workflow_id": "unrelated-workflow"
+    }]
+
+    snapshot = generator._capture_project_snapshot()
+
+    assert snapshot["source"] == "flow.dom_resume_hint"
+    assert snapshot["media_ids"] == [media_id]
+    assert snapshot["reconciliation"] == "exact_persisted_media_id_visible"
+    assert snapshot["endpoint_diagnostics"]["response_text"] == '{"error":"temporarily unavailable"}'
+
+
+def test_project_snapshot_http_400_without_exact_identity_remains_unresolved():
+    page = _SnapshotPage({
+        "status": 400, "ok": False, "body": {"error": "bad request"},
+        "body_text": '{"error":"bad request"}', "content_type": "application/json",
+    })
+    generator = _snapshot_generator(page, {
+        "media_id": "persisted-media",
+        "project_id": "4236a954-2c94-4942-b298-fe9ffc74b950",
+        "workflow_id": "persisted-workflow",
+    })
+    generator._capture_dom_tiles = lambda: [{
+        "index": 0, "src": "https://labs.google/media/other-media",
+        "workflow_id": "other-workflow"
+    }]
+
+    snapshot = generator._capture_project_snapshot()
+
+    assert snapshot["media"] == []
+    assert snapshot["media_ids"] == []
+    assert "UNKNOWN" not in snapshot["error"]
+    assert "HTTP 400" in snapshot["error"]
+
+
+def test_resume_restores_exact_hint_and_never_enters_create_path(tmp_path, monkeypatch):
+    page = _FakePage()
+    generator = FlowSceneGenerator(output_dir=tmp_path, screenshots_dir=tmp_path)
+    generator.page = page
+    generator._expected_project_url = page.url
+    called = {"wait": 0, "submit": 0}
+
+    def no_generation(*args, **kwargs):
+        called["submit"] += 1
+        raise AssertionError("resume must not call submission")
+
+    def unresolved(*args, **kwargs):
+        called["wait"] += 1
+        assert generator._resume_asset_hint["media_id"] == "exact-media"
+        return False, "UNKNOWN_RECONCILIATION_REQUIRED: unavailable"
+
+    generator._submit_generation = no_generation
+    generator._wait_for_completion = unresolved
+    request = SceneGenerationRequest(
+        project_id="project",
+        scene_id="scene_01",
+        sequence=1,
+        visual_prompt="requested prompt",
+        flow_project_url=page.url,
+    )
+    checkpoint = {
+        "status": "unknown_reconciliation_required",
+        "flow_project_url": page.url,
+        "prompt": "requested prompt",
+        "checkpoint_evidence": {
+            "submission": {
+                "state": "SUBMITTED",
+                "submission_id": "submission-1",
+                "baseline_snapshot": {"media_ids": ["old-media"], "media": []},
+                "assets_before": ["old-media"],
+            },
+            "polling": {"selected_asset": {
+                "media_id": "exact-media",
+                "project_id": "project",
+                "prompt_values": ["requested prompt"],
+            }},
+        },
+    }
+
+    result = generator.resume_submitted_scene(request, checkpoint)
+
+    assert result.success is False
+    assert result.status == "unknown_reconciliation_required"
+    assert called == {"wait": 1, "submit": 0}
 
 
 # ===== Config Tests =====
@@ -579,3 +1189,85 @@ class TestManifestPersistence:
         assert entry.sequence == 1
         assert entry.file == "scene_01.mp4"
         assert entry.status == "completed"
+
+
+class _FakeDownload:
+    def save_as(self, path):
+        Path(path).write_bytes(b"fake video")
+
+
+class _FakeDownloadContext:
+    def __init__(self, download):
+        self.value = download
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+
+class _DownloadPage(_FakePage):
+    def __init__(self, tile, menu_item=None):
+        super().__init__()
+        self.tile = tile
+        self.menu_item = menu_item
+        self.selected_selectors = []
+
+    def locator(self, selector):
+        self.selected_selectors.append(selector)
+        if selector.startswith("[data-media-id="):
+            return self.tile
+        if selector.startswith("video[src*="):
+            return _FakeLocator()
+        if "Download" in selector and self.menu_item is not None:
+            return self.menu_item
+        return _FakeLocator()
+
+    def expect_download(self, timeout=None):
+        return _FakeDownloadContext(_FakeDownload())
+
+
+def test_download_uses_only_correlated_tile(tmp_path):
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    tile = _FakeLocator()
+    download_button = _FakeLocator()
+    tile.locator = lambda selector: download_button if "Download" in selector else _FakeLocator()
+    generator.page = _DownloadPage(tile)
+    generator._correlated_asset = {
+        "media_id": "correlated-media",
+        "redirect_url": "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=correlated-media",
+    }
+
+    result = generator._download_new_asset(tmp_path / "correlated.mp4")
+
+    assert result == tmp_path / "correlated.mp4"
+    assert (tmp_path / "correlated.mp4").read_bytes() == b"fake video"
+    assert generator._last_download_evidence["media_id"] == "correlated-media"
+    assert generator._last_download_evidence["tile_strategy"] == '[data-media-id="correlated-media"]'
+    assert download_button.clicks == 1
+
+
+def test_download_uses_correlated_tile_overflow_menu(tmp_path):
+    generator = FlowSceneGenerator(screenshots_dir=tmp_path)
+    tile = _FakeLocator()
+    menu_button = _FakeLocator()
+
+    class _HiddenLocator(_FakeLocator):
+        def is_visible(self, timeout=None):
+            return False
+
+    tile.locator = lambda selector: (
+        menu_button if "more" in selector.lower() else _HiddenLocator()
+    )
+    menu_item = _FakeLocator()
+    generator.page = _DownloadPage(tile, menu_item=menu_item)
+    generator._correlated_asset = {"media_id": "correlated-media"}
+
+    result = generator._download_new_asset(tmp_path / "overflow.mp4")
+
+    assert result == tmp_path / "overflow.mp4"
+    assert (tmp_path / "overflow.mp4").read_bytes() == b"fake video"
+    assert generator._last_download_evidence["selector"].endswith(" -> Download")
+    assert menu_button.clicks == 1
+    assert menu_item.clicks == 1

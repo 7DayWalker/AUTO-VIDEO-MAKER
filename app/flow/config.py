@@ -69,3 +69,10 @@ DOWNLOAD_TIMEOUT = int(os.getenv("FLOW_DOWNLOAD_TIMEOUT", "120"))  # 2 minutes
 
 # Polling interval when waiting for generation (seconds)
 POLL_INTERVAL = int(os.getenv("FLOW_POLL_INTERVAL", "5"))
+
+# ----- Browser/page health and bounded recovery -----
+HEALTH_TIMEOUT = int(os.getenv("FLOW_HEALTH_TIMEOUT", "20"))
+HEALTH_POLL_INTERVAL = float(os.getenv("FLOW_HEALTH_POLL_INTERVAL", "1"))
+MAX_REFRESH_ATTEMPTS = int(os.getenv("FLOW_MAX_REFRESH_ATTEMPTS", "1"))
+MAX_RESTART_ATTEMPTS = int(os.getenv("FLOW_MAX_RESTART_ATTEMPTS", "1"))
+SCREENSHOT_TIMEOUT = int(os.getenv("FLOW_SCREENSHOT_TIMEOUT", "5"))

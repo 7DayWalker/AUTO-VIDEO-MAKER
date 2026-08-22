@@ -6,7 +6,7 @@ Pydantic models for scene generation requests, results, and manifests.
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.flow.scene_config import (
@@ -58,7 +58,7 @@ class SceneGenerationResult(BaseModel):
     success: bool
     scene_id: str
     sequence: int
-    status: str  # completed, failed, timeout, skipped, dry_run
+    status: str  # completed, failed, timeout, unknown_reconciliation_required, skipped, dry_run
     file_path: Optional[Path] = None
     file_size: Optional[int] = None
     actual_duration: Optional[float] = None
@@ -71,6 +71,7 @@ class SceneGenerationResult(BaseModel):
     downloaded_at: Optional[str] = None
     error: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
+    verification: Dict[str, Any] = Field(default_factory=dict)
     
     class Config:
         arbitrary_types_allowed = True
@@ -134,6 +135,7 @@ class SceneGenerationResult(BaseModel):
         scene_id: str,
         sequence: int,
         generation_cost: int = None,
+        verification: Dict[str, Any] = None,
     ) -> "SceneGenerationResult":
         """Create a dry-run result."""
         return cls(
@@ -142,6 +144,7 @@ class SceneGenerationResult(BaseModel):
             sequence=sequence,
             status="dry_run",
             generation_cost=generation_cost,
+            verification=verification or {},
         )
     
     @classmethod
@@ -194,6 +197,17 @@ class SceneManifestEntry(BaseModel):
     sequence: int
     file: str
     status: str
+    submission_timestamp: Optional[str] = None
+    generation_started_at: Optional[str] = None
+    generation_completed_at: Optional[str] = None
+    downloaded_at: Optional[str] = None
+    flow_project_url: Optional[str] = None
+    prompt_hash: Optional[str] = None
+    prompt: Optional[str] = None
+    generation_cost: Optional[int] = None
+    checkpoint_evidence: Dict[str, Any] = Field(default_factory=dict)
+    file_path: Optional[str] = None
+    validation: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SceneManifest(BaseModel):
@@ -203,7 +217,14 @@ class SceneManifest(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     
-    def add_scene(self, scene_id: str, sequence: int, file: str, status: str) -> None:
+    def add_scene(
+        self,
+        scene_id: str,
+        sequence: int,
+        file: str,
+        status: str,
+        **metadata: Any,
+    ) -> None:
         """Add or update a scene in the manifest."""
         # Remove existing entry if present
         self.scenes = [s for s in self.scenes if s.scene_id != scene_id]
@@ -214,6 +235,10 @@ class SceneManifest(BaseModel):
             sequence=sequence,
             file=file,
             status=status,
+            **{
+                key: value for key, value in metadata.items()
+                if key in SceneManifestEntry.model_fields
+            },
         ))
         
         # Sort by sequence
@@ -253,10 +278,10 @@ class FlowUIState(BaseModel):
     prompt_ready: bool = False
     generation_cost: Optional[int] = None
     generation_cost_verified: bool = False
-    
+
     @property
     def ready_for_generation(self) -> bool:
-        """Check if all prerequisites are met for generation."""
+        """Return whether every generation prerequisite has been verified."""
         return all([
             self.connected,
             self.authenticated,
@@ -269,9 +294,9 @@ class FlowUIState(BaseModel):
             self.count_verified,
             self.prompt_ready,
         ])
-    
+
     def get_missing_prerequisites(self) -> List[str]:
-        """Get list of missing prerequisites."""
+        """Return human-readable names for unverified prerequisites."""
         missing = []
         if not self.connected:
             missing.append("Chrome/CDP connection")
@@ -294,3 +319,50 @@ class FlowUIState(BaseModel):
         if not self.prompt_ready:
             missing.append("Prompt input")
         return missing
+
+
+class FlowHealthResult(BaseModel):
+    """Structured health inspection for the dedicated Flow page."""
+    timestamp: str
+    expected_url: Optional[str] = None
+    actual_url: Optional[str] = None
+    title: Optional[str] = None
+    browser_connected: bool = False
+    cdp_available: bool = False
+    selected_page_reason: Optional[str] = None
+    candidate_pages: List[Dict[str, Any]] = Field(default_factory=list)
+    prompt_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    create_button: Dict[str, Any] = Field(default_factory=dict)
+    detected_error_text: List[str] = Field(default_factory=list)
+    blocking_error_elements: List[Dict[str, Any]] = Field(default_factory=list)
+    non_blocking_error_elements: List[Dict[str, Any]] = Field(default_factory=list)
+    generation_surface_state: Dict[str, Any] = Field(default_factory=dict)
+    prompt_state: Dict[str, Any] = Field(default_factory=dict)
+    create_state: Dict[str, Any] = Field(default_factory=dict)
+    overlay_state: Dict[str, Any] = Field(default_factory=dict)
+    error_classification: Optional[str] = None
+    loading_indicators: List[str] = Field(default_factory=list)
+    classification: Literal[
+        "HEALTHY", "GENERATION_SURFACE_READY", "LOADING", "STALE",
+        "GENERATION_SURFACE_UNAVAILABLE", "BLOCKING_APPLICATION_ERROR",
+        "NON_BLOCKING_ERROR_MESSAGE", "BACKGROUND_ERROR", "STALE_ERROR_ELEMENT",
+        "APPLICATION_ERROR",
+        "NETWORK_ERROR", "UNKNOWN",
+        "shutdown_timeout", "old_dedicated_process_alive",
+        "profile_lock_conflict", "launch_returned_zero_cdp_unavailable",
+        "dedicated_process_not_found", "cdp_port_not_open",
+        "cdp_endpoint_unreachable", "cdp_wrong_profile_owner",
+        "playwright_attach_failed",
+    ] = "UNKNOWN"
+    lifecycle_classification: Optional[str] = None
+    original_exception: Optional[str] = None
+    recovery_history: List[Dict[str, Any]] = Field(default_factory=list)
+    diagnostic_path: Optional[str] = None
+    screenshot_path: Optional[str] = None
+    screenshot_error: Optional[str] = None
+
+    @property
+    def healthy(self) -> bool:
+        # HEALTHY is retained for backwards-compatible persisted diagnostics;
+        # new inspections use the more explicit generation-surface label.
+        return self.classification in {"HEALTHY", "GENERATION_SURFACE_READY"}

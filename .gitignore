@@ -54,3 +54,19 @@ browser_profile/
 
 # ----- Flow Automation Logs/Screenshots -----
 logs/flow/
+
+# ----- Temporary & One-off Diagnostic Artifacts -----
+temp/
+oauth_diagnostic_report.txt
+check_page_state.py
+extract_scene1_evidence.py
+flow_ui_diagnostic.py
+gemini_test.py
+inspect_manifests.py
+investigate_download.py
+navigate_and_inspect.py
+oauth_diagnostic.py
+reconcile_projects.py
+repair_project_216.py
+test_selector_fix.py
+validate_scene1_live.py
