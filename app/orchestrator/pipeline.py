@@ -269,6 +269,12 @@ class ProductionOrchestrator:
         # Update config from manifest if needed
         if self.manifest.flow_project_url:
             self.config.flow_project_url = self.manifest.flow_project_url
+
+        # Step 6A: persisted visual mode is authoritative on resume. A project
+        # created as 'local' can never silently become a Flow project.
+        persisted_mode = (self.manifest.scene_config or {}).get("visual_mode")
+        if persisted_mode:
+            self.config.visual_mode = persisted_mode
         
         logger.info(f"Resumed project: {project_id}")
         logger.info(f"Current stage: {self.manifest.current_stage.value}")
@@ -555,24 +561,22 @@ class ProductionOrchestrator:
         started_at = datetime.now().isoformat()
         self.manifest.set_stage_result(StageResult.running(PipelineStage.SCENES))
         self._save_manifest()
+
+        # Step 6A: resolve + persist the project visual mode BEFORE any
+        # provider-specific work. Persisted mode is authoritative on resume.
+        from app.orchestrator.visual_providers import (
+            create_visual_provider,
+            resolve_visual_mode,
+        )
+        visual_mode = resolve_visual_mode(
+            self.config.visual_mode, self.manifest.scene_config
+        )
+        if self.manifest.scene_config.get("visual_mode") != visual_mode:
+            self.manifest.scene_config["visual_mode"] = visual_mode
+            self._save_manifest()
         
         try:
             from app.content.models import ProductionPlan
-            from app.flow.scene_generator import (
-                FlowSceneGenerator,
-                FlowConnectionError,
-                FlowAuthenticationError,
-                FlowCreditError,
-                validate_video_file,
-                load_manifest as load_scene_manifest,
-                save_manifest as save_scene_manifest,
-            )
-            from app.flow.scene_models import (
-                FlowGenerationConfig,
-                SceneGenerationRequest,
-                SceneGenerationResult,
-                SceneManifest,
-            )
             
             # Load production plan
             plan_path = Path(self.manifest.content_plan_path)
@@ -582,7 +586,8 @@ class ProductionOrchestrator:
             
             logger.info(f"Loaded plan: {plan.project_id}")
             logger.info(f"Scenes to generate: {len(plan.scenes)}")
-            
+            logger.info(f"Visual mode: {visual_mode}")
+
             # Check for dry run
             if self.config.dry_run:
                 logger.info("DRY RUN: Skipping actual scene generation")
@@ -612,6 +617,14 @@ class ProductionOrchestrator:
                 logger.info("DRY RUN: Scene stage marked complete (no files generated)")
                 return
             
+            # Step 6A: local mode has its own zero-cost path. It must never
+            # import or construct FlowSceneGenerator (cost firewall).
+            if visual_mode == "local" and not self.config.mock_mode:
+                return self._execute_scenes_stage_local(
+                    plan=plan,
+                    started_at=started_at,
+                )
+
             # Check for mock mode
             if self.config.mock_mode:
                 logger.info("MOCK MODE: Creating placeholder scene files")
@@ -652,9 +665,24 @@ class ProductionOrchestrator:
                 logger.info(f"MOCK MODE: Created {len(scene_paths)} placeholder scenes")
                 return
             
-            # Real scene generation via Google Flow
+            # Real scene generation via Google Flow (Step 6A provider wrapper).
+            from app.flow.scene_generator import (
+                FlowAuthenticationError as _FlowAuthErr,
+                FlowConnectionError as _FlowConnErr,
+                load_manifest as load_scene_manifest,
+                save_manifest as save_scene_manifest,
+                validate_video_file,
+            )
+            from app.flow.scene_models import (
+                FlowGenerationConfig,
+                SceneGenerationRequest,
+                SceneGenerationResult,
+                SceneManifest,
+            )
+            from app.orchestrator.visual_providers import GoogleFlowVisualProvider
+
             logger.info("Connecting to Chrome for Flow generation...")
-            
+
             scene_config = self.config.to_scene_config_dict()
             config = FlowGenerationConfig(
                 model=scene_config.get("model"),
@@ -663,28 +691,30 @@ class ProductionOrchestrator:
                 count=1,
                 agent_enabled=False,
             )
-            
+
             scenes_output_dir = self.project_dir / "scenes"
-            generator = FlowSceneGenerator(config=config, output_dir=scenes_output_dir)
-            
+            generator = GoogleFlowVisualProvider(
+                scene_config, scenes_output_dir, self.config.flow_project_url
+            )
+
             # Connect to Chrome
             try:
                 generator.connect(expected_url=self.config.flow_project_url)
                 logger.info("Connected to Chrome via CDP")
-            except FlowConnectionError as e:
+            except ConnectionError as e:
                 raise StageFailedError(
                     "scenes",
                     str(e),
                     {"hint": "Run: python launch_chrome.py"},
                 )
-            
+
             try:
                 # Navigate to Flow project
                 logger.info(f"Navigating to Flow project: {self.config.flow_project_url}")
                 try:
                     generator.navigate_to_project(self.config.flow_project_url)
                     logger.info("Flow project loaded")
-                except FlowAuthenticationError as e:
+                except PermissionError as e:
                     raise StageFailedError(
                         "scenes",
                         str(e),
@@ -698,7 +728,13 @@ class ProductionOrchestrator:
                         scene_id=first_scene.id,
                         sequence=first_scene.sequence,
                         visual_prompt=first_scene.visual_prompt,
-                        config=config,
+                        config=FlowGenerationConfig(
+                            model=scene_config.get("model"),
+                            aspect_ratio=scene_config.get("aspect_ratio"),
+                            duration=scene_config.get("duration"),
+                            count=1,
+                            agent_enabled=False,
+                        ),
                         flow_project_url=self.config.flow_project_url,
                     )
                     verification = generator.verify_ui_only(request)
@@ -1079,6 +1115,149 @@ class ProductionOrchestrator:
             self._save_manifest()
             raise StageFailedError("scenes", str(e))
     
+    def _execute_scenes_stage_local(self, *, plan, started_at: str) -> None:
+        """Zero-cost local-asset scene generation (Step 6A cost firewall).
+
+        This path NEVER imports or constructs FlowSceneGenerator, never opens
+        Chrome/CDP, and never touches Google Flow. It produces the same
+        durable artifacts as the Flow path: per-scene MP4s, SceneManifestEntry
+        provenance, manifest.scene_checkpoints with provider evidence.
+        """
+        from app.flow.scene_generator import (
+            load_manifest as load_scene_manifest,
+            save_manifest as save_scene_manifest,
+            validate_video_file,
+        )
+        from app.flow.scene_models import (
+            FlowGenerationConfig,
+            SceneGenerationRequest,
+            SceneManifest,
+        )
+        from app.orchestrator.visual_providers import (
+            LOCAL_ASSET_PROVIDER,
+            create_visual_provider,
+        )
+
+        project_scenes_dir = self.project_dir / "scenes" / plan.project_id
+        scene_manifest = load_scene_manifest(project_scenes_dir, plan.project_id)
+
+        provider = create_visual_provider(
+            "local",
+            scene_config=self.config.to_scene_config_dict(),
+            scenes_output_dir=project_scenes_dir,
+        )
+
+        scene_paths: list = []
+
+        for scene in sorted(plan.scenes, key=lambda s: s.sequence):
+            logger.info(f"Local asset scene {scene.id} (seq {scene.sequence})")
+
+            # Skip-if-complete (same semantics as the Flow loop).
+            existing = scene_manifest.get_scene(scene.id)
+            if existing and existing.status in {"completed", "validated"}:
+                existing_path = project_scenes_dir / existing.file
+                if existing_path.exists():
+                    validation = validate_video_file(
+                        existing_path, self.config.scene_aspect_ratio
+                    )
+                    if validation.get("valid"):
+                        logger.info(f"Scene already exists, skipping: {existing_path}")
+                        scene_paths.append(str(existing_path))
+                        continue
+
+            request = SceneGenerationRequest(
+                project_id=plan.project_id,
+                scene_id=scene.id,
+                sequence=scene.sequence,
+                visual_prompt=scene.visual_prompt,
+                config=FlowGenerationConfig(
+                    model="local_asset",
+                    aspect_ratio=self.config.scene_aspect_ratio,
+                    duration=max(1, int(scene.estimated_duration) or 4),
+                    count=1,
+                    agent_enabled=False,
+                ),
+            )
+
+            def persist_local_checkpoint(update: Dict[str, Any]) -> None:
+                update = {**update, "provider": LOCAL_ASSET_PROVIDER}
+                current = self.manifest.scene_checkpoints.get(update["scene_id"], {})
+                current.update(update)
+                self.manifest.scene_checkpoints[update["scene_id"]] = current
+
+                scene_manifest.add_scene(
+                    scene_id=scene.id,
+                    sequence=scene.sequence,
+                    file=f"{scene.id}.mp4",
+                    status=current.get("status", "completed"),
+                    generation_cost=current.get("generation_cost", 0),
+                    checkpoint_evidence={
+                        "provider": LOCAL_ASSET_PROVIDER,
+                        "asset_reference": update.get("file_path"),
+                    },
+                    file_path=current.get("file_path"),
+                    validation=current.get("validation", {}),
+                )
+                save_scene_manifest(scene_manifest, project_scenes_dir)
+                self._save_manifest()
+
+            result = provider.generate_scene(
+                request,
+                require_confirmation=False,
+                checkpoint_callback=persist_local_checkpoint,
+            )
+            if not result.success:
+                raise StageFailedError(
+                    "scenes",
+                    f"Scene {scene.id} failed: {result.error}",
+                    {"scene_id": scene.id, "status": result.status},
+                )
+
+            validation = validate_video_file(
+                Path(result.file_path), request.config.aspect_ratio
+            )
+            if not validation.get("valid"):
+                raise ValidationError(
+                    "scenes",
+                    f"Scene {scene.id} validation failed: {validation.get('error')}",
+                    path=str(result.file_path),
+                )
+
+            scene_paths.append(str(result.file_path))
+            self.manifest.scene_checkpoints[scene.id] = {
+                **self.manifest.scene_checkpoints.get(scene.id, {}),
+                "provider": LOCAL_ASSET_PROVIDER,
+                "scene_id": scene.id,
+                "sequence": scene.sequence,
+                "status": "completed",
+                "generation_cost": 0,
+                "file_path": str(result.file_path),
+                "validation": validation,
+                "updated_at": datetime.now().isoformat(),
+            }
+            self._save_manifest()
+            logger.info(f"Local scene {scene.id} complete: {result.file_path}")
+
+        self.manifest.scene_video_paths = scene_paths
+        self.manifest.scene_manifest_path = str(
+            project_scenes_dir / "scene_manifest.json"
+        )
+        self.manifest.set_stage_result(StageResult.completed(
+            stage=PipelineStage.SCENES,
+            output_path=str(project_scenes_dir),
+            output_files=scene_paths,
+            metadata={
+                "scene_count": len(scene_paths),
+                "visual_mode": "local",
+                "credits_used": 0,
+                "provider": LOCAL_ASSET_PROVIDER,
+            },
+            started_at=started_at,
+        ))
+        self._save_manifest()
+
+        logger.info(f"Local asset scene generation complete: {len(scene_paths)} scenes")
+
     def _execute_captions_stage(self) -> None:
         """Execute caption generation stage."""
         logger.info("")

@@ -307,7 +307,10 @@ class OrchestratorConfig(BaseModel):
     """Configuration for the production orchestrator."""
     # Required
     topic: str = Field(min_length=3, description="Video topic")
-    flow_project_url: str = Field(min_length=1, description="Google Flow project URL")
+    # Empty string is valid for visual_mode='local' runs, which never touch
+    # Google Flow; Flow-based runs must supply a real project URL (produce.py
+    # enforces this at the CLI boundary).
+    flow_project_url: str = Field(default="", description="Google Flow project URL")
     
     # Content settings
     niche: str = Field(default="educational")
@@ -333,6 +336,9 @@ class OrchestratorConfig(BaseModel):
     scene_duration: int = Field(default=4, ge=1, le=60)
     max_scenes_per_run: int = Field(default=10, ge=1)
     credit_limit: int = Field(default=100, ge=1)
+    # Step 6A: project-level visual mode. Persisted into manifest.scene_config
+    # before any scene generation; the persisted value is authoritative on resume.
+    visual_mode: str = Field(default="google_flow")
     
     # Assembly settings
     resolution_width: int = Field(default=1080, ge=1)
@@ -389,6 +395,12 @@ class OrchestratorConfig(BaseModel):
             "volume": self.voice_volume,
         }
     
+    @field_validator("visual_mode")
+    @classmethod
+    def validate_visual_mode(cls, v: str) -> str:
+        from app.orchestrator.visual_providers import normalize_visual_mode
+        return normalize_visual_mode(v)
+
     def to_scene_config_dict(self) -> dict:
         """Convert to scene generation parameters."""
         return {
@@ -397,6 +409,7 @@ class OrchestratorConfig(BaseModel):
             "duration": self.scene_duration,
             "max_per_run": self.max_scenes_per_run,
             "credit_limit": self.credit_limit,
+            "visual_mode": self.visual_mode,
         }
     
     def to_assembly_config_dict(self) -> dict:

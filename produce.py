@@ -254,6 +254,19 @@ Examples:
         default=100,
         help="Credit limit (default: 100)",
     )
+    scene_group.add_argument(
+        "--visual-mode",
+        type=str,
+        default="google_flow",
+        choices=["google_flow", "local", "hybrid"],
+        help=(
+            "Visual provider mode (Step 6A). google_flow = premium Veo "
+            "generation via Chrome/CDP (uses Flow credits). local = zero-cost "
+            "normalization of your own assets in assets/local/ (never touches "
+            "Flow). hybrid is reserved. The mode is persisted in the project "
+            "manifest and is authoritative on resume."
+        ),
+    )
     
     # Assembly settings
     assembly_group = parser.add_argument_group("Assembly Settings")
@@ -358,8 +371,13 @@ Examples:
         print("=" * 60)
         return run_tiktok_publish_flow(args.publish_tiktok)
     
-    if not args.flow_project_url:
+    # --flow-project-url is required for Flow-based runs; local mode does not
+    # touch Google Flow at all.
+    if not args.flow_project_url and args.visual_mode != "local":
         parser.error("--flow-project-url is required for --topic and --resume")
+
+    if not args.flow_project_url:
+        args.flow_project_url = ""  # unused in local mode
     
     print()
     print("=" * 60)
@@ -385,6 +403,7 @@ Examples:
             scene_duration=args.scene_duration,
             max_scenes_per_run=args.max_scenes,
             credit_limit=args.credit_limit,
+            visual_mode=args.visual_mode,
             enable_captions=not args.no_captions,
             music_volume=args.music_volume,
             mock_mode=args.mock,
