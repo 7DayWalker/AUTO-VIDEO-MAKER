@@ -82,6 +82,16 @@ _STATUS_STATE = {
 }
 
 
+def _sandbox_private_context(record) -> bool:
+    """True only under the EXPLICITLY configured Sandbox/unaudited private
+    context (Step 5J): TIKTOK_PUBLISH_ENVIRONMENT=sandbox AND the record's
+    validated metadata is SELF_ONLY. Never inferred from a missing post_id."""
+    if os.getenv("TIKTOK_PUBLISH_ENVIRONMENT", "production").strip().lower() != "sandbox":
+        return False
+    meta = getattr(record, "tiktok_metadata", None)
+    return bool(meta and meta.privacy_level == "SELF_ONLY")
+
+
 # ---------------------------------------------------------------------------
 # Persistence helpers (platform-specific record inside the same manifest)
 # ---------------------------------------------------------------------------
@@ -415,19 +425,35 @@ def verify_tiktok_publish(
 
     new_state = _STATUS_STATE.get(status, PublicationState.PROCESSING)
     if new_state == PublicationState.VERIFIED and not post_id:
-        # Complete but no retrievable post identity: do not claim full
-        # verification without an identity.
-        new_state = PublicationState.PROCESSING
-        record.error = (
-            "TikTok reports PUBLISH_COMPLETE but no public post id was returned"
-        )
+        if _sandbox_private_context(record):
+            # Explicit Sandbox/unaudited private publication: TikTok reports
+            # PUBLISH_COMPLETE but never issues a public post id (proven live,
+            # Steps 5F-B/5H/5I; human-confirmed private visibility).
+            new_state = PublicationState.VERIFIED_SANDBOX_PRIVATE
+        else:
+            # Complete but no retrievable post identity: do not claim full
+            # verification without an identity.
+            new_state = PublicationState.PROCESSING
+            record.error = (
+                "TikTok reports PUBLISH_COMPLETE but no public post id was returned"
+            )
     elif new_state == PublicationState.FAILED:
         record.error = f"TikTok posting status={status}"
+
+    record.verification_evidence["privacy_level"] = (
+        record.tiktok_metadata.privacy_level if record.tiktok_metadata else None
+    )
+    if new_state == PublicationState.VERIFIED_SANDBOX_PRIVATE:
+        record.verification_evidence["classification"] = "sandbox_private_terminal"
+        record.verification_evidence["reason"] = (
+            "PUBLISH_COMPLETE without post_id under explicit "
+            "Sandbox/unaudited SELF_ONLY private context"
+        )
 
     record.state = new_state
     if post_id:
         record.tiktok_post_id = post_id
-    if new_state == PublicationState.VERIFIED:
+    if new_state in (PublicationState.VERIFIED, PublicationState.VERIFIED_SANDBOX_PRIVATE):
         record.verified_at = utc_now_iso()
         record.error = None
     persist_tiktok_record(manifest_path, manifest, record)
@@ -520,17 +546,36 @@ def reconcile_tiktok_publication(
             post_id = info.get("publicaly_available_post_id") or info.get("post_id")
             new_state = _STATUS_STATE.get(status, PublicationState.PROCESSING)
             if new_state == PublicationState.VERIFIED and not post_id:
-                new_state = PublicationState.PROCESSING
+                new_state = (
+                    PublicationState.VERIFIED_SANDBOX_PRIVATE
+                    if _sandbox_private_context(record)
+                    else PublicationState.PROCESSING
+                )
             record.verification_evidence = {
                 "publish_id": record.tiktok_publish_id,
                 "status": status,
                 "post_id": post_id,
                 "checked_at": utc_now_iso(),
+                "privacy_level": (
+                    record.tiktok_metadata.privacy_level
+                    if record.tiktok_metadata else None
+                ),
             }
+            if new_state == PublicationState.VERIFIED_SANDBOX_PRIVATE:
+                record.verification_evidence["classification"] = (
+                    "sandbox_private_terminal"
+                )
+                record.verification_evidence["reason"] = (
+                    "PUBLISH_COMPLETE without post_id under explicit "
+                    "Sandbox/unaudited SELF_ONLY private context"
+                )
             record.state = new_state
             if post_id:
                 record.tiktok_post_id = post_id
-            if new_state == PublicationState.VERIFIED:
+            if new_state in (
+                PublicationState.VERIFIED,
+                PublicationState.VERIFIED_SANDBOX_PRIVATE,
+            ):
                 record.verified_at = utc_now_iso()
                 record.error = None
             elif new_state == PublicationState.FAILED:
@@ -538,7 +583,10 @@ def reconcile_tiktok_publication(
             persist_tiktok_record(manifest_path, manifest, record)
             verdict = (
                 PublicationVerdict.PUBLICATION_VERIFIED
-                if new_state == PublicationState.VERIFIED
+                if new_state in (
+                    PublicationState.VERIFIED,
+                    PublicationState.VERIFIED_SANDBOX_PRIVATE,
+                )
                 else PublicationVerdict.PUBLICATION_PROCESSING
             )
             reasons.append(f"API status={status}")
@@ -555,6 +603,12 @@ def reconcile_tiktok_publication(
         if record.state == PublicationState.VERIFIED and record.tiktok_post_id:
             verdict = PublicationVerdict.PUBLICATION_VERIFIED
             reasons.append("durable VERIFIED evidence with post id (offline)")
+        elif record.state == PublicationState.VERIFIED_SANDBOX_PRIVATE:
+            verdict = PublicationVerdict.PUBLICATION_VERIFIED
+            reasons.append(
+                "durable VERIFIED_SANDBOX_PRIVATE evidence "
+                "(offline; sandbox/unaudited private publication)"
+            )
         else:
             verdict = PublicationVerdict.PUBLICATION_PROCESSING
             reasons.append(f"durable state {record.state.value} (offline)")

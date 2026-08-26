@@ -20,7 +20,6 @@ environment configuration; tokens are persisted only in the git-ignored
 credentials/ directory.
 """
 
-import base64
 import hashlib
 import json
 import logging
@@ -46,11 +45,35 @@ TIKTOK_CREATOR_INFO_URL = "https://open.tiktokapis.com/v2/post/publish/creator_i
 TIKTOK_DIRECT_POST_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/video/init/"
 TIKTOK_STATUS_FETCH_URL = "https://open.tiktokapis.com/v2/post/publish/status/fetch/"
 
+# Step 5F diagnostic (explicitly opt-in): when this environment variable is set
+# to a truthy value ("1"/"true"/"yes"/"on"), Direct Post initialization declares
+# a SINGLE chunk whose size equals the exact video file size instead of the
+# normal 10 MB multi-chunk plan. Default behavior is unchanged when unset.
+TIKTOK_SINGLE_CHUNK_INIT_ENV = "TIKTOK_SINGLE_CHUNK_INIT"
+
+
+def _resolve_chunk_params(size: int, chunk_size: int) -> tuple:
+    """Return the effective (chunk_size, total_chunk_count) for a video.
+
+    Normal mode: ceil-division multi-chunk plan. Diagnostic single-chunk
+    mode (env-gated): one chunk covering the entire file.
+    """
+    if os.environ.get(TIKTOK_SINGLE_CHUNK_INIT_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return size, 1
+    return chunk_size, max(1, (size + chunk_size - 1) // chunk_size)
+
 # Scopes required by this publishing path (official scope names).
 TIKTOK_SCOPES = ["user.info.basic", "video.publish"]
 
 DEFAULT_TIKTOK_TOKEN_FILE = "tiktok_token.json"
-DEFAULT_TIKTOK_REDIRECT_URI = "http://localhost:51789"
+# Must exactly match the loopback redirect registered in the TikTok developer
+# portal for "Auto Video Maker Publisher". TIKTOK_REDIRECT_URI (.env) overrides.
+DEFAULT_TIKTOK_REDIRECT_URI = "http://localhost:3455/callback/"
 
 # Official rate limit: each user access_token is limited to 6 init requests
 # per minute. We stay well below it by design (one submission per project).
@@ -145,6 +168,32 @@ class TikTokPublisher:
     # Authentication
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _code_challenge(verifier: str) -> str:
+        """
+        TikTok-documented PKCE S256 variant for desktop Login Kit:
+        the challenge is the HEX encoding of SHA256(code_verifier)
+        (Login Kit desktop docs; differs from RFC-7636 base64url).
+        """
+        return hashlib.sha256(verifier.encode()).hexdigest()
+
+    @staticmethod
+    def _safe_exchange_diagnostics(payload: Any) -> str:
+        """
+        Format TikTok's SAFE diagnostic fields from a failed token-exchange
+        response (error / error_description / log_id). These fields never
+        contain credentials; tokens are only present in successful responses,
+        which never reach this path.
+        """
+        if not isinstance(payload, dict):
+            return ""
+        parts = [
+            f"{key}={payload[key]}"
+            for key in ("error", "error_description", "log_id")
+            if payload.get(key)
+        ]
+        return f" ({'; '.join(parts)})" if parts else ""
+
     def authenticate(self) -> Dict[str, Any]:
         """
         Return a valid access-token record, refreshing when possible and
@@ -204,11 +253,9 @@ class TikTokPublisher:
 
         state = secrets.token_urlsafe(24)
         verifier = secrets.token_urlsafe(48)
-        challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .decode()
-            .rstrip("=")
-        )
+        # TikTok-documented S256 variant: hex encoding of SHA256(verifier)
+        # (NOT the RFC-7636 base64url form; see Login Kit desktop docs).
+        challenge = self._code_challenge(verifier)
 
         auth_params = {
             "client_key": self.client_key,
@@ -286,18 +333,45 @@ class TikTokPublisher:
             timeout=30,
         )
         if response.status_code != 200:
+            try:
+                payload = response.json()
+            except Exception:
+                payload = None
             raise TikTokAuthError(
                 f"TikTok token exchange failed (HTTP {response.status_code})"
+                + self._safe_exchange_diagnostics(payload)
             )
         payload = response.json()
         if "access_token" not in payload:
             raise TikTokAuthError(
                 f"TikTok token exchange returned no access_token: "
-                f"{payload.get('error', 'unknown error')}"
+                f"{self._safe_exchange_diagnostics(payload) or payload.get('error', 'unknown error')}"
             )
         payload["expires_at"] = time.time() + int(payload.get("expires_in", 86400))
         self._save_token(payload)
         return payload
+
+    def validate_stored_token(self) -> Optional[Dict[str, Any]]:
+        """
+        Return a valid access-token record using ONLY persisted storage and
+        the refresh grant — never launches the interactive authorization
+        flow. Returns None when no usable stored credential exists.
+
+        Used by connection-status tooling so a status check can never open a
+        browser or otherwise surprise the operator.
+        """
+        token = self._load_token()
+        if not token:
+            return None
+        if self._token_expired(token):
+            refresh_token = token.get("refresh_token")
+            if not refresh_token:
+                return None
+            refreshed = self._refresh_token(refresh_token)
+            if refreshed is None:
+                return None
+            token = refreshed
+        return token
 
     def _auth_headers(self) -> Dict[str, str]:
         token = self.authenticate()
@@ -368,7 +442,7 @@ class TikTokPublisher:
         interrupted upload can be reconciled instead of re-submitted.
         """
         size = os.path.getsize(video_path)
-        total_chunks = max(1, (size + chunk_size - 1) // chunk_size)
+        chunk_size, total_chunks = _resolve_chunk_params(size, chunk_size)
 
         post_info: Dict[str, Any] = {
             "title": title,
@@ -419,16 +493,27 @@ class TikTokPublisher:
                 f"publish_id={'present' if publish_id else 'missing'}, "
                 f"upload_url={'present' if upload_url else 'missing'}"
             )
-        return {"publish_id": publish_id, "upload_url": upload_url}
+        return {
+            "publish_id": publish_id,
+            "upload_url": upload_url,
+            "chunk_size": chunk_size,
+        }
 
     def upload_video_chunks(
         self,
         upload_url: str,
         video_path: str,
-        chunk_size: int = 10_000_000,
+        chunk_size: Optional[int] = None,
     ) -> None:
-        """Upload the local file to the short-lived upload_url in chunks."""
+        """Upload the local file to the short-lived upload_url in chunks.
+
+        ``chunk_size=None`` resolves via the same plan as init (including the
+        opt-in single-chunk diagnostic mode), keeping declaration and actual
+        chunking internally consistent.
+        """
         size = os.path.getsize(video_path)
+        if chunk_size is None:
+            chunk_size, _total = _resolve_chunk_params(size, 10_000_000)
         offset = 0
         with open(video_path, "rb") as handle:
             while offset < size:

@@ -1,0 +1,18 @@
+{
+  "timestamp_utc": "2026-08-25T23:35:42.873460+00:00",
+  "candidate_path": "C:\\Projects\\AUTO-VIDEO-MAKER\\output\\projects\\20260821_why_some_plants_sleep_at_night_570\\final\\20231024_why_plants_sleep_001_final.mp4",
+  "file_size": 22670365,
+  "sha256_fingerprint": "825b180a7096109ef0233c599a8623b5e4e14796a5822abeff2e945635933660",
+  "manifest_state_before": "UNKNOWN_RECONCILIATION_REQUIRED",
+  "effective_chunk_size": 22670365,
+  "effective_total_chunk_count": 1,
+  "outcome": "SUCCESS",
+  "http_status": 200,
+  "error_code": null,
+  "error_message": null,
+  "log_id": null,
+  "publish_id": "v_pub_file~v2-1.7678116275033245713",
+  "publish_id_present": true,
+  "upload_url_present": true,
+  "auth_display_name": null
+}

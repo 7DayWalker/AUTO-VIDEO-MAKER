@@ -146,6 +146,39 @@ class YouTubePublisher:
         self._youtube = build("youtube", "v3", credentials=creds)
         return self._youtube
 
+    def validate_stored_credentials(self) -> Optional[Any]:
+        """
+        Load and refresh persisted credentials WITHOUT launching the
+        interactive installed-app flow. Returns valid Google credentials or
+        None when no usable stored credential exists.
+
+        Used by connection-status tooling so checking status can never open a
+        browser; publishing still uses ``authenticate`` unchanged.
+        """
+        if not self.token_file or not Path(self.token_file).exists():
+            return None
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+
+        try:
+            creds = Credentials.from_authorized_user_file(
+                str(self.token_file), YOUTUBE_SCOPES
+            )
+        except Exception as exc:
+            logger.warning("Could not load persisted YouTube token (%s)", exc)
+            return None
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                Path(self.token_file).write_text(creds.to_json(), encoding="utf-8")
+                logger.info("Refreshed persisted YouTube OAuth token in place")
+            except Exception as exc:
+                logger.warning("YouTube token refresh failed (%s)", exc)
+                return None
+        if not creds.valid:
+            return None
+        return creds
+
     # ------------------------------------------------------------------
     # API operations
     # ------------------------------------------------------------------

@@ -37,6 +37,10 @@ class PublicationState(str, Enum):
     IDENTITY_PERSISTED = "IDENTITY_PERSISTED"
     PROCESSING = "PROCESSING"
     VERIFIED = "VERIFIED"
+    # Step 5J: terminal success for explicitly configured Sandbox/unaudited
+    # SELF_ONLY publications where TikTok reports PUBLISH_COMPLETE but never
+    # issues a public post_id (proven live behavior; human-confirmed visibility).
+    VERIFIED_SANDBOX_PRIVATE = "VERIFIED_SANDBOX_PRIVATE"
     FAILED = "FAILED"
     UNKNOWN_RECONCILIATION_REQUIRED = "UNKNOWN_RECONCILIATION_REQUIRED"
 
@@ -421,6 +425,11 @@ class TikTokPublicationRecord(BaseModel):
 
     # Verification evidence from the TikTok API
     verification_evidence: Dict[str, Any] = Field(default_factory=dict)
+
+    # Preserved forensic history of superseded publication attempts (Step 5I).
+    # Append-only; never written by the normal prepare/submit/verify paths so
+    # historical failure evidence survives fresh submissions.
+    reconciliation_history: List[Dict[str, Any]] = Field(default_factory=list)
 
     # Diagnostics
     error: Optional[str] = None

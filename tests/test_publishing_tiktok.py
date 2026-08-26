@@ -428,58 +428,407 @@ def test_case_f_expiry_detection():
 
 
 # ---------------------------------------------------------------------------
-# Case G — Existing production project safety (read-only, offline)
+# PKCE conformance — TikTok-documented hex-encoded SHA256 challenge
+# (regression guard: must never revert to RFC base64url encoding)
 # ---------------------------------------------------------------------------
 
-PRODUCTION_DIR_NAME = "20260821_why_some_plants_sleep_at_night_570"
-PRODUCTION_MANIFEST = (
-    Path(__file__).resolve().parent.parent
-    / "output" / "projects" / PRODUCTION_DIR_NAME / "manifest.json"
-)
+def test_pkce_challenge_is_hex_sha256_of_verifier():
+    import base64 as _b64
+    import hashlib
+
+    verifier = "Q1w2E3r4T5y6U7i8O9p0_a-b.c~d"
+    expected = hashlib.sha256(verifier.encode()).hexdigest()
+    actual = TikTokPublisher._code_challenge(verifier)
+    assert actual == expected
+    # Explicit regression guard: must NOT be the base64url form.
+    b64form = _b64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).decode().rstrip("=")
+    assert actual != b64form
+    assert len(actual) == 64
+    assert all(c in "0123456789abcdef" for c in actual)
 
 
-@pytest.mark.skipif(
-    not PRODUCTION_MANIFEST.exists(),
-    reason="real production manifest not present on this machine",
-)
-def test_case_g_production_project_platform_isolation(tmp_path):
-    # Work on a temporary COPY of the real manifest; real files are untouched.
-    project_dir = tmp_path / PRODUCTION_DIR_NAME
+def test_generated_verifier_satisfies_tiktok_constraints():
+    """The verifier generation used by the flow must meet TikTok's documented
+    charset ([A-Z]/[a-z]/[0-9]/-/./_/~) and 43-128 length bounds."""
+    import re as _re
+    from secrets import token_urlsafe
+
+    for _ in range(5):
+        verifier = token_urlsafe(48)  # same expression as the implementation
+        assert 43 <= len(verifier) <= 128
+        assert _re.fullmatch(r"[A-Za-z0-9\-._~]+", verifier)
+
+
+# ---------------------------------------------------------------------------
+# Case G — Platform isolation guarantee (controlled fixture, fully offline)
+#
+# Original intent (previously backed by a COPY of a real production manifest,
+# which made the test depend on mutable live data): prove that
+#   1. the TikTok submission path refuses to run without a prepared record,
+#      before any network-capable object is used;
+#   2. the refused attempt creates no TikTok publication state; and
+#   3. the existing YouTube publication remains byte-for-byte intact.
+# That invariant now lives in an EXPLICITLY CONSTRUCTED fixture manifest so
+# the test passes for the correct reason on every machine, independent of
+# whatever state real production projects happen to be in.
+# ---------------------------------------------------------------------------
+
+ISOLATION_PROJECT_ID = "platform_isolation_fixture"
+
+
+def _build_isolation_project(tmp_path: Path) -> Path:
+    """Explicitly construct the pre-TikTok situation: YouTube VERIFIED, no
+    TikTok publication record of any kind."""
+    project_dir = tmp_path / ISOLATION_PROJECT_ID
     project_dir.mkdir(parents=True)
-    shutil.copy2(PRODUCTION_MANIFEST, project_dir / "manifest.json")
+    manifest = {
+        "project_id": ISOLATION_PROJECT_ID,
+        "topic": "Platform isolation fixture",
+        "publication": {
+            "project_id": ISOLATION_PROJECT_ID,
+            "state": "VERIFIED",
+            "youtube_video_id": "fixture_yt_video_id",
+        },
+        # Intentionally NO "tiktok_publication" key.
+    }
+    (project_dir / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    return project_dir
 
-    _, manifest = tt.load_manifest(PRODUCTION_DIR_NAME, project_dir)
 
-    # The existing YouTube publication must be fully intact.
+class _NeverCalled:
+    """Network-capable stand-in that fails the test if ever invoked."""
+
+    def init_direct_post(self, *args, **kwargs):  # pragma: no cover
+        raise AssertionError("init_direct_post must never be called")
+
+    def upload_video_chunks(self, *args, **kwargs):  # pragma: no cover
+        raise AssertionError("upload_video_chunks must never be called")
+
+
+# ---------------------------------------------------------------------------
+# Step 5F — chunk-plan resolution & opt-in single-chunk diagnostic mode
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from app.publishing import tiktok as _tk_mod  # noqa: E402
+
+
+class _ProbePublisher(TikTokPublisher):
+    """Real TikTokPublisher with only the HTTP layer faked (offline)."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def _auth_headers(self):  # noqa: D102 - offline stub
+        return {"Authorization": "Bearer offline-test"}
+
+
+class _FakeSession:
+    def __init__(self):
+        self.init_bodies = []
+        self.puts = []
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.init_bodies.append(json)
+        response = SimpleNamespace(status_code=200)
+
+        def _json():
+            return {
+                "data": {
+                    "publish_id": "v_pub_file~v2-1.probe",
+                    "upload_url": "https://open-upload.tiktokapis.com/probe",
+                },
+                "error": {"code": "ok", "message": ""},
+            }
+
+        response.json = _json
+        response.text = ""
+        return response
+
+    def put(self, url, data=None, headers=None, timeout=None):
+        self.puts.append(dict(headers))
+        response = SimpleNamespace(status_code=200)
+        response.text = ""
+        return response
+
+
+def _write_probe_video(tmp_path, size):
+    path = tmp_path / "probe.mp4"
+    path.write_bytes(b"\0" * size)
+    return str(path)
+
+
+def test_step5f_default_chunk_math_unchanged(monkeypatch):
+    monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
+    # The exact real candidate video from Step 5E.
+    assert _tk_mod._resolve_chunk_params(22_670_365, 10_000_000) == (10_000_000, 3)
+
+
+def test_step5f_chunk_math_edge_cases(monkeypatch):
+    monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
+    resolve = _tk_mod._resolve_chunk_params
+    assert resolve(5_000_000, 10_000_000) == (10_000_000, 1)     # smaller than one chunk
+    assert resolve(20_000_000, 10_000_000) == (10_000_000, 2)    # exact multiple
+    assert resolve(20_000_001, 10_000_000) == (10_000_000, 3)    # one byte over the boundary
+
+
+def test_step5f_single_chunk_diagnostic_opt_in(monkeypatch):
+    size = 22_670_365
+    for value in ("1", "true", "yes", "on"):
+        monkeypatch.setenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, value)
+        assert _tk_mod._resolve_chunk_params(size, 10_000_000) == (size, 1)
+    monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV)
+    assert _tk_mod._resolve_chunk_params(size, 10_000_000) == (10_000_000, 3)
+
+
+def test_step5f_default_init_declares_multi_chunk(tmp_path, monkeypatch):
+    monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
+    video = _write_probe_video(tmp_path, 25_000_000)
+    session = _FakeSession()
+    publisher = _ProbePublisher(session)
+
+    result = publisher.init_direct_post(
+        video_path=video,
+        title="probe",
+        privacy_level="SELF_ONLY",
+    )
+
+    source_info = session.init_bodies[0]["source_info"]
+    assert source_info == {
+        "source": "FILE_UPLOAD",
+        "video_size": 25_000_000,
+        "chunk_size": 10_000_000,
+        "total_chunk_count": 3,
+    }
+    assert result["chunk_size"] == 10_000_000
+
+
+def test_step5f_diagnostic_mode_declares_and_uploads_single_chunk(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, "1")
+    video = _write_probe_video(tmp_path, 25_000_000)
+    session = _FakeSession()
+    publisher = _ProbePublisher(session)
+
+    result = publisher.init_direct_post(
+        video_path=video,
+        title="probe",
+        privacy_level="SELF_ONLY",
+    )
+
+    source_info = session.init_bodies[0]["source_info"]
+    assert source_info["chunk_size"] == 25_000_000
+    assert source_info["total_chunk_count"] == 1
+
+    # Upload loop must agree with the declaration: exactly ONE chunk covering
+    # the whole file.
+    publisher.upload_video_chunks(result["upload_url"], video)
+    assert len(session.puts) == 1
+    assert session.puts[0]["Content-Range"] == "bytes 0-24999999/25000000"
+
+
+def test_step5f_upload_loop_matches_declaration_in_normal_mode(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
+    video = _write_probe_video(tmp_path, 25_000_000)
+    session = _FakeSession()
+    publisher = _ProbePublisher(session)
+
+    result = publisher.init_direct_post(
+        video_path=video,
+        title="probe",
+        privacy_level="SELF_ONLY",
+    )
+    publisher.upload_video_chunks(result["upload_url"], video)
+
+    assert result["chunk_size"] == 10_000_000
+    assert len(session.puts) == 3
+    assert session.puts[0]["Content-Range"] == "bytes 0-9999999/25000000"
+    assert session.puts[1]["Content-Range"] == "bytes 10000000-19999999/25000000"
+    assert session.puts[2]["Content-Range"] == "bytes 20000000-24999999/25000000"
+
+
+# ---------------------------------------------------------------------------
+# Step 5J — VERIFIED_SANDBOX_PRIVATE terminal state
+# ---------------------------------------------------------------------------
+
+def _complete_no_post():
+    return {"status": "PUBLISH_COMPLETE", "post_id": None}
+
+
+def test_step5j_a_publish_complete_with_post_id_still_verified(
+    tmp_path, tiktok_gate, monkeypatch
+):
+    monkeypatch.delenv("TIKTOK_PUBLISH_ENVIRONMENT", raising=False)
+    project_dir = build_project(tmp_path)
+    tt.prepare_tiktok_publish(PROJECT_ID, project_dir)
+    publisher = FakeTikTokPublisher(status_queue=[complete_status()])
+    tt.submit_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    verified = tt.verify_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    assert verified.state == PublicationState.VERIFIED
+    assert verified.tiktok_post_id == POST_ID
+
+
+def test_step5j_b_sandbox_private_terminal_state(tmp_path, tiktok_gate, monkeypatch):
+    monkeypatch.setenv("TIKTOK_PUBLISH_ENVIRONMENT", "sandbox")
+    project_dir = build_project(tmp_path)
+    tt.prepare_tiktok_publish(PROJECT_ID, project_dir)  # metadata privacy=SELF_ONLY
+
+    publisher = FakeTikTokPublisher(status_queue=[_complete_no_post()])
+    tt.submit_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    record = tt.verify_tiktok_publish(PROJECT_ID, publisher, project_dir)
+
+    assert record.state == PublicationState.VERIFIED_SANDBOX_PRIVATE
+    assert record.tiktok_publish_id == PUBLISH_ID
+    assert record.verified_at is not None
+    ev = record.verification_evidence
+    assert ev["status"] == "PUBLISH_COMPLETE"
+    assert ev["post_id"] is None
+    assert ev["privacy_level"] == "SELF_ONLY"
+    assert ev["classification"] == "sandbox_private_terminal"
+
+
+def test_step5j_c_no_post_id_outside_sandbox_context_stays_unverified(
+    tmp_path, tiktok_gate, monkeypatch
+):
+    # Production context: must NOT become VERIFIED_SANDBOX_PRIVATE.
+    monkeypatch.delenv("TIKTOK_PUBLISH_ENVIRONMENT", raising=False)
+    project_dir = build_project(tmp_path)
+    tt.prepare_tiktok_publish(PROJECT_ID, project_dir)
+    publisher = FakeTikTokPublisher(status_queue=[_complete_no_post()])
+    tt.submit_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    record = tt.verify_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    assert record.state == PublicationState.PROCESSING
+    assert "no public post id" in (record.error or "")
+
+    # Sandbox env but non-SELF_ONLY privacy: still not eligible.
+    monkeypatch.setenv("TIKTOK_PUBLISH_ENVIRONMENT", "sandbox")
+    project_dir2 = build_project(tmp_path)
+    tt.prepare_tiktok_publish(PROJECT_ID, project_dir2, privacy_level="SELF_ONLY")
+    manifest_path, manifest = tt.load_manifest(PROJECT_ID, project_dir2)
+    rec = tt.get_tiktok_record(manifest)
+    rec.tiktok_metadata.privacy_level = "MUTUAL_FOLLOW_FRIENDS"
+    tt.persist_tiktok_record(manifest_path, manifest, rec)
+    publisher2 = FakeTikTokPublisher(status_queue=[_complete_no_post()])
+    tt.submit_tiktok_publish(PROJECT_ID, publisher2, project_dir2)
+    record2 = tt.verify_tiktok_publish(PROJECT_ID, publisher2, project_dir2)
+    assert record2.state != PublicationState.VERIFIED_SANDBOX_PRIVATE
+
+
+def test_step5j_d_normal_verified_rule_unchanged_offline(tmp_path, tiktok_gate):
+    project_dir = build_project(tmp_path)
+    tt.prepare_tiktok_publish(PROJECT_ID, project_dir)
+    mark_publish_id_persisted(project_dir)
+    publisher = FakeTikTokPublisher(status_queue=[complete_status()])
+    tt.submit_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    verified = tt.verify_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    assert verified.state == PublicationState.VERIFIED
+    report = tt.reconcile_tiktok_publication(
+        PROJECT_ID, publisher=None, project_dir=project_dir
+    )
+    assert report.verdict == PublicationVerdict.PUBLICATION_VERIFIED
+
+
+def test_step5j_e_f_terminal_state_and_duplicate_refusal(
+    tmp_path, tiktok_gate, monkeypatch
+):
+    monkeypatch.setenv("TIKTOK_PUBLISH_ENVIRONMENT", "sandbox")
+    project_dir = build_project(tmp_path)
+    tt.prepare_tiktok_publish(PROJECT_ID, project_dir)
+
+    # Canonical submit → verify reaches the new terminal state.
+    publisher = FakeTikTokPublisher(status_queue=[_complete_no_post(), _complete_no_post()])
+    submitted = tt.submit_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    finalized = tt.verify_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    assert finalized.state == PublicationState.VERIFIED_SANDBOX_PRIVATE
+
+    # Terminal: offline reconciliation reports verified.
+    report = tt.reconcile_tiktok_publication(
+        PROJECT_ID, publisher=None, project_dir=project_dir
+    )
+    assert report.verdict == PublicationVerdict.PUBLICATION_VERIFIED
+
+    # Anti-duplicate guard: existing publish_id → idempotent refusal, never a
+    # second submission.
+    again = tt.submit_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    assert again.tiktok_publish_id == submitted.tiktok_publish_id
+    assert again.state == PublicationState.VERIFIED_SANDBOX_PRIVATE
+    assert len(publisher.init_calls) == 1
+    assert submitted.tiktok_publish_id == finalized.tiktok_publish_id
+
+
+def test_step5j_g_reconciliation_history_preserved_through_finalization(
+    tmp_path, tiktok_gate, monkeypatch
+):
+    monkeypatch.setenv("TIKTOK_PUBLISH_ENVIRONMENT", "sandbox")
+    project_dir = build_project(tmp_path)
+    tt.prepare_tiktok_publish(PROJECT_ID, project_dir)
+
+    # Simulate the Step-5I preserved history on the live record.
+    manifest_path, manifest = tt.load_manifest(PROJECT_ID, project_dir)
+    rec = tt.get_tiktok_record(manifest)
+    rec.reconciliation_history = [{
+        "previous_state": "UNKNOWN_RECONCILIATION_REQUIRED",
+        "classification": "direct_post_init_rejected",
+        "publish_id_issued": False,
+    }]
+    tt.persist_tiktok_record(manifest_path, manifest, rec)
+
+    publisher = FakeTikTokPublisher(status_queue=[_complete_no_post()])
+    tt.submit_tiktok_publish(PROJECT_ID, publisher, project_dir)
+    finalized = tt.verify_tiktok_publish(PROJECT_ID, publisher, project_dir)
+
+    persisted = load_record(project_dir)
+    assert finalized.state == PublicationState.VERIFIED_SANDBOX_PRIVATE
+    assert len(persisted.reconciliation_history) == 1
+    assert (
+        persisted.reconciliation_history[0]["classification"]
+        == "direct_post_init_rejected"
+    )
+
+    def fetch_status(self, *args, **kwargs):  # pragma: no cover
+        raise AssertionError("fetch_status must never be called")
+
+
+def test_case_g_platform_isolation_controlled_fixture(tmp_path):
+    project_dir = _build_isolation_project(tmp_path)
+
+    _, manifest = tt.load_manifest(ISOLATION_PROJECT_ID, project_dir)
+
+    # The existing YouTube publication is intact.
     yt = manifest.publication
     assert yt is not None
-    assert yt.youtube_video_id == "HTyI9r7hdVw"
+    assert yt.youtube_video_id == "fixture_yt_video_id"
     assert yt.state == PublicationState.VERIFIED
 
-    # No TikTok identity exists yet for this project.
-    tk = tt.get_tiktok_record(manifest)
-    assert tk is None or tk.tiktok_publish_id is None
+    # No TikTok identity exists at all.
+    assert tt.get_tiktok_record(manifest) is None
 
-    # Submitting without preparation is refused; nothing is created.
-    class NeverCalled:
-        def init_direct_post(self, *args, **kwargs):  # pragma: no cover
-            raise AssertionError("must never be called")
-
-        def upload_video_chunks(self, *args, **kwargs):  # pragma: no cover
-            raise AssertionError("must never be called")
-
+    # Submitting without preparation is refused before any network object
+    # is used; nothing is created.
     with pytest.raises(PublishingError):
-        tt.submit_tiktok_publish(PRODUCTION_DIR_NAME, NeverCalled(), project_dir=project_dir)
+        tt.submit_tiktok_publish(
+            ISOLATION_PROJECT_ID, _NeverCalled(), project_dir=project_dir
+        )
 
     # Reconciliation reports NOT_STARTED for TikTok while YouTube stays VERIFIED.
     report = tt.reconcile_tiktok_publication(
-        PRODUCTION_DIR_NAME, publisher=None, project_dir=project_dir
+        ISOLATION_PROJECT_ID, publisher=None, project_dir=project_dir
     )
     assert report.verdict == PublicationVerdict.PUBLICATION_NOT_STARTED
 
-    _, reloaded = tt.load_manifest(PRODUCTION_DIR_NAME, project_dir)
-    assert reloaded.publication.youtube_video_id == "HTyI9r7hdVw"
+    # The refused attempt left zero traces: YouTube untouched, TikTok absent.
+    _, reloaded = tt.load_manifest(ISOLATION_PROJECT_ID, project_dir)
+    assert reloaded.publication.youtube_video_id == "fixture_yt_video_id"
     assert reloaded.publication.state == PublicationState.VERIFIED
+    assert tt.get_tiktok_record(reloaded) is None
 
 
 # ---------------------------------------------------------------------------

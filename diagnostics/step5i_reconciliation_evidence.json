@@ -1,0 +1,12 @@
+{
+  "superseded_at_utc": "2026-08-26T07:52:59.014063+00:00",
+  "previous_state": "UNKNOWN_RECONCILIATION_REQUIRED",
+  "classification": "direct_post_init_rejected",
+  "http_status": 400,
+  "error_message": "The total chunk count is invalid",
+  "tiktok_log_id": "2026082600323750988B79F7A172183C55",
+  "publish_id_issued": false,
+  "original_failure_at_local": "2026-08-25T17:32:36.979416",
+  "authorized_by": "Paul - Step 5I",
+  "note": "INIT was rejected by TikTok before any identity was issued; no orphaned publish_id exists at TikTok for this attempt. Evidence preserved verbatim; fresh canonical submission authorized."
+}

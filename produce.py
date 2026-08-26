@@ -132,6 +132,31 @@ Examples:
             "submits a duplicate post. Requires TikTok developer credentials."
         ),
     )
+    topic_group.add_argument(
+        "--connect-tiktok",
+        action="store_true",
+        help=(
+            "Connect/confirm the TikTok account via the official Login Kit "
+            "OAuth flow (PKCE). Connection only: never prepares, uploads, or "
+            "publishes anything."
+        ),
+    )
+    topic_group.add_argument(
+        "--connect-youtube",
+        action="store_true",
+        help=(
+            "Connect/confirm the YouTube channel via the existing OAuth flow. "
+            "Connection only: never uploads or modifies any project."
+        ),
+    )
+    topic_group.add_argument(
+        "--connections",
+        action="store_true",
+        help=(
+            "Read-only summary of platform connection status (YouTube, "
+            "TikTok). Never opens a browser, uploads, or publishes."
+        ),
+    )
     
     # Flow project URL (required only for production/resume runs)
     parser.add_argument(
@@ -283,6 +308,23 @@ Examples:
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
     
+    # Connection management commands are pure connection operations: they
+    # never touch production artifacts or publication state machines.
+    if args.connect_youtube:
+        from app.publishing.connections import run_connect_youtube
+
+        return run_connect_youtube()
+
+    if args.connect_tiktok:
+        from app.publishing.connections import run_connect_tiktok
+
+        return run_connect_tiktok()
+
+    if args.connections:
+        from app.publishing.connections import run_connections_status
+
+        return run_connections_status()
+
     # Publishing is a dedicated post-production flow with its own durable
     # state machine; it never touches Flow generation or production stages.
     if args.publish_youtube:
