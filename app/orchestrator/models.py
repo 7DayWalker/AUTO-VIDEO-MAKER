@@ -339,6 +339,11 @@ class OrchestratorConfig(BaseModel):
     # Step 6A: project-level visual mode. Persisted into manifest.scene_config
     # before any scene generation; the persisted value is authoritative on resume.
     visual_mode: str = Field(default="google_flow")
+    # Step 6B (hybrid mode only): default provider for unrouted scenes
+    # (never google_flow) plus explicit per-scene overrides, e.g.
+    # {"scene_003": "google_flow"}. Persisted into scene_config before generation.
+    visual_default_provider: str = Field(default="image_motion")
+    visual_scene_routing: Dict[str, str] = Field(default_factory=dict)
     
     # Assembly settings
     resolution_width: int = Field(default=1080, ge=1)
@@ -401,6 +406,27 @@ class OrchestratorConfig(BaseModel):
         from app.orchestrator.visual_providers import normalize_visual_mode
         return normalize_visual_mode(v)
 
+    @field_validator("visual_default_provider")
+    @classmethod
+    def validate_visual_default_provider(cls, v: str) -> str:
+        from app.orchestrator.visual_providers import (
+            normalize_provider,
+            GOOGLE_FLOW_PROVIDER,
+        )
+        provider = normalize_provider(v)
+        if provider == GOOGLE_FLOW_PROVIDER:
+            raise ValueError(
+                "visual_default_provider cannot be google_flow; Flow scenes "
+                "require explicit per-scene routing overrides."
+            )
+        return provider
+
+    @field_validator("visual_scene_routing")
+    @classmethod
+    def validate_visual_scene_routing(cls, v: Dict[str, str]) -> Dict[str, str]:
+        from app.orchestrator.visual_providers import normalize_provider
+        return {scene_id.strip(): normalize_provider(p) for scene_id, p in v.items()}
+
     def to_scene_config_dict(self) -> dict:
         """Convert to scene generation parameters."""
         return {
@@ -410,6 +436,8 @@ class OrchestratorConfig(BaseModel):
             "max_per_run": self.max_scenes_per_run,
             "credit_limit": self.credit_limit,
             "visual_mode": self.visual_mode,
+            "visual_default_provider": self.visual_default_provider,
+            "visual_scene_routing": dict(self.visual_scene_routing),
         }
     
     def to_assembly_config_dict(self) -> dict:

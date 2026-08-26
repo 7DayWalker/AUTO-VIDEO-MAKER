@@ -20,6 +20,7 @@ Visual modes (project-level, persisted in ``ProjectManifest.scene_config``):
                    explicit routing data (never an ephemeral runtime decision)
 """
 
+import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,13 @@ DEFAULT_VISUAL_MODE = "google_flow"
 
 GOOGLE_FLOW_PROVIDER = "google_flow"
 LOCAL_ASSET_PROVIDER = "local_asset"
+IMAGE_MOTION_PROVIDER = "image_motion"
+
+# Providers that never touch Google Flow (Phase 6B cost firewall).
+ZERO_COST_PROVIDERS = {LOCAL_ASSET_PROVIDER, IMAGE_MOTION_PROVIDER}
+VALID_PROVIDERS = ZERO_COST_PROVIDERS | {GOOGLE_FLOW_PROVIDER}
+
+DEFAULT_HYBRID_PROVIDER = IMAGE_MOTION_PROVIDER
 
 # Fallback root for user-supplied local scene assets.
 PROJECT_ASSET_FALLBACK = Path(__file__).resolve().parents[2] / "assets" / "local"
@@ -265,9 +273,14 @@ class LocalAssetVisualProvider:
             "-shortest",
             str(output_path),
         ]
-        proc = run_ffmpeg(args, description=f"LocalAsset normalize {source.name}")
-        if proc.returncode != 0:
-            stderr_tail = (proc.stderr or "")[-300:]
+        try:
+            proc = run_ffmpeg(args, description=f"LocalAsset normalize {source.name}")
+            failed = proc.returncode != 0
+            stderr_tail = (getattr(proc, "stderr", "") or "")[-300:]
+        except Exception as exc:  # noqa: BLE001 - FFmpegExecutionError etc.
+            failed = True
+            stderr_tail = str(exc)[-300:]
+        if failed:
             return _fail(f"FFmpeg normalization failed: {stderr_tail}")
 
         validation = validate_video_file(output_path, request.config.aspect_ratio)
@@ -323,6 +336,281 @@ class LocalAssetVisualProvider:
         )
 
 
+# ---------------------------------------------------------------------------
+# Step 6B — durable hybrid routing
+# ---------------------------------------------------------------------------
+
+def normalize_provider(value: Optional[str]) -> str:
+    provider = (value or "").strip().lower()
+    if provider not in VALID_PROVIDERS:
+        raise ValueError(
+            f"Invalid visual provider '{value}'. Valid: {sorted(VALID_PROVIDERS)}"
+        )
+    return provider
+
+
+def resolve_scene_provider(
+    scene_id: str,
+    *,
+    visual_mode: str,
+    scene_config: Dict[str, Any],
+) -> str:
+    """Resolve ONE scene's provider from durable project state.
+
+    Resolution order:
+      1. explicit persisted entry in ``scene_provider_routing[scene_id]``
+      2. hybrid ``default_provider`` (never google_flow)
+      3. mode defaults: google_flow -> google_flow; local -> local_asset
+
+    In hybrid mode an unresolved scene can NEVER default to google_flow.
+    """
+    mode = normalize_visual_mode(visual_mode)
+    if mode == GOOGLE_FLOW_PROVIDER:
+        return GOOGLE_FLOW_PROVIDER
+    if mode == "local":
+        return LOCAL_ASSET_PROVIDER
+
+    # hybrid
+    explicit = ((scene_config or {}).get("scene_provider_routing") or {}).get(scene_id)
+    if isinstance(explicit, dict) and explicit.get("provider"):
+        return normalize_provider(explicit["provider"])
+    if isinstance(explicit, str) and explicit:
+        return normalize_provider(explicit)
+    return DEFAULT_HYBRID_PROVIDER
+
+
+def build_hybrid_routing(
+    plan_scenes: List[Any],
+    *,
+    scene_config: Dict[str, Any],
+    cli_overrides: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Build the complete authoritative routing map for a hybrid project.
+
+    Called BEFORE any generation. Precedence: CLI overrides > persisted
+    explicit entries > hybrid default (image_motion). Flow is reachable only
+    through an explicit override.
+    """
+    routing: Dict[str, Dict[str, Any]] = {}
+    existing = (scene_config or {}).get("scene_provider_routing") or {}
+    for scene in sorted(plan_scenes, key=lambda s: s.sequence):
+        provider = DEFAULT_HYBRID_PROVIDER
+        reason = "hybrid default"
+        prior = existing.get(scene.id)
+        if isinstance(prior, dict) and prior.get("provider"):
+            provider = normalize_provider(prior["provider"])
+            reason = prior.get("reason", "persisted routing")
+        override = (cli_overrides or {}).get(scene.id)
+        if override:
+            provider = normalize_provider(override)
+            reason = "explicit CLI/config override"
+        routing[scene.id] = {"provider": provider, "reason": reason}
+    return routing
+
+
+# ---------------------------------------------------------------------------
+# Step 6B — ImageMotionVisualProvider
+# ---------------------------------------------------------------------------
+
+_MOTION_PRESETS = (
+    "slow_zoom_in",
+    "slow_zoom_out",
+    "pan_left_to_right",
+    "pan_right_to_left",
+)
+
+
+def motion_preset_for_scene(scene_id: str) -> str:
+    """Deterministic preset selection: same scene id => same preset forever."""
+    digest = hashlib.sha256(scene_id.encode("utf-8")).hexdigest()
+    return _MOTION_PRESETS[int(digest, 16) % len(_MOTION_PRESETS)]
+
+
+def _motion_filter(preset: str, frames: int, width: int, height: int) -> str:
+    """Build the zoompan filter string for a deterministic motion preset."""
+    upscale_w, upscale_h = width * 2, height * 2  # headroom: zoom never upscales
+    center_x = "iw/2-(iw/zoom/2)"
+    center_y = "ih/2-(ih/zoom/2)"
+    last = max(1, frames - 1)
+    if preset == "slow_zoom_in":
+        z = f"min(1+0.12*on/{last},1.12)"
+        x, y = center_x, center_y
+    elif preset == "slow_zoom_out":
+        z = f"if(eq(on,1),1.12,max(1.12-0.12*on/{last},1.001))"
+        x, y = center_x, center_y
+    elif preset == "pan_left_to_right":
+        z = "1.15"
+        x = f"(iw-iw/zoom)*on/{last}"
+        y = center_y
+    else:  # pan_right_to_left
+        z = "1.15"
+        x = f"(iw-iw/zoom)*(1-on/{last})"
+        y = center_y
+    return (
+        f"scale={upscale_w}:{upscale_h}:force_original_aspect_ratio=increase,"
+        f"crop={upscale_w}:{upscale_h},"
+        f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps=30,"
+        "format=yuv420p"
+    )
+
+
+class ImageMotionVisualProvider:
+    """Zero-credit provider: still image -> deterministic Ken Burns/pan MP4.
+
+    Input discovery mirrors LocalAssetVisualProvider but restricted to safe
+    still-image formats (jpg/jpeg/png/webp). No downloads, no search.
+    """
+
+    name = IMAGE_MOTION_PROVIDER
+    requires_browser = False
+
+    _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+    def __init__(self, asset_dir: Path, output_dir: Path):
+        self.asset_dir = Path(asset_dir)
+        self.output_dir = Path(output_dir)
+
+    def is_available(self) -> bool:
+        return self.asset_dir.is_dir()
+
+    def _candidate_names(self, request: SceneGenerationRequest) -> List[str]:
+        names: List[str] = []
+        stem = f"{request.sequence:03d}"
+        for ext in self._IMAGE_EXTS:
+            names.append(f"{request.scene_id}{ext}")
+            names.append(f"{stem}{ext}")
+            names.append(f"scene_{int(request.sequence)}{ext}")
+        return names
+
+    def resolve_asset(self, request: SceneGenerationRequest) -> Optional[Path]:
+        if not self.asset_dir.is_dir():
+            return None
+        for name in self._candidate_names(request):
+            candidate = self.asset_dir / name
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def generate_scene(
+        self,
+        request: SceneGenerationRequest,
+        *,
+        require_confirmation: bool = False,  # zero-cost: nothing to confirm
+        checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> SceneGenerationResult:
+        del require_confirmation  # interface parity only
+
+        def _fail(error: str) -> SceneGenerationResult:
+            result = SceneGenerationResult.failure(
+                request.scene_id, request.sequence, error
+            )
+            result.verification["provider"] = IMAGE_MOTION_PROVIDER
+            return result
+
+        source = self.resolve_asset(request)
+        if source is None:
+            return _fail(
+                f"No local image found for scene '{request.scene_id}' "
+                f"(searched: {', '.join(self._candidate_names(request))}) in {self.asset_dir}"
+            )
+
+        try:
+            probe_media(source)
+        except Exception as exc:  # noqa: BLE001 - corrupt/unreadable image
+            return _fail(f"Invalid or unreadable source image: {exc}")
+
+        target_duration = max(1, int(getattr(request.config, "duration", 4)))
+        width, height = 1080, 1920
+        aspect = getattr(request.config, "aspect_ratio", "9:16")
+        if aspect == "16:9":
+            width, height = 1920, 1080
+        elif aspect == "1:1":
+            width = height = 1080
+
+        preset = motion_preset_for_scene(request.scene_id)
+        frames = max(2, target_duration * 30)
+
+        output_path = self.output_dir / f"{request.scene_id}.mp4"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        args: List[str] = [
+            "-y",
+            "-i", str(source),
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+            "-vf", _motion_filter(preset, frames, width, height),
+            "-t", str(target_duration),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-shortest",
+            str(output_path),
+        ]
+        try:
+            proc = run_ffmpeg(args, description=f"ImageMotion {preset} {source.name}")
+            failed = proc.returncode != 0
+            stderr_tail = (getattr(proc, "stderr", "") or "")[-300:]
+        except Exception as exc:  # noqa: BLE001 - FFmpegExecutionError etc.
+            failed = True
+            stderr_tail = str(exc)[-300:]
+        if failed:
+            return _fail(f"FFmpeg image-motion failed ({preset}): {stderr_tail}")
+
+        validation = validate_video_file(output_path, request.config.aspect_ratio)
+        if not validation.get("valid"):
+            return _fail(
+                f"Image-motion output failed validation: {validation.get('error')}"
+            )
+
+        result = SceneGenerationResult.success_result(
+            scene_id=request.scene_id,
+            sequence=request.sequence,
+            file_path=output_path,
+            file_size=validation.get("file_size", output_path.stat().st_size),
+            actual_duration=validation.get("duration", float(target_duration)),
+            width=validation.get("width", width),
+            height=validation.get("height", height),
+            codec=validation.get("codec", "h264"),
+            generation_cost=0,
+            downloaded_at=datetime.now(timezone.utc).isoformat(),
+            warnings=[f"source_image={source.name}", f"motion_preset={preset}"],
+        )
+        result.verification.update(
+            {
+                "provider": IMAGE_MOTION_PROVIDER,
+                "asset_reference": str(source),
+                "motion_preset": preset,
+                "classification": "zero_cost_image_motion",
+            }
+        )
+
+        if checkpoint_callback is not None:
+            checkpoint_callback(
+                {
+                    "scene_id": request.scene_id,
+                    "provider": IMAGE_MOTION_PROVIDER,
+                    "status": "completed",
+                    "generation_cost": 0,
+                    "file_path": str(output_path),
+                    "validation": validation,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        return result
+
+    def resume_scene(
+        self,
+        request: SceneGenerationRequest,
+        checkpoint: Dict[str, Any],
+        checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> SceneGenerationResult:
+        """Deterministic rendering: resume == regenerate/validate."""
+        return self.generate_scene(
+            request, require_confirmation=False, checkpoint_callback=checkpoint_callback
+        )
+
+
 def create_visual_provider(
     mode: str,
     *,
@@ -330,12 +618,39 @@ def create_visual_provider(
     scenes_output_dir: Path,
     flow_project_url: Optional[str] = None,
     local_asset_dir: Optional[Path] = None,
+    provider_name: Optional[str] = None,
 ):
     """Deterministic provider factory.
 
-    Cost firewall property: ``local`` mode can never construct
-    FlowSceneGenerator because this factory never references it for that mode.
+    Cost firewall properties:
+    - ``local`` mode can never construct FlowSceneGenerator.
+    - In ``hybrid`` mode, ``provider_name`` comes from the PERSISTED routing
+      map; a zero-cost provider name never constructs FlowSceneGenerator.
     """
+    mode = normalize_visual_mode(mode)
+
+    # Scene-level provider override (hybrid only).
+    if provider_name is not None and mode == "hybrid":
+        provider = normalize_provider(provider_name)
+        if provider == GOOGLE_FLOW_PROVIDER:
+            return GoogleFlowVisualProvider(
+                scene_config, scenes_output_dir, flow_project_url
+            )
+        if provider == LOCAL_ASSET_PROVIDER:
+            asset_dir = Path(
+                local_asset_dir
+                or os.getenv("AVM_LOCAL_ASSET_DIR")
+                or PROJECT_ASSET_FALLBACK
+            )
+            return LocalAssetVisualProvider(asset_dir, scenes_output_dir)
+        if provider == IMAGE_MOTION_PROVIDER:
+            image_dir = Path(
+                os.getenv("AVM_IMAGE_ASSET_DIR")
+                or local_asset_dir
+                or PROJECT_ASSET_FALLBACK
+            )
+            return ImageMotionVisualProvider(image_dir, scenes_output_dir)
+
     mode = normalize_visual_mode(mode)
     if mode == GOOGLE_FLOW_PROVIDER:
         return GoogleFlowVisualProvider(
@@ -348,9 +663,10 @@ def create_visual_provider(
             or PROJECT_ASSET_FALLBACK
         )
         return LocalAssetVisualProvider(asset_dir, scenes_output_dir)
-    # hybrid without durable explicit routing data fails loudly (Phase 6A scope)
+    # hybrid without durable explicit routing data fails loudly (Phase 6A scope;
+    # the scenes stage resolves per-scene providers before reaching this point
+    # for zero-cost scenes, and passes provider_name for Flow-routed scenes).
     raise ValueError(
         "visual_mode='hybrid' requires explicitly persisted per-scene routing "
-        "data, which Phase 6A does not provide yet. Use 'local' or "
-        "'google_flow'."
+        "data. Route every scene explicitly, or use 'local'/'google_flow'."
     )

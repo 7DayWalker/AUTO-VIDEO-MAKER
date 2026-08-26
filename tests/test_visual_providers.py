@@ -203,7 +203,7 @@ def test_ef_local_mode_completes_without_touching_flow(tmp_path, monkeypatch):
     stage_meta = orch.manifest.get_stage_result(
         PipelineStage.SCENES
     ).metadata
-    assert stage_meta["provider"] == LOCAL_ASSET_PROVIDER
+    assert LOCAL_ASSET_PROVIDER in stage_meta["provider"]
     assert stage_meta["credits_used"] == 0
 
 

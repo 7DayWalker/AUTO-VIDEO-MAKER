@@ -275,6 +275,22 @@ class ProductionOrchestrator:
         persisted_mode = (self.manifest.scene_config or {}).get("visual_mode")
         if persisted_mode:
             self.config.visual_mode = persisted_mode
+
+        # Step 6B: persisted hybrid routing/default provider are equally
+        # authoritative — runtime config can never re-route a scene.
+        persisted_default = (self.manifest.scene_config or {}).get(
+            "visual_default_provider"
+        )
+        if persisted_default:
+            self.config.visual_default_provider = persisted_default
+        persisted_routing = (self.manifest.scene_config or {}).get(
+            "scene_provider_routing"
+        )
+        if persisted_routing:
+            self.config.visual_scene_routing = {
+                scene_id: item["provider"] if isinstance(item, dict) else item
+                for scene_id, item in persisted_routing.items()
+            }
         
         logger.info(f"Resumed project: {project_id}")
         logger.info(f"Current stage: {self.manifest.current_stage.value}")
@@ -547,8 +563,20 @@ class ProductionOrchestrator:
             self._save_manifest()
             raise StageFailedError("voice", str(e))
     
-    def _execute_scenes_stage(self) -> None:
-        """Execute scene generation stage."""
+    def _execute_scenes_stage(
+        self,
+        *,
+        only_scenes: Optional[frozenset] = None,
+        force_google_flow: bool = False,
+    ) -> None:
+        """Execute scene generation stage.
+
+        Step 6B: ``only_scenes`` restricts the run to a subset of scene IDs
+        (used by hybrid mode so each provider pass touches only its routed
+        scenes). ``force_google_flow=True`` runs the proven Flow body for a
+        hybrid project's explicitly Flow-routed subset without touching the
+        project's persisted hybrid mode.
+        """
         logger.info("")
         logger.info("=" * 40)
         logger.info("Stage 3: SCENE GENERATION")
@@ -568,12 +596,17 @@ class ProductionOrchestrator:
             create_visual_provider,
             resolve_visual_mode,
         )
-        visual_mode = resolve_visual_mode(
-            self.config.visual_mode, self.manifest.scene_config
-        )
-        if self.manifest.scene_config.get("visual_mode") != visual_mode:
-            self.manifest.scene_config["visual_mode"] = visual_mode
-            self._save_manifest()
+        if force_google_flow:
+            # Hybrid Flow pass: run the proven Flow body without mutating the
+            # project's persisted hybrid mode.
+            visual_mode = "google_flow"
+        else:
+            visual_mode = resolve_visual_mode(
+                self.config.visual_mode, self.manifest.scene_config
+            )
+            if self.manifest.scene_config.get("visual_mode") != visual_mode:
+                self.manifest.scene_config["visual_mode"] = visual_mode
+                self._save_manifest()
         
         try:
             from app.content.models import ProductionPlan
@@ -621,6 +654,14 @@ class ProductionOrchestrator:
             # import or construct FlowSceneGenerator (cost firewall).
             if visual_mode == "local" and not self.config.mock_mode:
                 return self._execute_scenes_stage_local(
+                    plan=plan,
+                    started_at=started_at,
+                )
+
+            # Step 6B: functional hybrid mode (durable per-scene routing).
+            if visual_mode == "hybrid" and not self.config.mock_mode \
+                    and not self.config.dry_run:
+                return self._execute_scenes_stage_hybrid(
                     plan=plan,
                     started_at=started_at,
                 )
@@ -771,6 +812,13 @@ class ProductionOrchestrator:
                 
                 # Generate each scene
                 scene_paths = []
+                if only_scenes is not None:
+                    # Hybrid pass: carry forward artifacts owned by other
+                    # provider passes so the final aggregation stays complete.
+                    scene_paths.extend(
+                        p for p in (self.manifest.scene_video_paths or [])
+                        if Path(p).stem not in only_scenes
+                    )
                 stage_credits = 0
 
                 def account_checkpoint_credit(scene_id: str, attempt_number: int = None) -> None:
@@ -816,7 +864,12 @@ class ProductionOrchestrator:
                     logger.info(f"")
                     logger.info(f"Generating scene {i+1}/{len(plan.scenes)}: {scene.id}")
                     logger.info(f"Prompt: {scene.visual_prompt[:100]}...")
-                    
+
+                    # Step 6B: hybrid sub-pass restriction — scenes owned by
+                    # another provider pass are handled elsewhere.
+                    if only_scenes is not None and scene.id not in only_scenes:
+                        continue
+
                     # Check if already completed
                     existing = scene_manifest.get_scene(scene.id)
                     if existing and existing.status in {"completed", "validated"}:
@@ -1115,13 +1168,22 @@ class ProductionOrchestrator:
             self._save_manifest()
             raise StageFailedError("scenes", str(e))
     
-    def _execute_scenes_stage_local(self, *, plan, started_at: str) -> None:
-        """Zero-cost local-asset scene generation (Step 6A cost firewall).
+    def _execute_scenes_stage_local(
+        self,
+        *,
+        plan,
+        started_at: str,
+        only_scenes: Optional[frozenset] = None,
+        provider_by_scene: Optional[Dict[str, str]] = None,
+        mode: str = "local",
+    ) -> None:
+        """Zero-cost scene generation via local_asset/image_motion providers.
 
-        This path NEVER imports or constructs FlowSceneGenerator, never opens
-        Chrome/CDP, and never touches Google Flow. It produces the same
-        durable artifacts as the Flow path: per-scene MP4s, SceneManifestEntry
-        provenance, manifest.scene_checkpoints with provider evidence.
+        Step 6B: ``provider_by_scene`` selects the provider per scene when
+        called from hybrid mode; pure local mode leaves it empty (all scenes
+        use LocalAssetVisualProvider). This path NEVER imports or constructs
+        FlowSceneGenerator, never opens Chrome/CDP, and never touches Google
+        Flow.
         """
         from app.flow.scene_generator import (
             load_manifest as load_scene_manifest,
@@ -1134,7 +1196,6 @@ class ProductionOrchestrator:
             SceneManifest,
         )
         from app.orchestrator.visual_providers import (
-            LOCAL_ASSET_PROVIDER,
             create_visual_provider,
         )
 
@@ -1150,7 +1211,15 @@ class ProductionOrchestrator:
         scene_paths: list = []
 
         for scene in sorted(plan.scenes, key=lambda s: s.sequence):
+            if only_scenes is not None and scene.id not in only_scenes:
+                continue
             logger.info(f"Local asset scene {scene.id} (seq {scene.sequence})")
+
+            # Step 6B: per-scene provider selection (hybrid-aware).
+            chosen_provider = (provider_by_scene or {}).get(
+                scene.id, "local_asset"
+            )
+            logger.info(f"Provider: {chosen_provider}")
 
             # Skip-if-complete (same semantics as the Flow loop).
             existing = scene_manifest.get_scene(scene.id)
@@ -1180,7 +1249,7 @@ class ProductionOrchestrator:
             )
 
             def persist_local_checkpoint(update: Dict[str, Any]) -> None:
-                update = {**update, "provider": LOCAL_ASSET_PROVIDER}
+                update = {**update, "provider": chosen_provider}
                 current = self.manifest.scene_checkpoints.get(update["scene_id"], {})
                 current.update(update)
                 self.manifest.scene_checkpoints[update["scene_id"]] = current
@@ -1192,7 +1261,7 @@ class ProductionOrchestrator:
                     status=current.get("status", "completed"),
                     generation_cost=current.get("generation_cost", 0),
                     checkpoint_evidence={
-                        "provider": LOCAL_ASSET_PROVIDER,
+                        "provider": chosen_provider,
                         "asset_reference": update.get("file_path"),
                     },
                     file_path=current.get("file_path"),
@@ -1201,7 +1270,14 @@ class ProductionOrchestrator:
                 save_scene_manifest(scene_manifest, project_scenes_dir)
                 self._save_manifest()
 
-            result = provider.generate_scene(
+            scene_provider = create_visual_provider(
+                mode,
+                scene_config=self.config.to_scene_config_dict(),
+                scenes_output_dir=project_scenes_dir,
+                provider_name=chosen_provider,
+            )
+
+            result = scene_provider.generate_scene(
                 request,
                 require_confirmation=False,
                 checkpoint_callback=persist_local_checkpoint,
@@ -1226,7 +1302,7 @@ class ProductionOrchestrator:
             scene_paths.append(str(result.file_path))
             self.manifest.scene_checkpoints[scene.id] = {
                 **self.manifest.scene_checkpoints.get(scene.id, {}),
-                "provider": LOCAL_ASSET_PROVIDER,
+                "provider": chosen_provider,
                 "scene_id": scene.id,
                 "sequence": scene.sequence,
                 "status": "completed",
@@ -1248,15 +1324,107 @@ class ProductionOrchestrator:
             output_files=scene_paths,
             metadata={
                 "scene_count": len(scene_paths),
-                "visual_mode": "local",
+                "visual_mode": mode,
                 "credits_used": 0,
-                "provider": LOCAL_ASSET_PROVIDER,
+                "provider": (
+                    sorted(set((provider_by_scene or {}).values()))
+                    or ["local_asset"]
+                ),
             },
             started_at=started_at,
         ))
         self._save_manifest()
 
         logger.info(f"Local asset scene generation complete: {len(scene_paths)} scenes")
+
+    def _execute_scenes_stage_hybrid(self, *, plan, started_at: str) -> None:
+        """Step 6B: functional hybrid mode with durable per-scene routing.
+
+        Sequence (ordering is mandatory):
+          1. Build the complete routing map (CLI overrides > persisted
+             entries > image_motion default).
+          2. Persist it into manifest.scene_config and save — BEFORE any
+             provider runs.
+          3. Run all zero-cost scenes (local_asset / image_motion).
+          4. Run explicitly Flow-routed scenes through the PROVEN Flow body
+             (force_google_flow sub-pass), only if any exist.
+
+        Cost firewall: a zero-cost scene failure NEVER falls back to Flow.
+        """
+        from app.orchestrator.visual_providers import (
+            GOOGLE_FLOW_PROVIDER,
+            build_hybrid_routing,
+        )
+
+        logger.info("Hybrid visual mode: building durable scene routing...")
+
+        # 1+2) Authoritative routing map persisted BEFORE generation.
+        routing = build_hybrid_routing(
+            plan.scenes,
+            scene_config=self.manifest.scene_config,
+            cli_overrides=self.config.visual_scene_routing,
+        )
+        self.manifest.scene_config["visual_mode"] = "hybrid"
+        self.manifest.scene_config["visual_default_provider"] = (
+            self.config.visual_default_provider
+        )
+        self.manifest.scene_config["scene_provider_routing"] = routing
+        self._save_manifest()
+        for sid in sorted(routing):
+            logger.info(
+                "  %s -> %s (%s)", sid, routing[sid]["provider"], routing[sid]["reason"]
+            )
+
+        flow_ids = frozenset(
+            sid
+            for sid, item in routing.items()
+            if item["provider"] == GOOGLE_FLOW_PROVIDER
+        )
+        zero_ids = {sid for sid in routing if sid not in flow_ids}
+        credits_before = self.manifest.total_credits_used
+
+        # 3) Zero-cost pass first: structurally cannot touch Flow.
+        if zero_ids:
+            self._execute_scenes_stage_local(
+                plan=plan,
+                started_at=started_at,
+                only_scenes=frozenset(zero_ids),
+                provider_by_scene={
+                    sid: routing[sid]["provider"] for sid in zero_ids
+                },
+                mode="hybrid",
+            )
+
+        # 4) Explicit Flow pass through the PROVEN Flow body, restricted to
+        # exactly the scenes whose persisted routing says google_flow.
+        if flow_ids:
+            logger.info(
+                "Hybrid: running %d explicitly Flow-routed scene(s): %s",
+                len(flow_ids), sorted(flow_ids),
+            )
+            self._execute_scenes_stage(
+                only_scenes=flow_ids,
+                force_google_flow=True,
+            )
+
+        # 5) Aggregate the final hybrid stage result.
+        final_paths = list(self.manifest.scene_video_paths or [])
+        providers_used = sorted({item["provider"] for item in routing.values()})
+        self.manifest.set_stage_result(StageResult.completed(
+            stage=PipelineStage.SCENES,
+            output_path=str(self.project_dir / "scenes"),
+            output_files=final_paths,
+            metadata={
+                "scene_count": len(final_paths),
+                "visual_mode": "hybrid",
+                "providers": providers_used,
+                "credits_used": self.manifest.total_credits_used - credits_before,
+                "routing": routing,
+            },
+            started_at=started_at,
+        ))
+        self._save_manifest()
+        logger.info("Hybrid scene generation complete: %d scenes", len(final_paths))
 
     def _execute_captions_stage(self) -> None:
         """Execute caption generation stage."""

@@ -255,6 +255,28 @@ Examples:
         help="Credit limit (default: 100)",
     )
     scene_group.add_argument(
+        "--visual-default-provider",
+        type=str,
+        default="image_motion",
+        choices=["image_motion", "local_asset"],
+        help=(
+            "Hybrid mode only: provider for scenes without an explicit "
+            "routing override (default: image_motion). google_flow is never "
+            "a valid default."
+        ),
+    )
+    scene_group.add_argument(
+        "--route-scene",
+        action="append",
+        metavar="SCENE_ID=PROVIDER",
+        default=[],
+        help=(
+            "Hybrid mode only: explicit per-scene provider override, e.g. "
+            "--route-scene scene_003=google_flow. Repeatable. This is the "
+            "ONLY way a scene is routed to Google Flow."
+        ),
+    )
+    scene_group.add_argument(
         "--visual-mode",
         type=str,
         default="google_flow",
@@ -371,13 +393,26 @@ Examples:
         print("=" * 60)
         return run_tiktok_publish_flow(args.publish_tiktok)
     
-    # --flow-project-url is required for Flow-based runs; local mode does not
-    # touch Google Flow at all.
-    if not args.flow_project_url and args.visual_mode != "local":
+    # --flow-project-url is required for Flow-based runs; local mode never
+    # touches Google Flow, and hybrid mode requires it only when at least one
+    # scene is explicitly routed to google_flow.
+    hybrid_routes_to_flow = (
+        args.visual_mode == "hybrid"
+        and any(
+            "=" in item and item.split("=", 1)[1].strip().lower() == "google_flow"
+            for item in args.route_scene
+        )
+    )
+    if not args.flow_project_url and (
+        args.visual_mode == "google_flow"
+        or args.visual_mode == "hybrid"
+        and hybrid_routes_to_flow
+        or (args.visual_mode not in {"local", "hybrid"})
+    ):
         parser.error("--flow-project-url is required for --topic and --resume")
 
     if not args.flow_project_url:
-        args.flow_project_url = ""  # unused in local mode
+        args.flow_project_url = ""  # unused: no scene is routed to Google Flow
     
     print()
     print("=" * 60)
@@ -404,6 +439,14 @@ Examples:
             max_scenes_per_run=args.max_scenes,
             credit_limit=args.credit_limit,
             visual_mode=args.visual_mode,
+            visual_default_provider=args.visual_default_provider,
+            visual_scene_routing={
+                parts[0].strip(): parts[1].strip()
+                for parts in (
+                    item.split("=", 1) for item in args.route_scene if "=" in item
+                )
+                if len(parts) == 2 and parts[0].strip() and parts[1].strip()
+            },
             enable_captions=not args.no_captions,
             music_volume=args.music_volume,
             mock_mode=args.mock,
