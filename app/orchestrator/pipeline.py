@@ -596,6 +596,15 @@ class ProductionOrchestrator:
             create_visual_provider,
             resolve_visual_mode,
         )
+        # Phase 6E: bind SceneManifest BEFORE any branch uses it. The later
+        # real-generation import binds this name function-locally for the
+        # entire method, which previously made the earlier mock branch raise
+        # UnboundLocalError when constructing scene-manifest entries.
+        from app.flow.scene_models import SceneManifest
+        from app.flow.scene_generator import (
+            load_manifest as load_scene_manifest,
+            save_manifest as save_scene_manifest,
+        )
         if force_google_flow:
             # Hybrid Flow pass: run the proven Flow body without mutating the
             # project's persisted hybrid mode.
@@ -679,11 +688,27 @@ class ProductionOrchestrator:
                     # Create a minimal valid MP4 placeholder
                     self._create_mock_video(scene_path, scene.estimated_duration)
                     scene_paths.append(str(scene_path))
+                    # Phase 6E: durable per-scene placeholder provenance,
+                    # mirroring the real-provider checkpoint shape.
+                    self.manifest.scene_checkpoints[scene.id] = {
+                        "provider": "mock",
+                        "generation_kind": "placeholder",
+                        "status": "completed",
+                        "generation_cost": 0,
+                    }
                 
                 self.manifest.scene_video_paths = scene_paths
                 self.manifest.scene_manifest_path = str(scenes_output_dir / "scene_manifest.json")
+                # Phase 6E: project-level marker so CLI summaries and
+                # reconciliation can distinguish mock runs truthfully.
+                self.manifest.scene_config["generation_kind"] = "placeholder"
                 
-                # Create scene manifest
+                # Create scene manifest — Phase 6E: durably mark these as
+                # PLACEHOLDER generations so reconciliation can never promote
+                # them into an indistinguishable "real" SCENES-completed
+                # state. Uses the same additive checkpoint_evidence field as
+                # real providers (absence of the marker == real generation,
+                # preserving legacy-manifest compatibility).
                 scene_manifest = SceneManifest(project_id=plan.project_id)
                 for scene in plan.scenes:
                     scene_manifest.add_scene(
@@ -691,6 +716,10 @@ class ProductionOrchestrator:
                         sequence=scene.sequence,
                         file=f"{scene.id}.mp4",
                         status="completed",
+                        checkpoint_evidence={
+                            "provider": "mock",
+                            "generation_kind": "placeholder",
+                        },
                     )
                 save_scene_manifest(scene_manifest, scenes_output_dir)
                 
@@ -698,7 +727,11 @@ class ProductionOrchestrator:
                     stage=PipelineStage.SCENES,
                     output_path=str(scenes_output_dir),
                     output_files=scene_paths,
-                    metadata={"mock_mode": True, "scene_count": len(plan.scenes)},
+                    metadata={
+                        "mock_mode": True,
+                        "generation_kind": "placeholder",
+                        "scene_count": len(plan.scenes),
+                    },
                     started_at=started_at,
                 ))
                 self._save_manifest()

@@ -175,6 +175,37 @@ def _scene_evidence(manifest: ProjectManifest, project_dir: Path, plan: Optional
     configured_ratio = manifest.scene_config.get("aspect_ratio", "9:16")
     paths = [_path(project_dir, value) for value in manifest.scene_video_paths]
     by_name = {path.stem: path for path in paths if path}
+    # Phase 6E: detect durable placeholder provenance from the scene manifest's
+    # checkpoint_evidence. Legacy/real manifests carry no marker (or explicitly
+    # say "real"), so absence remains classified as genuine generation.
+    placeholders: Dict[str, bool] = {}
+    if str((manifest.scene_config or {}).get("generation_kind")) == "placeholder":
+        for scene in expected:
+            placeholders[scene.id] = True
+    try:
+        sm_path = _path(project_dir, manifest.scene_manifest_path)
+        if not placeholders and sm_path and Path(sm_path).exists():
+            sm_raw = json.loads(Path(sm_path).read_text(encoding="utf-8"))
+            raw_scenes = sm_raw.get("scenes") or []
+            if isinstance(raw_scenes, dict):
+                scene_pairs = list(raw_scenes.items())
+            else:
+                # Canonical SceneManifest serialization is a LIST of
+                # SceneManifestEntry dicts keyed by "scene_id".
+                scene_pairs = [
+                    (str(entry.get("scene_id")), entry)
+                    for entry in raw_scenes
+                    if isinstance(entry, dict)
+                ]
+            for sid, entry in scene_pairs:
+                evidence = entry.get("checkpoint_evidence") or {}
+                if (
+                    evidence.get("generation_kind") == "placeholder"
+                    or evidence.get("provider") == "mock"
+                ):
+                    placeholders[str(sid)] = True
+    except Exception:
+        pass  # unreadable scene manifest cannot fabricate a real-generation claim
     items = []
     for scene in expected:
         path = by_name.get(scene.id)
@@ -185,11 +216,22 @@ def _scene_evidence(manifest: ProjectManifest, project_dir: Path, plan: Optional
         status = ArtifactStatus.VALID.value if validation.get("valid") else (
             ArtifactStatus.MISSING.value if not path.exists() else ArtifactStatus.INVALID.value
         )
-        items.append({"scene_id": scene.id, "status": status, "path": str(path), "validation": validation})
+        item: Dict[str, Any] = {
+            "scene_id": scene.id,
+            "status": status,
+            "path": str(path),
+            "validation": validation,
+        }
+        if scene.id in placeholders:
+            # Phase 6E: durably identifiable mock/placeholder output; this
+            # item must never be mistaken for genuine provider generation.
+            item["generation"] = "placeholder"
+        items.append(item)
     return {
         "status": ArtifactStatus.VALID.value if items and all(i["status"] == ArtifactStatus.VALID.value for i in items) else ArtifactStatus.INVALID.value,
         "required_count": len(items),
         "items": items,
+        "placeholder_count": sum(1 for i in items if i.get("generation") == "placeholder"),
     }
 
 
@@ -341,6 +383,15 @@ def reconcile_project(
     for name, evidence in (("content", content), ("voice", voice), ("scenes", scenes), ("captions", captions), ("assembly", assembly)):
         if evidence.get("status") not in {ArtifactStatus.VALID.value, ArtifactStatus.NOT_REQUIRED.value}:
             reasons.append(f"{name}: {evidence.get('status')}")
+    # Phase 6E: physical validity alone must not promote mock/placeholder
+    # scene output into a genuine PROJECT_COMPLETE verdict.
+    placeholder_count = int(scenes.get("placeholder_count") or 0)
+    if required_ok and placeholder_count:
+        reasons.append(
+            f"scenes: {placeholder_count} placeholder/mock scene(s) "
+            "(not genuine production output)"
+        )
+        required_ok = False
     verdict = ProjectVerdict.PROJECT_COMPLETE if required_ok else ProjectVerdict.PROJECT_REQUIRES_RECONCILIATION
     report = ReconciliationReport(
         project_id=manifest.project_id,

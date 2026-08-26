@@ -66,6 +66,177 @@ def setup_logging(verbose: bool = False) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+def load_persisted_visual_config(resume_project_id):
+    """Load a resumable project's authoritative visual configuration.
+
+    Returns ``None`` for new projects (or unreadable/missing manifests); on
+    resume the returned dict mirrors what the pipeline itself restores into
+    runtime config, so validation can key off what the project REQUIRES.
+    """
+    if not resume_project_id:
+        return None
+    manifest_path = ORCHESTRATOR_OUTPUT_DIR / resume_project_id / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        import json
+
+        raw = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+    scene_config = raw.get("scene_config") or {}
+    return {
+        "visual_mode": scene_config.get("visual_mode"),
+        "default_provider": scene_config.get("visual_default_provider"),
+        "routing": scene_config.get("scene_provider_routing") or {},
+        "checkpoints": raw.get("scene_checkpoints") or {},
+    }
+
+
+def flow_url_required_error(args, persisted=None) -> "Optional[str]":
+    """Return an error message when a Flow URL is required but missing.
+
+    NEW PROJECT: preserves the pre-6E contract exactly — google_flow needs a
+    URL; hybrid needs one only when a scene is explicitly routed to
+    google_flow via --route-scene; anything not local/hybrid falls back to
+    requiring it.
+
+    RESUME: the persisted project configuration is authoritative (the same
+    values the pipeline restores). A URL is demanded ONLY when the Flow
+    execution path is actually needed, i.e. some google_flow-routed scene is
+    not yet completed/validated. Zero-cost resumes therefore require nothing.
+    """
+    has_url = bool(getattr(args, "flow_project_url", ""))
+    mode = getattr(args, "visual_mode", "google_flow")
+    route_items = list(getattr(args, "route_scene", []) or [])
+
+    def _routed_flow(item) -> bool:
+        if isinstance(item, dict):
+            return item.get("provider") == "google_flow"
+        return item == "google_flow"
+
+    if persisted:
+        persisted_mode = persisted.get("visual_mode")
+        if persisted_mode:
+            mode = persisted_mode  # persisted authority over CLI default
+        routing = persisted.get("routing") or {}
+        checkpoints = persisted.get("checkpoints") or {}
+
+        def _pending(scene_ids):
+            pending = []
+            for sid in scene_ids:
+                status = (checkpoints.get(sid) or {}).get("status")
+                if status not in {"completed", "validated"}:
+                    pending.append(sid)
+            return pending
+
+        if mode == "google_flow":
+            flow_scenes = sorted(routing) or ["all scenes"]
+            pending = _pending(flow_scenes)
+            if not routing and not any(checkpoints):
+                pending = flow_scenes
+            if pending and not has_url:
+                return (
+                    "--flow-project-url is required for this resumed "
+                    "project: google_flow scenes are routed/pending."
+                )
+            return None
+        if mode == "hybrid":
+            flow_routed = sorted(
+                sid for sid, value in routing.items() if _routed_flow(value)
+            )
+            pending = _pending(flow_routed)
+            if pending and not has_url:
+                return (
+                    "--flow-project-url is required for this resumed "
+                    f"project: pending google_flow scenes {', '.join(pending)}."
+                )
+            return None
+        return None  # local / zero-cost persisted modes need nothing
+
+    # New projects: exact historical behavior.
+    hybrid_routes_to_flow = (
+        mode == "hybrid"
+        and any(
+            "=" in item and item.split("=", 1)[1].strip().lower() == "google_flow"
+            for item in route_items
+        )
+    )
+    if not has_url and (
+        mode == "google_flow"
+        or (mode == "hybrid" and hybrid_routes_to_flow)
+        or (mode not in {"local", "hybrid"})
+    ):
+        return "--flow-project-url is required for --topic and --resume"
+    return None
+
+
+def build_final_summary(manifest, project_dir) -> "list":
+    """Truthful end-of-run summary (Phase 6E, fixing 6D findings).
+
+    Identity always derives from the ACTUAL durable project directory, never
+    from the content plan ID (which may legitimately differ from the outer
+    project ID). Mock runs are labelled honestly instead of masquerading as
+    production completions. Returns printable lines.
+    """
+    from collections import Counter
+
+    scene_config = getattr(manifest, "scene_config", {}) or {}
+    generation_kind = scene_config.get("generation_kind")
+    durable_id = Path(project_dir).name
+    mock_run = generation_kind == "placeholder"
+    complete_result = manifest.get_stage_result(PipelineStage.COMPLETE)
+    is_accepted = bool(
+        complete_result and complete_result.status.value == "completed"
+    )
+
+    checkpoints = getattr(manifest, "scene_checkpoints", {}) or {}
+    provider_counts = Counter(
+        str(ckpt.get("provider"))
+        for ckpt in checkpoints.values()
+        if isinstance(ckpt, dict) and ckpt.get("provider")
+    )
+
+    if is_accepted and not mock_run:
+        banner = "PROJECT COMPLETE"
+    elif mock_run:
+        banner = "MOCK RUN COMPLETE (placeholder output — not real production)"
+    else:
+        banner = "RUN FINISHED (project not fully accepted yet)"
+    lines = [
+        "",
+        "=" * 60,
+        banner,
+        "=" * 60,
+        "",
+        f"Project ID: {durable_id}",
+    ]
+    if manifest.project_id != durable_id:
+        lines.append(f"Content Plan ID: {manifest.project_id}")
+    lines.extend([
+        f"Project Directory: {project_dir}",
+        f"Topic: {manifest.topic}",
+    ])
+    if manifest.final_video_path:
+        lines.append(f"Final Video: {manifest.final_video_path}")
+    lines.append(f"Visual Mode: {scene_config.get('visual_mode') or 'unknown'}")
+    lines.append("")
+    if provider_counts:
+        lines.append("Providers Used:")
+        if mock_run:
+            lines.append(f"  mock: {sum(provider_counts.values())} (placeholders)")
+        else:
+            for provider_name in sorted(provider_counts):
+                lines.append(f"  {provider_name}: {provider_counts[provider_name]}")
+        lines.append("")
+    lines.append(f"Google Flow Credits Used: {manifest.total_credits_used}")
+    lines.append(
+        "Acceptance Verdict: "
+        + ("PROJECT_COMPLETE" if is_accepted else "NOT_ACCEPTED")
+    )
+    return lines
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -408,23 +579,15 @@ Examples:
         print("=" * 60)
         return run_tiktok_publish_flow(args.publish_tiktok)
     
-    # --flow-project-url is required for Flow-based runs; local mode never
-    # touches Google Flow, and hybrid mode requires it only when at least one
-    # scene is explicitly routed to google_flow.
-    hybrid_routes_to_flow = (
-        args.visual_mode == "hybrid"
-        and any(
-            "=" in item and item.split("=", 1)[1].strip().lower() == "google_flow"
-            for item in args.route_scene
-        )
+    # --flow-project-url is required only when Google Flow execution is truly
+    # possible (Phase 6E): new projects keep the historical contract; resumed
+    # projects are validated against their PERSISTED configuration, which is
+    # authoritative over CLI defaults.
+    flow_error = flow_url_required_error(
+        args, persisted=load_persisted_visual_config(args.resume)
     )
-    if not args.flow_project_url and (
-        args.visual_mode == "google_flow"
-        or args.visual_mode == "hybrid"
-        and hybrid_routes_to_flow
-        or (args.visual_mode not in {"local", "hybrid"})
-    ):
-        parser.error("--flow-project-url is required for --topic and --resume")
+    if flow_error:
+        parser.error(flow_error)
 
     if not args.flow_project_url:
         args.flow_project_url = ""  # unused: no scene is routed to Google Flow
@@ -539,16 +702,15 @@ Examples:
         orchestrator = ProductionOrchestrator(config)
         manifest = orchestrator.run()
         
-        # Print summary
+        # Print truthful summary (Phase 6E): identity comes from the real
+        # project directory, provider usage from real checkpoints, verdicts
+        # from actual acceptance state.
+        for summary_line in build_final_summary(
+            manifest, orchestrator.project_dir
+        ):
+            print(summary_line)
         print()
-        print("=" * 60)
-        print("PRODUCTION COMPLETE")
-        print("=" * 60)
-        print()
-        print(f"Project ID: {manifest.project_id}")
-        print(f"Topic: {manifest.topic}")
-        print()
-        
+
         # Stage summary
         print("Stage Results:")
         for stage in PipelineStage.get_order():
@@ -577,13 +739,6 @@ Examples:
         
         print()
         
-        if manifest.total_credits_used > 0:
-            print(f"Flow Credits Used: {manifest.total_credits_used}")
-            print()
-        
-        print(f"Project Directory: {ORCHESTRATOR_OUTPUT_DIR / manifest.project_id}")
-        print()
-        
         return 0
         
     except StageFailedError as e:
@@ -597,7 +752,12 @@ Examples:
             print(f"Details: {e.details}")
         print()
         print("The project state has been saved. You can resume with:")
-        print(f"  python produce.py --resume <project_id> --flow-project-url {config.flow_project_url}")
+        print("  python produce.py --resume <project_id>")
+        if config.flow_project_url:
+            print(
+                "  (add --flow-project-url "
+                f"{config.flow_project_url} only for Flow-routed scenes)"
+            )
         print()
         return 1
         
