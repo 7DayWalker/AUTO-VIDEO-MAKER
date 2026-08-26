@@ -70,3 +70,6 @@ reconcile_projects.py
 repair_project_216.py
 test_selector_fix.py
 validate_scene1_live.py
+
+# ----- Cloudflare Wrangler Runtime -----
+.wrangler/
