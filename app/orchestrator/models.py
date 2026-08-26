@@ -344,6 +344,10 @@ class OrchestratorConfig(BaseModel):
     # {"scene_003": "google_flow"}. Persisted into scene_config before generation.
     visual_default_provider: str = Field(default="image_motion")
     visual_scene_routing: Dict[str, str] = Field(default_factory=dict)
+    # Step 6C: explicit --asset SCENE_ID=PATH intake mappings. Used ONLY for
+    # first-time intake; never restored on resume (project-owned copies are
+    # authoritative afterwards).
+    asset_mappings: Dict[str, str] = Field(default_factory=dict)
     
     # Assembly settings
     resolution_width: int = Field(default=1080, ge=1)

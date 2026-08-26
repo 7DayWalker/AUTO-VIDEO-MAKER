@@ -53,6 +53,28 @@ VALID_PROVIDERS = ZERO_COST_PROVIDERS | {GOOGLE_FLOW_PROVIDER}
 DEFAULT_HYBRID_PROVIDER = IMAGE_MOTION_PROVIDER
 
 # Fallback root for user-supplied local scene assets.
+# Fallback root for user-supplied local scene assets.
+PROJECT_ASSET_FALLBACK = Path(__file__).resolve().parents[2] / "assets" / "local"
+
+
+def zero_cost_missing_asset_error(
+    provider_name: str,
+    *,
+    scene_id: str,
+    candidates: List[str],
+    asset_dir: Path,
+) -> str:
+    """Single-sourced truthful wording when a zero-cost provider finds no asset.
+
+    Shared by the providers themselves AND by the Phase 6C asset preflight so
+    an early preflight failure reports exactly what the provider would have
+    said (byte-identical messages; no second vocabulary for the same problem).
+    """
+    noun = "image" if provider_name == IMAGE_MOTION_PROVIDER else "asset"
+    return (
+        f"No local {noun} found for scene '{scene_id}' "
+        f"(searched: {', '.join(candidates)}) in {asset_dir}"
+    )
 PROJECT_ASSET_FALLBACK = Path(__file__).resolve().parents[2] / "assets" / "local"
 
 
@@ -224,6 +246,7 @@ class LocalAssetVisualProvider:
         *,
         require_confirmation: bool = False,  # zero-cost: nothing to confirm
         checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        asset_override: Optional[Path] = None,
     ) -> SceneGenerationResult:
         del require_confirmation  # interface parity only
 
@@ -234,11 +257,15 @@ class LocalAssetVisualProvider:
             result.verification["provider"] = LOCAL_ASSET_PROVIDER
             return result
 
-        source = self.resolve_asset(request)
+        source = Path(asset_override) if asset_override else self.resolve_asset(request)
         if source is None:
             return _fail(
-                f"No local asset found for scene '{request.scene_id}' "
-                f"(searched: {', '.join(self._candidate_names(request))}) in {self.asset_dir}"
+                zero_cost_missing_asset_error(
+                    LOCAL_ASSET_PROVIDER,
+                    scene_id=request.scene_id,
+                    candidates=self._candidate_names(request),
+                    asset_dir=self.asset_dir,
+                )
             )
 
         target_duration = max(1, int(getattr(request.config, "duration", 4)))
@@ -329,10 +356,14 @@ class LocalAssetVisualProvider:
         request: SceneGenerationRequest,
         checkpoint: Dict[str, Any],
         checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        asset_override: Optional[Path] = None,
     ) -> SceneGenerationResult:
         """Local scenes are deterministic; resume == regenerate/validate."""
         return self.generate_scene(
-            request, require_confirmation=False, checkpoint_callback=checkpoint_callback
+            request,
+            require_confirmation=False,
+            checkpoint_callback=checkpoint_callback,
+            asset_override=asset_override,
         )
 
 
@@ -497,6 +528,7 @@ class ImageMotionVisualProvider:
         *,
         require_confirmation: bool = False,  # zero-cost: nothing to confirm
         checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        asset_override: Optional[Path] = None,
     ) -> SceneGenerationResult:
         del require_confirmation  # interface parity only
 
@@ -507,11 +539,15 @@ class ImageMotionVisualProvider:
             result.verification["provider"] = IMAGE_MOTION_PROVIDER
             return result
 
-        source = self.resolve_asset(request)
+        source = Path(asset_override) if asset_override else self.resolve_asset(request)
         if source is None:
             return _fail(
-                f"No local image found for scene '{request.scene_id}' "
-                f"(searched: {', '.join(self._candidate_names(request))}) in {self.asset_dir}"
+                zero_cost_missing_asset_error(
+                    IMAGE_MOTION_PROVIDER,
+                    scene_id=request.scene_id,
+                    candidates=self._candidate_names(request),
+                    asset_dir=self.asset_dir,
+                )
             )
 
         try:
@@ -604,10 +640,14 @@ class ImageMotionVisualProvider:
         request: SceneGenerationRequest,
         checkpoint: Dict[str, Any],
         checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        asset_override: Optional[Path] = None,
     ) -> SceneGenerationResult:
         """Deterministic rendering: resume == regenerate/validate."""
         return self.generate_scene(
-            request, require_confirmation=False, checkpoint_callback=checkpoint_callback
+            request,
+            require_confirmation=False,
+            checkpoint_callback=checkpoint_callback,
+            asset_override=asset_override,
         )
 
 

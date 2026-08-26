@@ -1168,6 +1168,170 @@ class ProductionOrchestrator:
             self._save_manifest()
             raise StageFailedError("scenes", str(e))
     
+    def _run_project_asset_gate(
+        self,
+        *,
+        plan,
+        scoped_scenes,
+        scoped_providers,
+        scene_manifest,
+        validate_video_file,
+        project_scenes_dir,
+    ) -> Dict[str, Optional[str]]:
+        """Phase 6C: durable per-project asset workflow gate (zero-cost only).
+
+        Scenes-stage ordering contract:
+
+          1-3. Visual mode + authoritative routing are resolved/persisted by
+               callers BEFORE this gate runs (already durable).
+          4.   Explicitly supplied assets (--asset SCENE_ID=PATH) are copied
+               into project-owned storage under ``assets/source/``.
+          5.   The asset manifest is persisted atomically (BEFORE validation,
+               mirroring how routing persists before generation).
+          6.   Full preflight runs (SHA-256 re-verification, media-type
+               expectations, legacy discovery) across ALL pending zero-cost
+               scenes in ONE pass — every problem is reported together.
+          7.   Only on success may zero-cost generation begin.
+
+        On failure raises StageFailedError with every reason embedded in the
+        message (so they survive outer re-wrapping) plus structured details;
+        the persisted routing and asset manifest remain intact, keeping the
+        project resumable once the user supplies/fixes assets. Google Flow is
+        structurally unreachable here: this gate never imports or constructs
+        it, and google_flow-routed scenes are exempt from preflight scope.
+
+        Completed+valid scenes are excluded from preflight scope; their
+        established skip-if-complete/output-validation semantics are unchanged.
+
+        Returns the per-scene authoritative source mapping (project-owned
+        copy when an entry exists, else the legacy-discovered file) used BOTH
+        as the generation-time ``asset_override`` (regeneration therefore uses
+        stored copies regardless of external originals) AND as TRUE SOURCE
+        provenance.
+        """
+        from types import SimpleNamespace
+
+        import app.orchestrator.assets as asset_workflow
+        from app.orchestrator.visual_providers import (
+            LOCAL_ASSET_PROVIDER,
+            create_visual_provider,
+            zero_cost_missing_asset_error,
+        )
+
+        # Pending scenes only: completed scenes keep their established
+        # semantics and are exempt from fingerprint/media checks.
+        pending: List[Any] = []
+        for scene in sorted(scoped_scenes, key=lambda s: s.sequence):
+            existing = scene_manifest.get_scene(scene.id)
+            if existing and existing.status in {"completed", "validated"}:
+                existing_path = project_scenes_dir / existing.file
+                if existing_path.exists():
+                    validation = validate_video_file(
+                        existing_path, self.config.scene_aspect_ratio
+                    )
+                    if validation.get("valid"):
+                        logger.info(
+                            f"Asset preflight: scene {scene.id} already "
+                            "complete, exempt from preflight"
+                        )
+                        continue
+            pending.append(scene)
+
+        # Steps 4+5: intake explicit mappings, persist manifest immediately.
+        # Resume runs usually carry no mappings and rely solely on the stored
+        # project-owned copies (external originals are never consulted).
+        errors: List[str] = []
+        mappings = dict(self.config.asset_mappings or {})
+        if mappings:
+            manifest, intake_errors = asset_workflow.intake_assets(
+                self.project_dir, plan.scenes, mappings, scoped_providers
+            )
+            errors.extend(intake_errors)
+        else:
+            manifest = asset_workflow.load_asset_manifest(self.project_dir)
+
+        # Legacy filename-discovery fallback, delegating to the very providers
+        # that will generate (identical naming conventions and asset dirs;
+        # single source of truth — no duplicated candidate logic).
+        provider_cache: Dict[str, Any] = {}
+
+        def legacy_resolver(scene):
+            name = scoped_providers.get(scene.id, LOCAL_ASSET_PROVIDER)
+            instance = provider_cache.get(name)
+            if instance is None:
+                instance = create_visual_provider(
+                    "hybrid",
+                    scene_config=self.config.to_scene_config_dict(),
+                    scenes_output_dir=project_scenes_dir,
+                    provider_name=name,
+                )
+                provider_cache[name] = instance
+            stub = SimpleNamespace(
+                scene_id=scene.id,
+                sequence=int(getattr(scene, "sequence", 0) or 0),
+            )
+            try:
+                found = instance.resolve_asset(stub)
+            except Exception:  # noqa: BLE001 - surfaced as truthful failure
+                found = None
+            if found is not None:
+                return found
+            # Provider-identical wording (single-sourced helper).
+            return zero_cost_missing_asset_error(
+                name,
+                scene_id=scene.id,
+                candidates=instance._candidate_names(stub),
+                asset_dir=instance.asset_dir,
+            )
+
+        # Step 6: report ALL problems together, never one-scene-at-a-time.
+        failures = list(errors)
+        if pending:
+            failures.extend(
+                asset_workflow.preflight_assets(
+                    self.project_dir,
+                    pending,
+                    {
+                        scene_id: {"provider": provider}
+                        for scene_id, provider in scoped_providers.items()
+                    },
+                    manifest,
+                    legacy_resolver=legacy_resolver,
+                )
+            )
+        if failures:
+            raise StageFailedError(
+                "scenes",
+                "Asset preflight failed:\n"
+                + "\n".join(f"- {failure}" for failure in failures),
+                {
+                    "failures": failures,
+                    "hint": (
+                        "Provide/correct assets with produce.py --asset "
+                        "SCENE_ID=PATH (repeatable), then resume with "
+                        "--resume <project_id>. Persisted routing and the "
+                        "asset manifest were preserved."
+                    ),
+                },
+            )
+
+        # Step 7 prep: authoritative per-scene sources. A manifest entry is
+        # ALWAYS the project-owned stored copy; scenes without an entry keep
+        # their legacy-discovered file (the exact file the provider picks).
+        source_by_scene: Dict[str, Optional[str]] = {}
+        for scene in scoped_scenes:
+            authoritative = asset_workflow.resolve_authoritative_source(
+                self.project_dir, scene.id, manifest
+            )
+            if authoritative is not None:
+                source_by_scene[scene.id] = str(authoritative)
+                continue
+            outcome = legacy_resolver(scene)
+            source_by_scene[scene.id] = (
+                str(outcome) if isinstance(outcome, Path) else None
+            )
+        return source_by_scene
+
     def _execute_scenes_stage_local(
         self,
         *,
@@ -1202,6 +1366,26 @@ class ProductionOrchestrator:
         project_scenes_dir = self.project_dir / "scenes" / plan.project_id
         scene_manifest = load_scene_manifest(project_scenes_dir, plan.project_id)
 
+        # Phase 6C ordering contract: intake explicit assets -> persist asset
+        # manifest -> preflight ALL pending zero-cost scenes -> only then may
+        # generation begin. Routing/mode were persisted durably upstream.
+        # Returns authoritative per-scene sources (project-owned copies or
+        # legacy-discovered files).
+        scoped_scenes_for_gate = [
+            s for s in plan.scenes if only_scenes is None or s.id in only_scenes
+        ]
+        source_by_scene = self._run_project_asset_gate(
+            plan=plan,
+            scoped_scenes=scoped_scenes_for_gate,
+            scoped_providers={
+                s.id: (provider_by_scene or {}).get(s.id, "local_asset")
+                for s in scoped_scenes_for_gate
+            },
+            scene_manifest=scene_manifest,
+            validate_video_file=validate_video_file,
+            project_scenes_dir=project_scenes_dir,
+        )
+
         provider = create_visual_provider(
             "local",
             scene_config=self.config.to_scene_config_dict(),
@@ -1220,6 +1404,14 @@ class ProductionOrchestrator:
                 scene.id, "local_asset"
             )
             logger.info(f"Provider: {chosen_provider}")
+
+            # Phase 6C: TRUE SOURCE provenance. A project-owned stored copy
+            # takes precedence; otherwise the legacy-discovered file (the
+            # exact file this provider would pick itself) is pinned here so
+            # the provider reuses the same asset and provenance is durable.
+            source_ref = source_by_scene.get(scene.id)
+            if source_ref:
+                logger.info(f"Source asset: {source_ref}")
 
             # Skip-if-complete (same semantics as the Flow loop).
             existing = scene_manifest.get_scene(scene.id)
@@ -1262,7 +1454,11 @@ class ProductionOrchestrator:
                     generation_cost=current.get("generation_cost", 0),
                     checkpoint_evidence={
                         "provider": chosen_provider,
+                        # Kept for backward compatibility with existing
+                        # readers (output MP4 path). The true source lives in
+                        # ``source_asset`` below (Phase 6C provenance fix).
                         "asset_reference": update.get("file_path"),
+                        "source_asset": source_ref,
                     },
                     file_path=current.get("file_path"),
                     validation=current.get("validation", {}),
@@ -1281,6 +1477,10 @@ class ProductionOrchestrator:
                 request,
                 require_confirmation=False,
                 checkpoint_callback=persist_local_checkpoint,
+                # Phase 6C: the project-owned stored copy (or pinned legacy
+                # discovery result) is authoritative; external originals are
+                # never consulted during (re)generation.
+                asset_override=Path(source_ref) if source_ref else None,
             )
             if not result.success:
                 raise StageFailedError(
@@ -1307,6 +1507,9 @@ class ProductionOrchestrator:
                 "sequence": scene.sequence,
                 "status": "completed",
                 "generation_cost": 0,
+                # Phase 6C: TRUE SOURCE asset provenance (project-owned copy
+                # or pinned legacy file), distinct from the output MP4 path.
+                "source_asset": source_ref,
                 "file_path": str(result.file_path),
                 "validation": validation,
                 "updated_at": datetime.now().isoformat(),

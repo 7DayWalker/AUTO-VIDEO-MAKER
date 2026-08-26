@@ -94,6 +94,21 @@ Examples:
         type=str,
         help="Video topic (required for new projects)",
     )
+    parser.add_argument(
+        "--asset",
+        action="append",
+        default=[],
+        metavar="SCENE_ID=PATH",
+        help=(
+            "Explicit per-scene asset for visual_mode 'local'/'hybrid', e.g. "
+            '--asset scene_001="C:\\assets\\garden.jpg". Repeatable '
+            "(one per scene). The file is COPIED into the project-owned "
+            "assets/source/ directory, fingerprinted (SHA-256) into "
+            "assets/asset_manifest.json, and the project copy is then the "
+            "only authoritative source for that scene (external originals "
+            "may change or disappear safely afterwards)."
+        ),
+    )
     topic_group.add_argument(
         "--resume", "-r",
         type=str,
@@ -440,6 +455,17 @@ Examples:
             credit_limit=args.credit_limit,
             visual_mode=args.visual_mode,
             visual_default_provider=args.visual_default_provider,
+            # Phase 6C: explicit per-scene assets. Parsed leniently here;
+            # malformed entries are validated truthfully downstream
+            # (windows-safe split on the FIRST '=' only, so drive letters
+            # like C:\... survive intact).
+            asset_mappings={
+                parts[0].strip(): parts[1]
+                for parts in (
+                    item.split("=", 1) for item in args.asset if "=" in item
+                )
+                if len(parts) == 2 and parts[0].strip() and parts[1].strip()
+            },
             visual_scene_routing={
                 parts[0].strip(): parts[1].strip()
                 for parts in (
@@ -459,6 +485,21 @@ Examples:
     except Exception as e:
         print(f"ERROR: Invalid configuration: {e}")
         return 1
+
+    # Phase 6C: validate explicit asset mappings truthfully BEFORE any work.
+    # Paths are NOT split on later '=' characters (Windows drive letters and
+    # paths containing '=' survive intact).
+    for entry in args.asset:
+        if (
+            "=" not in entry
+            or not entry.split("=", 1)[0].strip()
+            or not entry.split("=", 1)[1].strip()
+        ):
+            print(
+                f"ERROR: Malformed --asset entry {entry!r}. Expected "
+                'SCENE_ID=PATH, e.g. --asset scene_001="C:\\assets\\garden.jpg"'
+            )
+            return 1
     
     # Display configuration
     if args.resume:
