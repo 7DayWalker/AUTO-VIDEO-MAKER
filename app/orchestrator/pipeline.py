@@ -291,6 +291,11 @@ class ProductionOrchestrator:
                 scene_id: item["provider"] if isinstance(item, dict) else item
                 for scene_id, item in persisted_routing.items()
             }
+# Phase 6F: persisted visual source is authoritative on resume. A
+        # project started with a configured source keeps that exact source.
+        persisted_source = (self.manifest.scene_config or {}).get("visual_source")
+        if persisted_source:
+            self.config.image_source = persisted_source
         
         logger.info(f"Resumed project: {project_id}")
         logger.info(f"Current stage: {self.manifest.current_stage.value}")
@@ -616,6 +621,11 @@ class ProductionOrchestrator:
             if self.manifest.scene_config.get("visual_mode") != visual_mode:
                 self.manifest.scene_config["visual_mode"] = visual_mode
                 self._save_manifest()
+            # Phase 6F: persist the automatic visual source selection with the
+            # mode so resume reproduces the exact source (or the honest
+            # "not configured" default).
+            if self.config.image_source:
+                self.manifest.scene_config["visual_source"] = self.config.image_source
         
         try:
             from app.content.models import ProductionPlan
@@ -1201,6 +1211,103 @@ class ProductionOrchestrator:
             self._save_manifest()
             raise StageFailedError("scenes", str(e))
     
+    def _auto_source_missing_assets(self, *, plan, pending, scoped_providers,
+                                    manifest) -> "tuple[dict, list, Optional[str]]":
+        """Phase 6F: source still images for pending zero-cost scenes that
+        have no project-owned asset yet.
+
+        This is a SUPPLIER to the Phase 6C intake: produced artifacts land in
+        a temp workspace and are passed through ``intake_assets()`` by the
+        caller, which owns the authoritative project copy + SHA-256 manifest.
+
+        Honest/idempotent semantics:
+        - Scenes with an existing verified project-owned asset are left
+          untouched (resume never re-sources).
+        - Scenes already covered by an explicit ``--asset`` mapping are not
+          double-sourced.
+        - An unconfigured source returns no mappings and no fabricated
+          artifacts (the caller's preflight then fails truthfully).
+        - A configured-but-dormant/failed source is reported honestly and
+          NEVER silently falls back to Google Flow or fake assets.
+
+        Returns ``(auto_mappings, notes, source_provider_id)``.
+        """
+        from app.orchestrator.visual_sources import (
+            VisualSourceContext,
+            VisualSourceStatus,
+            create_visual_source,
+        )
+        from app.orchestrator.visual_providers import (
+            IMAGE_MOTION_PROVIDER,
+            LOCAL_ASSET_PROVIDER,
+        )
+
+        selector = self.config.image_source or (
+            self.manifest.scene_config or {}
+        ).get("visual_source")
+        source = create_visual_source(selector)
+        if source is None:
+            return {}, [], None
+
+        pending_ids = {scene.id for scene in pending}
+        target_ids = {
+            sid
+            for sid in pending_ids
+            if scoped_providers.get(sid)
+            in (IMAGE_MOTION_PROVIDER, LOCAL_ASSET_PROVIDER)
+        }
+        # Scenes already handled by explicit user mappings must not be re-sourced.
+        target_ids -= set(self.config.asset_mappings or {})
+        # Scenes with an existing project-owned asset stay authoritative.
+        target_ids -= set((manifest.get("assets") or {}).keys())
+
+        if not target_ids:
+            return {}, [], source.name
+
+        if not source.is_available():
+            notes = [
+                f"automatic visual source '{source.name}' is not ready to "
+                f"source imagery: {source.configuration_summary()}"
+            ]
+            return {}, notes, source.name
+
+        scene_by_id = {scene.id: scene for scene in plan.scenes}
+        auto_mappings: Dict[str, str] = {}
+        notes: List[str] = []
+        auto_src_dir = self.project_dir / "temp" / "auto_source"
+
+        for sid in sorted(target_ids):
+            scene = scene_by_id.get(sid)
+            if scene is None:
+                continue
+            ctx = VisualSourceContext(
+                project_id=plan.project_id,
+                scene_id=scene.id,
+                sequence=scene.sequence,
+                visual_prompt=scene.visual_prompt,
+                purpose=getattr(scene, "purpose", None),
+                visual_style=getattr(scene, "visual_style", None),
+                camera_direction=getattr(scene, "camera_direction", None),
+                on_screen_text=getattr(scene, "on_screen_text", None),
+                aspect_ratio=self.config.scene_aspect_ratio,
+                output_dir=auto_src_dir,
+            )
+            result = source.source(ctx)
+            if (
+                result.status == VisualSourceStatus.SUCCESS
+                and result.artifact_path is not None
+                and str(result.artifact_path).lower().endswith(
+                    (".jpg", ".jpeg", ".png", ".webp")
+                )
+            ):
+                auto_mappings[scene.id] = str(result.artifact_path)
+            else:
+                notes.append(
+                    f"Scene '{sid}': automatic visual source {source.name} "
+                    f"could not produce a usable image: {result.message}"
+                )
+
+        return auto_mappings, notes, source.name
     def _run_project_asset_gate(
         self,
         *,
@@ -1270,18 +1377,42 @@ class ProductionOrchestrator:
                         continue
             pending.append(scene)
 
-        # Steps 4+5: intake explicit mappings, persist manifest immediately.
-        # Resume runs usually carry no mappings and rely solely on the stored
-        # project-owned copies (external originals are never consulted).
+        # Steps 4+5: explicit mappings AND automatic visual sourcing are both
+        # SUPPLIERS to Phase 6C intake. Load the current manifest first (to
+        # know which scenes genuinely lack a project-owned asset), then source
+        # missing still images, then run intake ONCE over the combined map so
+        # everything lands in the authoritative project-owned store.
         errors: List[str] = []
+        manifest = asset_workflow.load_asset_manifest(self.project_dir)
         mappings = dict(self.config.asset_mappings or {})
+
+        auto_mappings, source_notes, source_provider = (
+            self._auto_source_missing_assets(
+                plan=plan,
+                pending=pending,
+                scoped_providers=scoped_providers,
+                manifest=manifest,
+            )
+        )
+        mappings.update(auto_mappings)
+
         if mappings:
+            provenance: Dict[str, Dict] = {
+                sid: {"supplied_by": "user"}
+                for sid in (self.config.asset_mappings or {})
+            }
+            for sid in auto_mappings:
+                provenance[sid] = {
+                    "supplied_by": "auto_source",
+                    "source_provider": source_provider or "unknown",
+                    "source_status": "success",
+                }
             manifest, intake_errors = asset_workflow.intake_assets(
-                self.project_dir, plan.scenes, mappings, scoped_providers
+                self.project_dir, plan.scenes, mappings, scoped_providers,
+                provenance=provenance,
             )
             errors.extend(intake_errors)
-        else:
-            manifest = asset_workflow.load_asset_manifest(self.project_dir)
+        errors.extend(source_notes)
 
         # Legacy filename-discovery fallback, delegating to the very providers
         # that will generate (identical naming conventions and asset dirs;
@@ -1815,14 +1946,34 @@ class ProductionOrchestrator:
             
             logger.info(f"Assembling {len(assembly_scenes)} scenes")
             
+            # Assembly configuration is resolved before caption wiring so the
+            # caption preset + play resolution are reproducible from it.
+            assembly_config = self.config.to_assembly_config_dict()
+
             # Build caption config
             caption_config = CaptionConfig(enabled=False)
             if self.manifest.captions_path and Path(self.manifest.captions_path).exists():
+                # Phase 6F: reproducible caption presentation. The persisted
+                # assembly_config snapshot is authoritative on resume so the
+                # presentation never silently changes with future defaults;
+                # the play resolution pins the explicit vertical coordinate
+                # system (1080x1920) the style values are interpreted against.
+                persisted_preset = (
+                    (self.manifest.assembly_config or {}).get("caption_preset")
+                    or self.config.caption_preset
+                    or "standard"
+                )
                 caption_config = CaptionConfig(
                     enabled=True,
                     source=self.manifest.captions_path,
+                    preset=persisted_preset,
+                    play_width=assembly_config.get("resolution_width") or 1080,
+                    play_height=assembly_config.get("resolution_height") or 1920,
                 )
-                logger.info(f"Captions: {self.manifest.captions_path}")
+                logger.info(
+                    f"Captions: {self.manifest.captions_path} "
+                    f"(preset={persisted_preset})"
+                )
             
             # Build assembly project
             assembly_config = self.config.to_assembly_config_dict()

@@ -141,6 +141,7 @@ def intake_assets(
     plan_scenes: List[Any],
     mappings: Dict[str, str],
     provider_by_scene: Dict[str, str],
+    provenance: Optional[Dict[str, Dict]] = None,
 ):
     """Validate + copy mapped assets into the project; update the manifest.
 
@@ -221,7 +222,7 @@ def intake_assets(
             )
             continue
 
-        manifest["assets"][scene_id] = {
+        entry = {
             "source_name": raw_path.name,
             "stored_as": f"assets/source/{stored_name}",
             "media_type": media_type,
@@ -229,6 +230,11 @@ def intake_assets(
             "sha256": stored_hash,
             "bytes": stored_path.stat().st_size,
         }
+        prov = (provenance or {}).get(scene_id) or {}
+        for key in ("supplied_by", "source_provider", "source_status"):
+            if prov.get(key):
+                entry[key] = prov[key]
+        manifest["assets"][scene_id] = entry
 
     save_asset_manifest(project_dir, manifest)
     return manifest, errors

@@ -58,6 +58,38 @@ class CaptionConfig(BaseModel):
     font_size: Optional[int] = Field(default=None, ge=8, le=200, description="Override font size")
     font_color: Optional[str] = Field(default=None, description="Override font color")
     margin_bottom: Optional[int] = Field(default=None, ge=0, description="Override bottom margin")
+    # Phase 6F: caption presentation contract. ``preset`` selects a small set
+    # of reproducible presentation configurations; ``play_width``/``play_height``
+    # pin the explicit subtitle coordinate system (vertical 1080x1920 by
+    # default) so font sizes and margins are interpreted deterministically.
+    preset: Optional[str] = Field(
+        default=None,
+        description="Caption presentation preset (minimal/standard/bold/viral)",
+    )
+    play_width: Optional[int] = Field(
+        default=None, ge=1, le=7680,
+        description="Explicit subtitle play-resolution width",
+    )
+    play_height: Optional[int] = Field(
+        default=None, ge=1, le=4320,
+        description="Explicit subtitle play-resolution height",
+    )
+    outline: Optional[int] = Field(
+        default=None, ge=0, le=30,
+        description="Override outline width in play-resolution pixels",
+    )
+    shadow: Optional[int] = Field(
+        default=None, ge=0, le=30,
+        description="Override shadow depth in play-resolution pixels",
+    )
+
+    @field_validator("preset")
+    @classmethod
+    def validate_preset_name(cls, v):
+        if v is None:
+            return v
+        from app.assembly.caption_presets import validate_preset
+        return validate_preset(v)
     
     @model_validator(mode="after")
     def validate_source_when_enabled(self):

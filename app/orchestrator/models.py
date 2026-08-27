@@ -7,6 +7,7 @@ Pydantic models for pipeline state management and configuration.
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+import os
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, field_validator
 
@@ -348,12 +349,25 @@ class OrchestratorConfig(BaseModel):
     # first-time intake; never restored on resume (project-owned copies are
     # authoritative afterwards).
     asset_mappings: Dict[str, str] = Field(default_factory=dict)
+    # Phase 6F: automatic visual source selector. Empty = not configured
+    # (missing assets fail honestly). "fixture" = deterministic local fixture
+    # for offline validation; any other value maps to the dormant external
+    # adapter boundary, which never consumes paid quota or makes a call.
+    image_source: str = Field(
+        default_factory=lambda: (os.getenv("AVM_IMAGE_SOURCE") or "").strip()
+    )
     
     # Assembly settings
     resolution_width: int = Field(default=1080, ge=1)
     resolution_height: int = Field(default=1920, ge=1)
     music_volume: float = Field(default=0.15, ge=0, le=1.0)
     enable_captions: bool = Field(default=True)
+    # Phase 6F: caption presentation preset (minimal/standard/bold/viral).
+    # Persisted into assembly_config so resume reproduces the same
+    # presentation instead of silently changing with future defaults.
+    caption_preset: str = Field(
+        default_factory=lambda: (os.getenv("AVM_CAPTION_PRESET") or "standard").strip()
+    )
     
     # Execution settings
     dry_run: bool = Field(default=False, description="Verify without generating")
@@ -431,6 +445,17 @@ class OrchestratorConfig(BaseModel):
         from app.orchestrator.visual_providers import normalize_provider
         return {scene_id.strip(): normalize_provider(p) for scene_id, p in v.items()}
 
+    @field_validator("caption_preset")
+    @classmethod
+    def validate_caption_preset(cls, v):
+        from app.assembly.caption_presets import validate_preset
+        return validate_preset(v)
+
+    @field_validator("image_source")
+    @classmethod
+    def normalize_image_source(cls, v):
+        return (v or "").strip()
+
     def to_scene_config_dict(self) -> dict:
         """Convert to scene generation parameters."""
         return {
@@ -442,6 +467,7 @@ class OrchestratorConfig(BaseModel):
             "visual_mode": self.visual_mode,
             "visual_default_provider": self.visual_default_provider,
             "visual_scene_routing": dict(self.visual_scene_routing),
+            "visual_source": self.image_source,
         }
     
     def to_assembly_config_dict(self) -> dict:
@@ -451,4 +477,5 @@ class OrchestratorConfig(BaseModel):
             "resolution_height": self.resolution_height,
             "music_volume": self.music_volume,
             "enable_captions": self.enable_captions,
+            "caption_preset": self.caption_preset,
         }

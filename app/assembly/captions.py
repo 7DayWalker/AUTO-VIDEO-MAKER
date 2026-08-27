@@ -8,18 +8,20 @@ from pathlib import Path
 import logging
 
 from app.assembly.config import (
-    CAPTION_FONT_SIZE,
-    CAPTION_FONT_COLOR,
-    CAPTION_OUTLINE_COLOR,
-    CAPTION_OUTLINE_WIDTH,
-    CAPTION_MARGIN_BOTTOM,
-    CAPTION_FONT,
     VIDEO_CODEC,
     VIDEO_PRESET,
     VIDEO_CRF,
     PIXEL_FORMAT,
     AUDIO_CODEC,
     AUDIO_BITRATE,
+)
+from app.assembly.caption_presets import (
+    DEFAULT_CAPTION_PRESET,
+    DEFAULT_PLAY_WIDTH,
+    DEFAULT_PLAY_HEIGHT,
+    generate_ass,
+    resolve_caption_style,
+    validate_preset,
 )
 from app.assembly.ffmpeg import run_ffmpeg
 from app.assembly.exceptions import CaptionError
@@ -28,50 +30,64 @@ from app.assembly.models import CaptionConfig
 logger = logging.getLogger(__name__)
 
 
+def _escape_filter_path(path) -> str:
+    """Escape a filesystem path for embedding inside an FFmpeg filter.
+
+    Backslashes become forward slashes and the drive colon is escaped with a
+    backslash so the filter parser does not treat it as an option separator.
+    """
+    return str(path).replace("\\", "/").replace(":", "\\:")
+
+
 def build_subtitle_filter(
     srt_path: Path,
     config: CaptionConfig = None,
+    ass_path: Path = None,
 ) -> str:
-    """
-    Build FFmpeg subtitles filter string.
-    
+    """Build an FFmpeg subtitles filter carrying an explicit caption contract.
+
+    Phase 6F: instead of passing an SRT through ``force_style`` (whose font
+    size / margins libass interprets against an uncontrolled default script
+    resolution, causing oversized captions high on a 1080x1920 frame), this
+    converts the SRT into an ASS script that declares an explicit
+    PlayResX/PlayResY matching the output and applies a selected presentation
+    preset. The result is deterministic and reproducible.
+
+    The filter uses the named ``filename=`` option form (not the bare
+    positional form) which newer FFmpeg builds parse unambiguously.
+
     Args:
-        srt_path: Path to SRT file.
-        config: Optional caption configuration overrides.
-    
+        srt_path: Path to the SRT captions file.
+        config: Optional caption configuration (preset / play resolution /
+            per-field overrides).
+        ass_path: Optional explicit destination for the rendered ASS script.
+            Defaults to ``<srt>`` with the extension replaced by ``.ass``.
+
     Returns:
-        FFmpeg filter string for subtitle rendering.
+        FFmpeg subtitles filter string referencing the rendered ASS file.
     """
-    # Get settings (use config overrides if provided)
-    font_size = config.font_size if config and config.font_size else CAPTION_FONT_SIZE
-    font_color = config.font_color if config and config.font_color else CAPTION_FONT_COLOR
-    margin_bottom = config.margin_bottom if config and config.margin_bottom else CAPTION_MARGIN_BOTTOM
-    
-    # Escape path for FFmpeg (Windows paths need special handling)
-    escaped_path = str(srt_path).replace("\\", "/").replace(":", "\\:")
-    
-    # Build style string
-    # FFmpeg ASS style format
-    style_parts = [
-        f"FontSize={font_size}",
-        f"PrimaryColour=&H00FFFFFF",  # White in ABGR
-        f"OutlineColour=&H00000000",  # Black outline
-        f"BorderStyle=1",
-        f"Outline={CAPTION_OUTLINE_WIDTH}",
-        f"Shadow=0",
-        f"MarginV={margin_bottom}",
-        f"Alignment=2",  # Bottom center
-    ]
-    
-    if CAPTION_FONT:
-        style_parts.append(f"FontName={CAPTION_FONT}")
-    
-    style_str = ",".join(style_parts)
-    
-    # Build filter
-    filter_str = f"subtitles='{escaped_path}':force_style='{style_str}'"
-    
-    return filter_str
+    if config is None or not getattr(config, "preset", None):
+        preset = DEFAULT_CAPTION_PRESET
+    else:
+        preset = validate_preset(config.preset)
+
+    play_w = getattr(config, "play_width", None) or DEFAULT_PLAY_WIDTH
+    play_h = getattr(config, "play_height", None) or DEFAULT_PLAY_HEIGHT
+
+    # Only carry genuinely-provided overrides; None means "use the preset".
+    overrides = {}
+    for key in ("font_size", "margin_bottom", "font_color", "outline", "shadow"):
+        value = getattr(config, key, None)
+        if value is not None:
+            overrides[key] = value
+
+    style = resolve_caption_style(preset, play_w, play_h, overrides)
+    srt = Path(srt_path)
+    ass = Path(ass_path) if ass_path else srt.with_suffix(".ass")
+    generate_ass(srt, ass, style)
+
+    return f"subtitles=filename='{_escape_filter_path(ass)}'"
+
 
 
 def burn_captions(

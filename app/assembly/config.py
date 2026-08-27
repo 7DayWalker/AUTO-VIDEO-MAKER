@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from app.config import PROJECT_ROOT
+from app.assembly.caption_presets import DEFAULT_CAPTION_PRESET
 
 
 # ----- FFmpeg Paths -----
@@ -130,4 +131,5 @@ def get_caption_settings() -> dict:
         "background": CAPTION_BACKGROUND,
         "margin_bottom": CAPTION_MARGIN_BOTTOM,
         "font": CAPTION_FONT,
+        "preset": DEFAULT_CAPTION_PRESET,
     }

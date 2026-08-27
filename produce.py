@@ -220,6 +220,9 @@ def build_final_summary(manifest, project_dir) -> "list":
     if manifest.final_video_path:
         lines.append(f"Final Video: {manifest.final_video_path}")
     lines.append(f"Visual Mode: {scene_config.get('visual_mode') or 'unknown'}")
+    lines.append(
+        f"Visual Source: {scene_config.get('visual_source') or 'not configured'}"
+    )
     lines.append("")
     if provider_counts:
         lines.append("Providers Used:")
@@ -475,6 +478,19 @@ Examples:
             "manifest and is authoritative on resume."
         ),
     )
+    scene_group.add_argument(
+        "--image-source",
+        type=str,
+        default="",
+        help=(
+            "Automatic visual source for missing still images (Phase 6F). "
+            "Empty (default) = not configured: missing assets fail honestly "
+            "with an actionable error. 'fixture' = deterministic local "
+            "fixture for offline validation (never real AI imagery). Any "
+            "other value maps to the dormant external adapter boundary, "
+            "which never consumes paid quota or makes an external call."
+        ),
+    )
     
     # Assembly settings
     assembly_group = parser.add_argument_group("Assembly Settings")
@@ -488,6 +504,18 @@ Examples:
         type=float,
         default=0.15,
         help="Background music volume (default: 0.15)",
+    )
+    assembly_group.add_argument(
+        "--caption-preset",
+        type=str,
+        default="",
+        choices=["minimal", "standard", "bold", "viral"],
+        help=(
+            "Caption presentation preset (Phase 6F): minimal | standard | "
+            "bold | viral. Defaults to 'standard' (or AVM_CAPTION_PRESET). "
+            "Persisted per project so resume reproduces the same look against "
+            "an explicit vertical play resolution."
+        ),
     )
     
     # Execution settings
@@ -600,7 +628,7 @@ Examples:
     
     # Build configuration
     try:
-        config = OrchestratorConfig(
+        config_kwargs = dict(
             topic=args.topic or "Resume Project",  # Placeholder for resume
             flow_project_url=args.flow_project_url,
             niche=args.niche,
@@ -645,6 +673,15 @@ Examples:
             skip_confirmation=args.no_confirm,
             resume_project_id=args.resume,
         )
+        # Phase 6F: apply the optional automatic visual source / caption
+        # preset only when actually supplied on the CLI, so the repository's
+        # env-driven defaults (AVM_IMAGE_SOURCE / AVM_CAPTION_PRESET) still
+        # take effect when the flags are omitted.
+        if args.caption_preset:
+            config_kwargs["caption_preset"] = args.caption_preset
+        if args.image_source:
+            config_kwargs["image_source"] = args.image_source
+        config = OrchestratorConfig(**config_kwargs)
     except Exception as e:
         print(f"ERROR: Invalid configuration: {e}")
         return 1
