@@ -10,7 +10,7 @@ python-dotenv==1.1.0
 pytest==8.3.5
 
 # ----- Data Validation (Phase 2A) -----
-pydantic==2.10.6
+pydantic==2.12.5
 
 # ----- Browser Automation (Phase 1) -----
 playwright==1.52.0
@@ -23,7 +23,7 @@ edge-tts==7.2.8
 
 # ----- YouTube Publishing (Phase 7A) -----
 google-api-python-client==2.166.0
-google-auth==2.38.0
+google-auth==2.56.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 
