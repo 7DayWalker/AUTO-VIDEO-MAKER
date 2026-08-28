@@ -20,8 +20,10 @@ Visual modes (project-level, persisted in ``ProjectManifest.scene_config``):
                    explicit routing data (never an ephemeral runtime decision)
 """
 
+import base64
 import hashlib
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -48,10 +50,20 @@ IMAGE_MOTION_PROVIDER = "image_motion"
 # Phase 7B: intake route identity for an externally obtained video clip.
 # Zero-credit, video-only; reuses LocalAsset normalization behavior verbatim.
 EXTERNAL_VIDEO_PROVIDER = "external_video"
+# Phase 7C: cost-bearing text-to-video provider backed by the Gemini API.
+GEMINI_OMNI_PROVIDER = "gemini_omni"
+GEMINI_OMNI_DEFAULT_MODEL = "gemini-omni-1.1-flash"
+GEMINI_API_KEY_ENV = "AVM_GEMINI_API_KEY"
+GEMINI_OMNI_MODEL_ENV = "AVM_GEMINI_OMNI_MODEL"
+GEMINI_OMNI_RESOLUTION_ENV = "AVM_GEMINI_OMNI_RESOLUTION"
+GEMINI_OMNI_DEFAULT_RESOLUTION = "720p"
 
 # Providers that never touch Google Flow (Phase 6B cost firewall).
+# gemini_omni is cost-bearing and deliberately NOT zero-cost: it must never
+# enter zero-cost auto-sourcing behavior (Phase 6F targets image_motion /
+# local_asset scenes only).
 ZERO_COST_PROVIDERS = {LOCAL_ASSET_PROVIDER, IMAGE_MOTION_PROVIDER, EXTERNAL_VIDEO_PROVIDER}
-VALID_PROVIDERS = ZERO_COST_PROVIDERS | {GOOGLE_FLOW_PROVIDER}
+VALID_PROVIDERS = ZERO_COST_PROVIDERS | {GOOGLE_FLOW_PROVIDER, GEMINI_OMNI_PROVIDER}
 
 DEFAULT_HYBRID_PROVIDER = IMAGE_MOTION_PROVIDER
 
@@ -436,6 +448,398 @@ class ExternalVideoVisualProvider(LocalAssetVisualProvider):
 
 
 # ---------------------------------------------------------------------------
+# Phase 7C — Gemini Omni text-to-video provider (cost-bearing)
+# ---------------------------------------------------------------------------
+
+class _GeminiRetrievalError(Exception):
+    """Retrieval/polling failure. NEVER triggers a second billable submission."""
+
+
+class GeminiOmniVisualProvider:
+    """Cost-bearing text-to-video provider backed by the Gemini API.
+
+    Submits ONE billable generation per ``generate_scene()`` invocation
+    (``client.interactions.create``). Retrieval/polling retries are safe
+    (non-billable); generation submission is NEVER automatically retried.
+
+    Output delivery per the official SDK contract (google-genai >= 2.x):
+    - inline: ``Interaction.output_video.data`` (base64 or bytes) —
+      materialized directly;
+    - URI: ``Interaction.output_video.uri`` — polled via
+      ``client.files.get`` until ACTIVE (FAILED = truthful failure), then
+      ``client.files.download``.
+
+    Resume semantics: there is NO invented remote-job resumption. The
+    pipeline-level completed-and-validated reuse check is authoritative; if
+    the output is missing/corrupt, ``resume_scene`` regenerates through the
+    normal generation path, which is a NEW billable submission.
+
+    Output follows the Phase 7A contract exactly: a validated MP4 at
+    ``<output_dir>/<scene_id>.mp4`` validated by ``validate_video_file()``.
+    A Gemini response that does not satisfy the AVM contract fails
+    truthfully — the provider performs NO normalization/transcoding.
+    """
+
+    name = GEMINI_OMNI_PROVIDER
+    requires_browser = False
+    classification = "cost_bearing_text_to_video"
+
+    # Retrieval polling (URI delivery / async interaction completion).
+    _poll_interval_seconds = 2.0
+    _poll_max_attempts = 60
+
+    # Duck-typed members required by the pipeline's legacy asset-discovery
+    # helper. The Gemini route owns generation and never resolves local
+    # assets, so discovery is inert by design.
+    asset_dir = None
+
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        resolution: Optional[str] = None,
+        poll_interval: Optional[float] = None,
+        poll_max_attempts: Optional[int] = None,
+    ):
+        self.output_dir = Path(output_dir)
+        self.model = (
+            model or os.getenv(GEMINI_OMNI_MODEL_ENV) or GEMINI_OMNI_DEFAULT_MODEL
+        )
+        self.resolution = (
+            resolution
+            or os.getenv(GEMINI_OMNI_RESOLUTION_ENV)
+            or GEMINI_OMNI_DEFAULT_RESOLUTION
+        )
+        self._api_key = (
+            api_key if api_key is not None else os.getenv(GEMINI_API_KEY_ENV, "")
+        )
+        if poll_interval is not None:
+            self._poll_interval_seconds = poll_interval
+        if poll_max_attempts is not None:
+            self._poll_max_attempts = poll_max_attempts
+        self._client = None
+
+
+    # -- legacy-discovery duck-typing (inert for this provider) --------------
+    def resolve_asset(self, request) -> Optional[Path]:
+        return None
+
+    def _candidate_names(self, request):
+        return []
+
+    # -- client lifecycle ----------------------------------------------------
+    def _get_client(self):
+        """Build the official Gemini client. No network traffic here."""
+        if self._client is None:
+            if not self._api_key:
+                raise RuntimeError(
+                    f"missing Gemini API key (set {GEMINI_API_KEY_ENV})"
+                )
+            try:
+                from google import genai  # official SDK, imported lazily
+            except ImportError as exc:  # SDK unavailable -> truthful failure
+                raise RuntimeError(
+                    "the official google-genai SDK is not installed"
+                ) from exc
+            self._client = genai.Client(api_key=self._api_key)
+        return self._client
+
+    def is_available(self) -> bool:
+        """Configuration-only availability check. No network calls."""
+        if not self._api_key:
+            return False
+        try:
+            self._get_client()
+            return True
+        except Exception:  # noqa: BLE001 - unavailable, never a crash
+            return False
+
+    # -- helpers -------------------------------------------------------------
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        time.sleep(seconds)
+
+    @staticmethod
+    def _field(obj: Any, name: str) -> Any:
+        """Read a field from an SDK object or plain dict, tolerantly."""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    @staticmethod
+    def _enum_value(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        return str(getattr(value, "value", value))
+
+    @staticmethod
+    def _video_content(interaction: Any) -> Any:
+        content = GeminiOmniVisualProvider._field(interaction, "output_video")
+        if isinstance(content, (list, tuple)):
+            return content[0] if content else None
+        return content
+
+    def _fail(
+        self,
+        request: SceneGenerationRequest,
+        error: str,
+        *,
+        interaction_id: Optional[str] = None,
+        delivery: Optional[str] = None,
+    ) -> SceneGenerationResult:
+        result = SceneGenerationResult.failure(
+            request.scene_id, request.sequence, error
+        )
+        result.verification.update(
+            {
+                "provider": GEMINI_OMNI_PROVIDER,
+                "model": self.model,
+                "classification": self.classification,
+            }
+        )
+        if interaction_id:
+            result.verification["interaction_id"] = interaction_id
+        if delivery:
+            result.verification["output_delivery"] = delivery
+        return result
+
+
+    # -- retrieval (non-billable) --------------------------------------------
+    def _extract_video(self, interaction: Any):
+        """Return (kind, content) where kind is 'inline' | 'uri' | None."""
+        content = self._video_content(interaction)
+        if content is None:
+            return None, None
+        if self._field(content, "data") is not None:
+            return "inline", content
+        if self._field(content, "uri") is not None:
+            return "uri", content
+        return None, content
+
+    def _interaction_failed(self, interaction: Any) -> Optional[str]:
+        status = (self._enum_value(self._field(interaction, "status")) or "").lower()
+        if "fail" in status:
+            errors = self._field(interaction, "errors")
+            return f"Gemini Omni interaction failed (status={status}; errors={errors})"
+        return None
+
+    def _await_interaction_video(self, client: Any, interaction: Any) -> Any:
+        """Poll a still-processing interaction. Retrieval-only (non-billable)."""
+        interaction_id = self._field(interaction, "id")
+        if not interaction_id:
+            return None
+        for _ in range(self._poll_max_attempts):
+            self._sleep(self._poll_interval_seconds)
+            fetched = client.interactions.get(id=interaction_id)
+            failed = self._interaction_failed(fetched)
+            if failed:
+                raise _GeminiRetrievalError(failed)
+            kind, content = self._extract_video(fetched)
+            if kind is not None:
+                return content
+        raise _GeminiRetrievalError(
+            "Gemini Omni interaction produced no video output after "
+            f"{self._poll_max_attempts} polls"
+        )
+
+    def _download_via_files(self, client: Any, uri: str) -> bytes:
+        """Poll file state to ACTIVE, then download. Retrieval-only."""
+        for _ in range(self._poll_max_attempts):
+            file = client.files.get(name=uri)
+            state = (
+                self._enum_value(self._field(file, "state")) or ""
+            ).upper()
+            if state == "ACTIVE":
+                return client.files.download(file=uri)
+            if state == "FAILED":
+                error = self._field(file, "error")
+                raise _GeminiRetrievalError(
+                    f"Gemini Omni file processing failed (state=FAILED; error={error})"
+                )
+            self._sleep(self._poll_interval_seconds)
+        raise _GeminiRetrievalError(
+            f"Gemini Omni file did not become ACTIVE after "
+            f"{self._poll_max_attempts} polls"
+        )
+
+    def _retrieve_video(self, client: Any, interaction: Any):
+        """Return (delivery, video_bytes, error_detail).
+
+        Never re-submits a generation: every failure here is retrieval-side.
+        """
+        failed = self._interaction_failed(interaction)
+        if failed:
+            return None, None, failed
+        kind, content = self._extract_video(interaction)
+        if kind is None:
+            content = self._await_interaction_video(client, interaction)
+            if content is None:
+                return None, None, "Gemini Omni response contained no video output"
+            kind, _ = self._extract_video(content)
+        if kind == "inline":
+            data = self._field(content, "data")
+            raw = base64.b64decode(data) if isinstance(data, str) else bytes(data)
+            return "inline", raw, None
+        if kind == "uri":
+            uri = self._field(content, "uri")
+            return "uri", self._download_via_files(client, uri), None
+        return None, None, (
+            "Gemini Omni video output had neither inline data nor a URI"
+        )
+
+
+    # -- provider protocol ---------------------------------------------------
+    def generate_scene(
+        self,
+        request: SceneGenerationRequest,
+        *,
+        require_confirmation: bool = False,
+        checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        asset_override: Optional[Path] = None,
+    ) -> SceneGenerationResult:
+        del require_confirmation  # interface parity only
+        del asset_override  # text-to-video: intent comes from the request
+
+        # Cost-safety gate: no network call without configuration.
+        if not self._api_key:
+            return self._fail(
+                request,
+                "Gemini Omni provider is not configured: set "
+                f"{GEMINI_API_KEY_ENV} (no generation call was made).",
+            )
+        try:
+            client = self._get_client()
+        except Exception as exc:  # noqa: BLE001 - truthful unavailability
+            return self._fail(request, f"Gemini Omni provider is unavailable: {exc}")
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.output_dir / f"{request.scene_id}.mp4"
+        aspect = request.config.aspect_ratio
+
+        # THE billable submission. Exactly one per invocation.
+        try:
+            interaction = client.interactions.create(
+                model=self.model,
+                input=request.visual_prompt,
+                response_format={
+                    "type": "video",
+                    "aspect_ratio": aspect,
+                    "resolution": self.resolution,
+                    "duration": max(1, int(request.config.duration)),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - API rejection / network
+            return self._fail(request, f"Gemini Omni generation request failed: {exc}")
+
+        interaction_id = self._field(interaction, "id")
+
+        # Retrieval phase — failures here never resubmit.
+        try:
+            delivery, payload, detail = self._retrieve_video(client, interaction)
+        except _GeminiRetrievalError as exc:
+            return self._fail(request, str(exc), interaction_id=interaction_id)
+        except Exception as exc:  # noqa: BLE001 - surfaced truthfully
+            return self._fail(
+                request,
+                f"Gemini Omni video retrieval failed: {exc}",
+                interaction_id=interaction_id,
+            )
+        if delivery is None:
+            return self._fail(request, detail, interaction_id=interaction_id)
+
+        # Materialize via safe temp file, then validate (Phase 7A contract).
+        temp_path = output_path.with_name(output_path.name + ".part")
+        try:
+            temp_path.write_bytes(payload)
+            validation = validate_video_file(temp_path, aspect)
+            if not validation.get("valid"):
+                temp_path.unlink(missing_ok=True)
+                return self._fail(
+                    request,
+                    f"Gemini Omni output failed scene validation: "
+                    f"{validation.get('error')}",
+                    interaction_id=interaction_id,
+                    delivery=delivery,
+                )
+            os.replace(temp_path, output_path)  # atomic on same volume
+        except Exception as exc:  # noqa: BLE001 - surfaced truthfully
+            temp_path.unlink(missing_ok=True)
+            return self._fail(
+                request,
+                f"Gemini Omni output materialization failed: {exc}",
+                interaction_id=interaction_id,
+                delivery=delivery,
+            )
+
+
+        result = SceneGenerationResult.success_result(
+            scene_id=request.scene_id,
+            sequence=request.sequence,
+            file_path=output_path,
+            file_size=validation.get("file_size", output_path.stat().st_size),
+            actual_duration=validation.get("duration", 0.0),
+            width=validation.get("width", 0),
+            height=validation.get("height", 0),
+            codec=validation.get("codec", "h264"),
+            generation_cost=None,  # never fabricate cost values
+            downloaded_at=datetime.now(timezone.utc).isoformat(),
+            warnings=[f"model={self.model}", f"output_delivery={delivery}"],
+        )
+        result.verification.update(
+            {
+                "provider": GEMINI_OMNI_PROVIDER,
+                "model": self.model,
+                "classification": self.classification,
+                "output_delivery": delivery,
+                "resolution": self.resolution,
+            }
+        )
+        if interaction_id:
+            result.verification["interaction_id"] = interaction_id
+
+        if checkpoint_callback is not None:
+            checkpoint_callback(
+                {
+                    "scene_id": request.scene_id,
+                    "provider": GEMINI_OMNI_PROVIDER,
+                    "status": "completed",
+                    "generation_cost": None,
+                    "interaction_id": interaction_id,
+                    "file_path": str(output_path),
+                    "validation": validation,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        return result
+
+    def resume_scene(
+        self,
+        request: SceneGenerationRequest,
+        checkpoint: Dict[str, Any],
+        checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        asset_override: Optional[Path] = None,
+    ) -> SceneGenerationResult:
+        """Conform to the provider protocol.
+
+        The current Gemini API contract offers no remote-job resumption for
+        this flow. The pipeline's completed-and-validated reuse check is
+        authoritative; reaching this method means the output was missing or
+        invalid, so this is a NEW billable generation event through the normal
+        generation path.
+        """
+        return self.generate_scene(
+            request,
+            require_confirmation=False,
+            checkpoint_callback=checkpoint_callback,
+            asset_override=asset_override,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Step 6B — durable hybrid routing
 # ---------------------------------------------------------------------------
 
@@ -765,6 +1169,10 @@ def create_visual_provider(
                 or PROJECT_ASSET_FALLBACK
             )
             return ExternalVideoVisualProvider(asset_dir, scenes_output_dir)
+        if provider == GEMINI_OMNI_PROVIDER:
+            # Configuration (key/model/resolution) comes from the environment
+            # inside the provider; construction never touches the network.
+            return GeminiOmniVisualProvider(scenes_output_dir)
 
     mode = normalize_visual_mode(mode)
     if mode == GOOGLE_FLOW_PROVIDER:

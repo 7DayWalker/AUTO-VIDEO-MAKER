@@ -34,6 +34,8 @@ PROVIDER_LOCAL_ASSET = "local_asset"
 PROVIDER_IMAGE_MOTION = "image_motion"
 # Phase 7B: intake route identity for an externally obtained video clip.
 PROVIDER_EXTERNAL_VIDEO = "external_video"
+# Phase 7C: cost-bearing text-to-video generation; no local asset is required.
+PROVIDER_GEMINI_OMNI = "gemini_omni"
 
 # Media types each zero-cost provider can legitimately consume.
 REQUIRED_MEDIA_TYPES = {
@@ -41,6 +43,10 @@ REQUIRED_MEDIA_TYPES = {
     PROVIDER_LOCAL_ASSET: {"image", "video"},
     PROVIDER_EXTERNAL_VIDEO: {"video"},
 }
+
+# Providers that own generation and require no local asset (asset intake and
+# preflight do not apply to them).
+GENERATION_PROVIDERS = {PROVIDER_GOOGLE_FLOW, PROVIDER_GEMINI_OMNI}
 
 
 # ---------------------------------------------------------------------------
@@ -178,9 +184,9 @@ def intake_assets(
             )
             continue
         provider = provider_by_scene.get(scene_id)
-        if provider == "google_flow":
+        if provider in GENERATION_PROVIDERS:
             errors.append(
-                f"{scene_id}: routed to google_flow; a local asset is not "
+                f"{scene_id}: routed to {provider}; a local asset is not "
                 "required and cannot be mapped."
             )
             continue
@@ -296,8 +302,8 @@ def preflight_assets(
     assets = asset_manifest.get("assets", {})
     for scene in sorted(plan_scenes, key=lambda s: s.sequence):
         routed = routing.get(scene.id, {}).get("provider")
-        if routed is None or routed == PROVIDER_GOOGLE_FLOW:
-            continue  # Flow needs no local asset; unrouted scenes aren't ours
+        if routed is None or routed in GENERATION_PROVIDERS:
+            continue  # generation providers need no local asset; unrouted scenes aren't ours
         entry = assets.get(scene.id)
         if entry is not None:
             reason = verify_stored_asset(project_dir, entry)
