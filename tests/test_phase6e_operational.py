@@ -229,6 +229,52 @@ def test_13_accepted_real_run_complete_and_zero_credits():
     assert "Acceptance Verdict: PROJECT_COMPLETE" in lines
 
 
+def test_stage_summary_is_safe_for_cp1252_console():
+    """Status output must not require Unicode glyphs on Windows consoles."""
+
+    class Cp1252Stream:
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.parts = []
+
+        def write(self, text):
+            # Reproduce a Windows cp1252 stream: unrepresentable characters
+            # raise instead of being silently replaced.
+            text.encode(self.encoding)
+            self.parts.append(text)
+            return len(text)
+
+        def flush(self):
+            return None
+
+    manifest = ProjectManifest(
+        project_id="phase7c_console_probe",
+        topic=TOPIC,
+    )
+    manifest.initialize_stages()
+    manifest.set_stage_result(StageResult.completed(PipelineStage.CONTENT))
+    manifest.set_stage_result(StageResult.skipped(
+        PipelineStage.VOICE,
+        reason="not required",
+    ))
+    manifest.set_stage_result(StageResult.failed(
+        PipelineStage.SCENES,
+        error="probe failure",
+    ))
+
+    stream = Cp1252Stream()
+    produce.print_stage_results(manifest, stream=stream)
+    output = "".join(stream.parts)
+
+    assert "[OK] CONTENT: completed" in output
+    assert "[SKIP] VOICE: skipped" in output
+    assert "[FAIL] SCENES: failed" in output
+    assert "✓" not in output
+    assert "○" not in output
+    assert "✗" not in output
+
+
 # ---------------------------------------------------------------------------
 # B/E — resume ergonomics + configuration sanity matrix
 # ---------------------------------------------------------------------------

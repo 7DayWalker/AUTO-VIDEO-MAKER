@@ -240,6 +240,31 @@ def build_final_summary(manifest, project_dir) -> "list":
     return lines
 
 
+def print_stage_results(manifest, stream=None) -> None:
+    """Print the stage summary using console-safe ASCII status labels."""
+    stream = stream or sys.stdout
+    print("Stage Results:", file=stream)
+    for stage in PipelineStage.get_order():
+        if stage == PipelineStage.COMPLETE:
+            continue
+        result = manifest.get_stage_result(stage)
+        if result:
+            status_label = (
+                "[OK]" if result.status.value == "completed"
+                else "[SKIP]" if result.status.value == "skipped"
+                else "[FAIL]"
+            )
+            duration_str = (
+                f" ({result.duration_seconds:.1f}s)"
+                if result.duration_seconds else ""
+            )
+            print(
+                f"  {status_label} {stage.value.upper()}: "
+                f"{result.status.value}{duration_str}",
+                file=stream,
+            )
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -765,15 +790,7 @@ Examples:
         print()
 
         # Stage summary
-        print("Stage Results:")
-        for stage in PipelineStage.get_order():
-            if stage == PipelineStage.COMPLETE:
-                continue
-            result = manifest.get_stage_result(stage)
-            if result:
-                status_icon = "✓" if result.status.value == "completed" else "○" if result.status.value == "skipped" else "✗"
-                duration_str = f" ({result.duration_seconds:.1f}s)" if result.duration_seconds else ""
-                print(f"  {status_icon} {stage.value.upper()}: {result.status.value}{duration_str}")
+        print_stage_results(manifest)
         
         print()
         
