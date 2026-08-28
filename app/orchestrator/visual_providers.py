@@ -729,7 +729,6 @@ class GeminiOmniVisualProvider:
                     "type": "video",
                     "aspect_ratio": aspect,
                     "resolution": self.resolution,
-                    "duration": max(1, int(request.config.duration)),
                 },
             )
         except Exception as exc:  # noqa: BLE001 - API rejection / network

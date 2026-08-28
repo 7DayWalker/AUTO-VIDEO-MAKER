@@ -210,7 +210,7 @@ def test_missing_configuration_makes_no_call_and_fails_truthfully(tmp_path, monk
 # Test 3 — successful inline video generation
 # ---------------------------------------------------------------------------
 
-def test_successful_inline_generation_satisfies_scene_contract(tmp_path):
+def test_request_uses_supported_video_fields_and_actual_duration(tmp_path):
     mp4_bytes = _make_fixture_mp4(tmp_path)
     interactions = _FakeInteractions(
         create_fn=lambda **kw: _inline_interaction(mp4_bytes, model=kw.get("model"))
@@ -229,6 +229,8 @@ def test_successful_inline_generation_satisfies_scene_contract(tmp_path):
     assert call["input"] == "A cinematic visual for the Gemini Omni probe."
     assert call["response_format"]["type"] == "video"
     assert call["response_format"]["aspect_ratio"] == "9:16"
+    assert call["response_format"]["resolution"] == "720p"
+    assert "duration" not in call["response_format"]
 
     # Phase 7A output contract.
     output = Path(tmp_path) / "scenes" / PROJECT_ID / "scene_001.mp4"
@@ -238,6 +240,10 @@ def test_successful_inline_generation_satisfies_scene_contract(tmp_path):
     assert validation.get("valid"), validation.get("error")
     assert validation["duration"] > 0
     assert validation["width"] * 16 == validation["height"] * 9
+    # The returned media remains authoritative; the AVM planning duration is
+    # not sent to Gemini and is not reported as actual output duration.
+    assert result.actual_duration == validation["duration"]
+    assert result.actual_duration != 2
 
     # Truthful verification/checkpoint metadata (no secrets, no fake cost).
     assert result.verification["provider"] == "gemini_omni"
@@ -247,6 +253,32 @@ def test_successful_inline_generation_satisfies_scene_contract(tmp_path):
     assert result.verification["classification"] == "cost_bearing_text_to_video"
     assert result.generation_cost is None
     assert not (output.parent / "scene_001.mp4.part").exists()
+
+
+def test_avm_duration_never_leaks_and_resolution_remains_configurable(tmp_path):
+    mp4_bytes = _make_fixture_mp4(tmp_path)
+    interactions = _FakeInteractions(
+        create_fn=lambda **kw: _inline_interaction(mp4_bytes, model=kw.get("model"))
+    )
+    provider = _make_provider(
+        tmp_path,
+        _FakeClient(interactions),
+        resolution="1080p",
+    )
+
+    # A below-model-minimum AVM planning duration is intentionally retained
+    # only in the internal request model, never translated to the API payload.
+    request = _make_request(duration=2)
+    result = provider.generate_scene(request)
+
+    assert result.success is True
+    response_format = interactions.create_calls[0]["response_format"]
+    assert response_format == {
+        "type": "video",
+        "aspect_ratio": "9:16",
+        "resolution": "1080p",
+    }
+    assert "duration" not in response_format
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +354,27 @@ def test_response_without_video_output_fails_after_polling(tmp_path):
     # Exactly ONE billable submission; only non-billable interaction polls after.
     assert len(interactions.create_calls) == 1
     assert len(interactions.get_calls) == 2
+    assert not (Path(tmp_path) / "scenes" / PROJECT_ID / "scene_001.mp4").exists()
+
+
+def test_submission_failure_returns_once_without_retry_or_output(tmp_path):
+    create_calls = []
+
+    class _RejectingInteractions:
+        def create(self, **kwargs):
+            create_calls.append(kwargs)
+            raise RuntimeError("HTTP 400 invalid response_format")
+
+    provider = _make_provider(
+        tmp_path,
+        _FakeClient(_RejectingInteractions()),
+    )
+
+    result = provider.generate_scene(_make_request(duration=2))
+
+    assert result.success is False
+    assert "generation request failed" in result.error
+    assert len(create_calls) == 1
     assert not (Path(tmp_path) / "scenes" / PROJECT_ID / "scene_001.mp4").exists()
 
 
