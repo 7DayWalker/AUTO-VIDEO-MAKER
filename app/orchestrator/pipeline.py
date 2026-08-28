@@ -1353,6 +1353,7 @@ class ProductionOrchestrator:
 
         import app.orchestrator.assets as asset_workflow
         from app.orchestrator.visual_providers import (
+            EXTERNAL_VIDEO_PROVIDER,
             LOCAL_ASSET_PROVIDER,
             create_visual_provider,
             zero_cost_missing_asset_error,
@@ -1397,10 +1398,20 @@ class ProductionOrchestrator:
         mappings.update(auto_mappings)
 
         if mappings:
-            provenance: Dict[str, Dict] = {
-                sid: {"supplied_by": "user"}
-                for sid in (self.config.asset_mappings or {})
-            }
+            provenance: Dict[str, Dict] = {}
+            for sid in (self.config.asset_mappings or {}):
+                if scoped_providers.get(sid) == EXTERNAL_VIDEO_PROVIDER:
+                    # Phase 7B: externally obtained clip — truthful origin
+                    # provenance, distinct from ordinary user-supplied assets.
+                    provenance[sid] = {
+                        "supplied_by": "external_generation",
+                        "source_provider": (
+                            self.config.external_video_source or "unspecified_external"
+                        ),
+                        "source_status": "success",
+                    }
+                else:
+                    provenance[sid] = {"supplied_by": "user"}
             for sid in auto_mappings:
                 provenance[sid] = {
                     "supplied_by": "auto_source",

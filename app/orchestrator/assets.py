@@ -32,11 +32,14 @@ ASSET_MANIFEST_VERSION = 1
 PROVIDER_GOOGLE_FLOW = "google_flow"
 PROVIDER_LOCAL_ASSET = "local_asset"
 PROVIDER_IMAGE_MOTION = "image_motion"
+# Phase 7B: intake route identity for an externally obtained video clip.
+PROVIDER_EXTERNAL_VIDEO = "external_video"
 
 # Media types each zero-cost provider can legitimately consume.
 REQUIRED_MEDIA_TYPES = {
     PROVIDER_IMAGE_MOTION: {"image"},
     PROVIDER_LOCAL_ASSET: {"image", "video"},
+    PROVIDER_EXTERNAL_VIDEO: {"video"},
 }
 
 

@@ -356,6 +356,14 @@ class OrchestratorConfig(BaseModel):
     image_source: str = Field(
         default_factory=lambda: (os.getenv("AVM_IMAGE_SOURCE") or "").strip()
     )
+    # Phase 7B: origin identifier recorded as provenance for externally
+    # obtained video clips routed through the external_video provider
+    # (e.g. "google_flow_private"). Provenance metadata only — never a
+    # routable provider identity. Empty = truthful generic provenance
+    # ("unspecified_external").
+    external_video_source: str = Field(
+        default_factory=lambda: (os.getenv("AVM_EXTERNAL_VIDEO_SOURCE") or "").strip()
+    )
     
     # Assembly settings
     resolution_width: int = Field(default=1080, ge=1)

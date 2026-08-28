@@ -45,9 +45,12 @@ DEFAULT_VISUAL_MODE = "google_flow"
 GOOGLE_FLOW_PROVIDER = "google_flow"
 LOCAL_ASSET_PROVIDER = "local_asset"
 IMAGE_MOTION_PROVIDER = "image_motion"
+# Phase 7B: intake route identity for an externally obtained video clip.
+# Zero-credit, video-only; reuses LocalAsset normalization behavior verbatim.
+EXTERNAL_VIDEO_PROVIDER = "external_video"
 
 # Providers that never touch Google Flow (Phase 6B cost firewall).
-ZERO_COST_PROVIDERS = {LOCAL_ASSET_PROVIDER, IMAGE_MOTION_PROVIDER}
+ZERO_COST_PROVIDERS = {LOCAL_ASSET_PROVIDER, IMAGE_MOTION_PROVIDER, EXTERNAL_VIDEO_PROVIDER}
 VALID_PROVIDERS = ZERO_COST_PROVIDERS | {GOOGLE_FLOW_PROVIDER}
 
 DEFAULT_HYBRID_PROVIDER = IMAGE_MOTION_PROVIDER
@@ -365,6 +368,71 @@ class LocalAssetVisualProvider:
             checkpoint_callback=checkpoint_callback,
             asset_override=asset_override,
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7B — external video intake route
+# ---------------------------------------------------------------------------
+
+class ExternalVideoVisualProvider(LocalAssetVisualProvider):
+    """Zero-credit intake route for an EXTERNALLY OBTAINED video clip.
+
+    NOT a generation provider: it never calls an API, never opens a browser,
+    and never consumes credits. It does not know (or record) where the clip
+    came from — origin provenance lives in the Phase 6C asset manifest
+    (``supplied_by`` / ``source_provider`` / ``source_status``).
+
+    Video-only by contract: an image mapped to an ``external_video`` scene
+    fails honestly at the Phase 6C media-type gate, and this provider refuses
+    image sources directly as defense in depth. Normalization behavior is
+    inherited verbatim from :class:`LocalAssetVisualProvider` — no duplicated
+    FFmpeg logic.
+    """
+
+    name = EXTERNAL_VIDEO_PROVIDER
+
+    # Video-only identity: no image discovery candidates for this route.
+    _IMAGE_EXTS: tuple = ()
+
+    def generate_scene(
+        self,
+        request: SceneGenerationRequest,
+        *,
+        require_confirmation: bool = False,
+        checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        asset_override: Optional[Path] = None,
+    ) -> SceneGenerationResult:
+        # Defense in depth: refuse non-video sources even if one is passed
+        # directly (the Phase 6C media-type gate already blocks images upstream).
+        source = Path(asset_override) if asset_override else self.resolve_asset(request)
+        if source is not None and source.suffix.lower() not in self._VIDEO_EXTS:
+            result = SceneGenerationResult.failure(
+                request.scene_id,
+                request.sequence,
+                (
+                    "external_video requires a video asset; "
+                    f"'{source.name}' is not a supported video file"
+                ),
+            )
+            result.verification["provider"] = EXTERNAL_VIDEO_PROVIDER
+            return result
+
+        # Truthful execution identity inside checkpoint callbacks too.
+        def _tagged_checkpoint(update: Dict[str, Any]) -> None:
+            if checkpoint_callback is not None:
+                checkpoint_callback({**update, "provider": EXTERNAL_VIDEO_PROVIDER})
+
+        result = super().generate_scene(
+            request,
+            require_confirmation=require_confirmation,
+            checkpoint_callback=_tagged_checkpoint,
+            asset_override=asset_override,
+        )
+        # Truthful execution identity on success AND failure.
+        result.verification["provider"] = EXTERNAL_VIDEO_PROVIDER
+        if result.success:
+            result.verification["classification"] = "zero_cost_external_video"
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +758,13 @@ def create_visual_provider(
                 or PROJECT_ASSET_FALLBACK
             )
             return ImageMotionVisualProvider(image_dir, scenes_output_dir)
+        if provider == EXTERNAL_VIDEO_PROVIDER:
+            asset_dir = Path(
+                local_asset_dir
+                or os.getenv("AVM_LOCAL_ASSET_DIR")
+                or PROJECT_ASSET_FALLBACK
+            )
+            return ExternalVideoVisualProvider(asset_dir, scenes_output_dir)
 
     mode = normalize_visual_mode(mode)
     if mode == GOOGLE_FLOW_PROVIDER:

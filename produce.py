@@ -492,6 +492,19 @@ Examples:
         ),
     )
     
+    scene_group.add_argument(
+        "--external-video-source",
+        type=str,
+        default="",
+        help=(
+            "Origin identifier recorded as provenance for externally "
+            "obtained video clips routed to the external_video provider "
+            "(Phase 7B), e.g. 'google_flow_private'. Provenance metadata "
+            "only - never a routable provider identity. Defaults to "
+            "AVM_EXTERNAL_VIDEO_SOURCE or a truthful generic value."
+        ),
+    )
+
     # Assembly settings
     assembly_group = parser.add_argument_group("Assembly Settings")
     assembly_group.add_argument(
@@ -681,6 +694,9 @@ Examples:
             config_kwargs["caption_preset"] = args.caption_preset
         if args.image_source:
             config_kwargs["image_source"] = args.image_source
+        # Phase 7B: optional origin provenance for external_video scenes.
+        if args.external_video_source:
+            config_kwargs["external_video_source"] = args.external_video_source
         config = OrchestratorConfig(**config_kwargs)
     except Exception as e:
         print(f"ERROR: Invalid configuration: {e}")
