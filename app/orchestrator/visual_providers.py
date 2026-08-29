@@ -221,6 +221,37 @@ class GoogleFlowVisualProvider:
         result.verification.setdefault("provider", GOOGLE_FLOW_PROVIDER)
         return result
 
+    # -- Phase 8 execution-boundary hook --------------------------------------
+    _REMOTE_RESUME_STATUSES = frozenset({
+        "generation_submitted",
+        "generating",
+        "generated",
+        "downloaded",
+        "timeout",
+        "unknown_reconciliation_required",
+    })
+
+    def wants_resume(self, checkpoint: Optional[Dict[str, Any]]) -> bool:
+        """Flow's resume decision for the uniform scene execution boundary.
+
+        A submitted/generating/generated Flow scene is resumed by
+        inspection/download only — it must never enter the Create-click path
+        again (credit firewall). ``failed`` and ``prepared`` checkpoints are
+        (re)generated. This hook encodes exactly the resume rule the pipeline
+        has always applied for Flow; no behavior change, only relocation of
+        the provider-owned decision to the provider.
+        """
+        cp = checkpoint or {}
+        status = cp.get("status")
+        if not cp or status in {"failed", "prepared"}:
+            return False
+        evidence = cp.get("checkpoint_evidence", {}) or {}
+        submitted_state = evidence.get("submission", evidence) or {}
+        return (
+            status in self._REMOTE_RESUME_STATUSES
+            or submitted_state.get("state") == "SUBMITTED"
+        )
+
 
 class LocalAssetVisualProvider:
     """Zero-credit provider: normalizes a local source asset into a valid

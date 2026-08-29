@@ -790,6 +790,10 @@ class ProductionOrchestrator:
                 SceneManifest,
             )
             from app.orchestrator.visual_providers import GoogleFlowVisualProvider
+            # Phase 8: Flow participates in the uniform scene execution
+            # boundary; its browser lifecycle stays provider-owned behind the
+            # wants_resume hook.
+            from app.orchestrator.scene_execution import invoke_scene_generation, provider_wants_resume
 
             logger.info("Connecting to Chrome for Flow generation...")
 
@@ -1045,22 +1049,20 @@ class ProductionOrchestrator:
                         checkpoint = existing.model_dump()
                     if checkpoint:
                         account_checkpoint_credit(scene.id, checkpoint.get("attempt_number"))
-                    submitted_evidence = (checkpoint or {}).get("checkpoint_evidence", {}) or {}
-                    submitted_state = submitted_evidence.get("submission", submitted_evidence) or {}
-                    resumable_checkpoint = checkpoint and checkpoint.get("status") not in {"failed", "prepared"}
-                    if resumable_checkpoint and (
-                        checkpoint.get("status") in {
-                            "generation_submitted", "generating", "generated", "downloaded",
-                            "timeout", "unknown_reconciliation_required",
-                        }
-                        or submitted_state.get("state") == "SUBMITTED"
-                    ):
+                    # Phase 8: the resume decision is provider-owned (the
+                    # Flow provider's wants_resume hook encodes the exact rule
+                    # previously applied here) and dispatched through the
+                    # uniform scene execution boundary. A submitted scene is
+                    # inspected/downloaded — never clicked into again.
+                    resumable_checkpoint = provider_wants_resume(generator, checkpoint)
+                    if resumable_checkpoint:
                         logger.info(
                             "Resuming submitted scene %s without clicking Create (status=%s)",
                             scene.id, checkpoint.get("status"),
                         )
-                        result = generator.resume_submitted_scene(
+                        result = invoke_scene_generation(
                             request=request,
+                            provider=generator,
                             checkpoint=checkpoint,
                             checkpoint_callback=persist_scene_checkpoint,
                         )
@@ -1103,11 +1105,15 @@ class ProductionOrchestrator:
                                 account_checkpoint_credit(scene.id, active_attempt)
                                 persist_scene_checkpoint(update)
 
-                            result = generator.generate_scene(
+                            result = invoke_scene_generation(
                                 request=request,
-                                dry_run=False,
-                                require_confirmation=not self.config.skip_confirmation,
+                                provider=generator,
+                                # A NEW attempt is a fresh generation; the
+                                # resume path is decided before this loop.
+                                checkpoint=None,
                                 checkpoint_callback=persist_attempt_checkpoint,
+                                require_confirmation=not self.config.skip_confirmation,
+                                dry_run=False,
                             )
                             if result.success:
                                 break
@@ -1530,8 +1536,15 @@ class ProductionOrchestrator:
         # Step 7 prep: authoritative per-scene sources. A manifest entry is
         # ALWAYS the project-owned stored copy; scenes without an entry keep
         # their legacy-discovered file (the exact file the provider picks).
+        # Phase 8: generation providers (Flow/Gemini Omni/OpenRouter) need no
+        # local asset and have no asset directory to legacy-discover, so they
+        # are exempt from source resolution — they execute through the uniform
+        # scene execution boundary with no asset_override.
         source_by_scene: Dict[str, Optional[str]] = {}
         for scene in scoped_scenes:
+            if scoped_providers.get(scene.id) in asset_workflow.GENERATION_PROVIDERS:
+                source_by_scene[scene.id] = None
+                continue
             authoritative = asset_workflow.resolve_authoritative_source(
                 self.project_dir, scene.id, manifest
             )
@@ -1553,13 +1566,19 @@ class ProductionOrchestrator:
         provider_by_scene: Optional[Dict[str, str]] = None,
         mode: str = "local",
     ) -> None:
-        """Zero-cost scene generation via local_asset/image_motion providers.
+        """Boundary-pass scene generation for every non-Flow provider.
 
-        Step 6B: ``provider_by_scene`` selects the provider per scene when
-        called from hybrid mode; pure local mode leaves it empty (all scenes
-        use LocalAssetVisualProvider). This path NEVER imports or constructs
-        FlowSceneGenerator, never opens Chrome/CDP, and never touches Google
-        Flow.
+        Phase 8: this is the uniform execution pass for all providers that do
+        not need the Flow browser lifecycle (image_motion, local_asset,
+        external_video, gemini_omni, and any future boundary provider). The
+        per-scene execution lifecycle (resume-vs-generate dispatch, output
+        validation, checkpoint/path persistence) is shared via the
+        provider-agnostic scene execution boundary. OpenRouter-routed scenes
+        are executed through the same boundary primitives by
+        ``_execute_scenes_stage_openrouter`` so a submitted billable remote job
+        is always resumed, never re-submitted. This path NEVER imports or
+        constructs FlowSceneGenerator, never opens Chrome/CDP, and never
+        touches Google Flow.
         """
         from app.flow.scene_generator import (
             load_manifest as load_scene_manifest,
@@ -1567,12 +1586,18 @@ class ProductionOrchestrator:
             validate_video_file,
         )
         from app.flow.scene_models import (
-            FlowGenerationConfig,
-            SceneGenerationRequest,
             SceneManifest,
         )
         from app.orchestrator.visual_providers import (
             create_visual_provider,
+        )
+        # Phase 8: shared scene execution lifecycle lives behind the uniform
+        # provider-agnostic execution boundary.
+        from app.orchestrator.scene_execution import (
+            build_scene_request,
+            completion_checkpoint_update,
+            invoke_scene_generation,
+            validate_scene_artifact,
         )
 
         project_scenes_dir = self.project_dir / "scenes" / plan.project_id
@@ -1638,18 +1663,12 @@ class ProductionOrchestrator:
                         scene_paths.append(str(existing_path))
                         continue
 
-            request = SceneGenerationRequest(
+            request = build_scene_request(
                 project_id=plan.project_id,
-                scene_id=scene.id,
-                sequence=scene.sequence,
-                visual_prompt=scene.visual_prompt,
-                config=FlowGenerationConfig(
-                    model="local_asset",
-                    aspect_ratio=self.config.scene_aspect_ratio,
-                    duration=max(1, int(scene.estimated_duration) or 4),
-                    count=1,
-                    agent_enabled=False,
-                ),
+                scene=scene,
+                provider_name=chosen_provider,
+                scene_config=self.config.to_scene_config_dict(),
+                aspect_ratio=self.config.scene_aspect_ratio,
             )
 
             def persist_local_checkpoint(update: Dict[str, Any]) -> None:
@@ -1685,10 +1704,12 @@ class ProductionOrchestrator:
                 provider_name=chosen_provider,
             )
 
-            result = scene_provider.generate_scene(
-                request,
-                require_confirmation=False,
+            result = invoke_scene_generation(
+                request=request,
+                provider=scene_provider,
+                checkpoint=self.manifest.scene_checkpoints.get(scene.id),
                 checkpoint_callback=persist_local_checkpoint,
+                require_confirmation=False,
                 # Phase 6C: the project-owned stored copy (or pinned legacy
                 # discovery result) is authoritative; external originals are
                 # never consulted during (re)generation.
@@ -1701,30 +1722,31 @@ class ProductionOrchestrator:
                     {"scene_id": scene.id, "status": result.status},
                 )
 
-            validation = validate_video_file(
-                Path(result.file_path), request.config.aspect_ratio
+            # Phase 7A: the artifact itself must satisfy the output contract;
+            # provider-reported success is never sufficient on its own.
+            validation = validate_scene_artifact(
+                result,
+                aspect_ratio=request.config.aspect_ratio,
+                validate_video_file=validate_video_file,
             )
-            if not validation.get("valid"):
-                raise ValidationError(
-                    "scenes",
-                    f"Scene {scene.id} validation failed: {validation.get('error')}",
-                    path=str(result.file_path),
-                )
 
             scene_paths.append(str(result.file_path))
             self.manifest.scene_checkpoints[scene.id] = {
                 **self.manifest.scene_checkpoints.get(scene.id, {}),
-                "provider": chosen_provider,
-                "scene_id": scene.id,
-                "sequence": scene.sequence,
-                "status": "completed",
-                "generation_cost": 0,
-                # Phase 6C: TRUE SOURCE asset provenance (project-owned copy
-                # or pinned legacy file), distinct from the output MP4 path.
-                "source_asset": source_ref,
-                "file_path": str(result.file_path),
-                "validation": validation,
-                "updated_at": datetime.now().isoformat(),
+                **completion_checkpoint_update(
+                    result=result,
+                    validation=validation,
+                    provider_name=chosen_provider,
+                    sequence=scene.sequence,
+                    extra_fields={
+                        "generation_cost": 0,
+                        # Phase 6C: TRUE SOURCE asset provenance (project-owned
+                        # copy or pinned legacy file), distinct from the output
+                        # MP4 path.
+                        "source_asset": source_ref,
+                    },
+                    include_provenance=False,
+                ),
             }
             self._save_manifest()
             logger.info(f"Local scene {scene.id} complete: {result.file_path}")
@@ -1770,10 +1792,18 @@ class ProductionOrchestrator:
             save_manifest as save_scene_manifest,
             validate_video_file,
         )
-        from app.flow.scene_models import FlowGenerationConfig, SceneGenerationRequest
         from app.orchestrator.visual_providers import (
             OPENROUTER_VIDEO_PROVIDER,
             create_visual_provider,
+        )
+        # Phase 8: shared scene execution lifecycle lives behind the uniform
+        # provider-agnostic execution boundary.
+        from app.orchestrator.scene_execution import (
+            build_scene_request,
+            completion_checkpoint_update,
+            invoke_scene_generation,
+            remote_job_identity,
+            validate_scene_artifact,
         )
 
         project_scenes_dir = self.project_dir / "scenes" / plan.project_id
@@ -1796,18 +1826,12 @@ class ProductionOrchestrator:
                     scene_paths.append(str(output_path))
                     continue
 
-            request = SceneGenerationRequest(
+            request = build_scene_request(
                 project_id=plan.project_id,
-                scene_id=scene.id,
-                sequence=scene.sequence,
-                visual_prompt=scene.visual_prompt,
-                config=FlowGenerationConfig(
-                    model=scene_config.get("openrouter_model") or "openrouter_video",
-                    aspect_ratio=self.config.scene_aspect_ratio,
-                    duration=max(1, int(scene.estimated_duration) or 4),
-                    count=1,
-                    agent_enabled=False,
-                ),
+                scene=scene,
+                provider_name=OPENROUTER_VIDEO_PROVIDER,
+                scene_config=scene_config,
+                aspect_ratio=self.config.scene_aspect_ratio,
             )
 
             def persist_openrouter_checkpoint(update: Dict[str, Any]) -> None:
@@ -1845,24 +1869,22 @@ class ProductionOrchestrator:
                 provider_name=OPENROUTER_VIDEO_PROVIDER,
             )
             checkpoint = self.manifest.scene_checkpoints.get(scene.id) or {}
-            has_remote_job = bool(checkpoint.get("job_id") and checkpoint.get("polling_url"))
-            if has_remote_job:
+            # Phase 8: the resume-vs-generate decision is made by the uniform
+            # execution boundary. A checkpoint carrying a submitted remote job
+            # identity is resumed by polling — it is NEVER submitted again.
+            if remote_job_identity(checkpoint):
                 logger.info(
                     "Resuming OpenRouter scene %s without resubmission (job=%s)",
                     scene.id,
                     checkpoint.get("job_id"),
                 )
-                result = provider.resume_scene(
-                    request,
-                    checkpoint,
-                    checkpoint_callback=persist_openrouter_checkpoint,
-                )
-            else:
-                result = provider.generate_scene(
-                    request,
-                    require_confirmation=False,
-                    checkpoint_callback=persist_openrouter_checkpoint,
-                )
+            result = invoke_scene_generation(
+                request=request,
+                provider=provider,
+                checkpoint=checkpoint,
+                checkpoint_callback=persist_openrouter_checkpoint,
+                require_confirmation=False,
+            )
             if not result.success:
                 raise StageFailedError(
                     "scenes",
@@ -1870,13 +1892,13 @@ class ProductionOrchestrator:
                     {"scene_id": scene.id, "status": result.status},
                 )
 
-            validation = validate_video_file(Path(result.file_path), request.config.aspect_ratio)
-            if not validation.get("valid"):
-                raise ValidationError(
-                    "scenes",
-                    f"Scene {scene.id} validation failed: {validation.get('error')}",
-                    path=str(result.file_path),
-                )
+            # Phase 7A: the artifact itself must satisfy the output contract;
+            # a completed remote job is not sufficient on its own.
+            validation = validate_scene_artifact(
+                result,
+                aspect_ratio=request.config.aspect_ratio,
+                validate_video_file=validate_video_file,
+            )
             result_audio_facts = (
                 result.audio_facts.model_dump() if result.audio_facts is not None else None
             )
@@ -1885,23 +1907,13 @@ class ProductionOrchestrator:
             scene_paths.append(str(result.file_path))
             current = self.manifest.scene_checkpoints.get(scene.id, {})
             current.update(
-                {
-                    "provider": OPENROUTER_VIDEO_PROVIDER,
-                    "scene_id": scene.id,
-                    "sequence": scene.sequence,
-                    "status": "completed",
-                    "file_path": str(result.file_path),
-                    "validation": validation,
-                    "audio_facts": result_audio_facts,
-                    "model": result.verification.get("model", current.get("model")),
-                    "access": result.verification.get("access", current.get("access")),
-                    "job_id": result.verification.get("job_id", current.get("job_id")),
-                    "polling_url": result.verification.get("polling_url", current.get("polling_url")),
-                    "estimated_cost": result.verification.get("estimated_cost", current.get("estimated_cost")),
-                    "actual_cost": result.verification.get("actual_cost", current.get("actual_cost")),
-                    "usage": result.verification.get("usage", current.get("usage")),
-                    "updated_at": datetime.now().isoformat(),
-                }
+                completion_checkpoint_update(
+                    result=result,
+                    validation=validation,
+                    provider_name=OPENROUTER_VIDEO_PROVIDER,
+                    sequence=scene.sequence,
+                    audio_facts=result_audio_facts,
+                )
             )
             self.manifest.scene_checkpoints[scene.id] = current
             scene_manifest.add_scene(
@@ -1977,17 +1989,23 @@ class ProductionOrchestrator:
             for sid, item in routing.items()
             if item["provider"] == OPENROUTER_VIDEO_PROVIDER
         )
-        zero_ids = {sid for sid in routing if sid not in flow_ids and sid not in openrouter_ids}
+        # Phase 8: every remaining provider (zero-cost + gemini_omni + any
+        # future boundary provider) executes through the uniform scene
+        # execution boundary pass; adding a provider requires no new branch
+        # here, only factory registration and routing.
+        boundary_ids = {
+            sid for sid in routing if sid not in flow_ids and sid not in openrouter_ids
+        }
         credits_before = self.manifest.total_credits_used
 
-        # 3) Zero-cost pass first: structurally cannot touch Flow.
-        if zero_ids:
+        # 3) Uniform boundary pass first: structurally cannot touch Flow.
+        if boundary_ids:
             self._execute_scenes_stage_local(
                 plan=plan,
                 started_at=started_at,
-                only_scenes=frozenset(zero_ids),
+                only_scenes=frozenset(boundary_ids),
                 provider_by_scene={
-                    sid: routing[sid]["provider"] for sid in zero_ids
+                    sid: routing[sid]["provider"] for sid in boundary_ids
                 },
                 mode="hybrid",
             )
