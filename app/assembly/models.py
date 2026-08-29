@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.assembly.audio_contract import (
+    AudioMediaFacts,
+    AudioPolicy,
+    DEFAULT_AUDIO_POLICY,
+    normalize_audio_policy,
+)
+
 
 class VideoResolution(BaseModel):
     """Video resolution specification."""
@@ -33,6 +40,13 @@ class Scene(BaseModel):
     id: str = Field(min_length=1, description="Unique scene identifier")
     video: str = Field(min_length=1, description="Path to video file")
     duration: Optional[float] = Field(default=None, ge=0, description="Override duration in seconds")
+    # Optional facts recorded by the scene stage. ``None`` preserves the
+    # legacy assembly input contract; in that case actual media presence is
+    # used and the persisted final-audio policy still controls selection.
+    audio_facts: Optional[AudioMediaFacts] = Field(
+        default=None,
+        description="Observed scene audio facts, when supplied by the scene stage",
+    )
     
     @field_validator("video")
     @classmethod
@@ -126,6 +140,16 @@ class AssemblyProject(BaseModel):
     voiceover: Optional[str] = Field(default=None, description="Path to voiceover audio")
     background_music: Optional[str] = Field(default=None, description="Path to background music")
     music_volume: float = Field(default=0.15, ge=0, le=1.0, description="Background music volume")
+    audio_policy: AudioPolicy = Field(
+        default=DEFAULT_AUDIO_POLICY,
+        description="Explicit final-audio selection policy",
+    )
+    native_audio_volume: float = Field(
+        default=1.0,
+        ge=0,
+        le=2.0,
+        description="Native scene-audio volume multiplier",
+    )
     captions: CaptionConfig = Field(default_factory=CaptionConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     
@@ -138,6 +162,11 @@ class AssemblyProject(BaseModel):
         if v not in valid_ratios:
             raise ValueError(f"Invalid aspect ratio '{v}'. Supported: {valid_ratios}")
         return v
+
+    @field_validator("audio_policy", mode="before")
+    @classmethod
+    def validate_audio_policy(cls, v) -> AudioPolicy:
+        return normalize_audio_policy(v)
     
     @model_validator(mode="after")
     def validate_resolution_matches_aspect(self):
@@ -165,10 +194,16 @@ class MediaInfo(BaseModel):
     frame_rate: Optional[float] = Field(default=None, ge=0)
     video_codec: Optional[str] = None
     audio_codec: Optional[str] = None
+    audio_duration: Optional[float] = Field(default=None, ge=0)
+    sample_rate: Optional[int] = Field(default=None, ge=1)
+    channels: Optional[int] = Field(default=None, ge=1)
     has_video: bool = False
     has_audio: bool = False
+    video_stream_count: int = Field(default=0, ge=0)
+    audio_stream_count: int = Field(default=0, ge=0)
     file_size: int = Field(ge=0)
     format_name: Optional[str] = None
+    audio_facts: Optional[AudioMediaFacts] = None
 
 
 class AssemblyResult(BaseModel):

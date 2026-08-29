@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
+from app.assembly.audio_contract import AudioMediaFacts
+
 from app.flow.scene_config import (
     FLOW_SCENE_MODEL,
     FLOW_SCENE_ASPECT_RATIO,
@@ -65,6 +67,7 @@ class SceneGenerationResult(BaseModel):
     width: Optional[int] = None
     height: Optional[int] = None
     codec: Optional[str] = None
+    audio_facts: Optional[AudioMediaFacts] = None
     generation_cost: Optional[int] = None
     generation_started_at: Optional[str] = None
     generation_completed_at: Optional[str] = None
@@ -92,6 +95,7 @@ class SceneGenerationResult(BaseModel):
         generation_completed_at: str = None,
         downloaded_at: str = None,
         warnings: List[str] = None,
+        audio_facts: Optional[AudioMediaFacts] = None,
     ) -> "SceneGenerationResult":
         """Create a success result."""
         return cls(
@@ -105,6 +109,7 @@ class SceneGenerationResult(BaseModel):
             width=width,
             height=height,
             codec=codec,
+            audio_facts=audio_facts,
             generation_cost=generation_cost,
             generation_started_at=generation_started_at,
             generation_completed_at=generation_completed_at,
@@ -184,6 +189,7 @@ class SceneMetadata(BaseModel):
     width: int
     height: int
     codec: str
+    audio_facts: Optional[AudioMediaFacts] = None
     status: str = "completed"
     
     def to_dict(self) -> dict:

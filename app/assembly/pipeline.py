@@ -16,6 +16,7 @@ from app.assembly.config import (
     ensure_assembly_directories,
 )
 from app.assembly.models import AssemblyProject, AssemblyResult, MediaInfo
+from app.assembly.audio_contract import select_audio_inputs
 from app.assembly.validator import validate_project
 from app.assembly.ffmpeg import check_ffmpeg_available, check_ffprobe_available, probe_media
 from app.assembly.video import normalize_video, concatenate_videos
@@ -130,13 +131,45 @@ def assemble_project(
             music_path = Path(project.background_music)
             if not music_path.is_absolute():
                 music_path = base_dir / music_path
+
+        # Native eligibility is a media fact, not a provider decision. A
+        # normalized concat carries one audio stream even for silent scenes;
+        # only a non-synthetic scene fact makes it eligible here.
+        scene_native_audio = (
+            concatenated_path
+            if any(
+                info.audio_facts and info.audio_facts.has_native_audio
+                for info in scene_infos
+            )
+            else None
+        )
+        selection = select_audio_inputs(
+            project.audio_policy,
+            scene_native_audio=scene_native_audio,
+            narration=voiceover_path,
+            music=music_path,
+        )
+        if selection.fallback_used:
+            warnings.append(
+                "Native audio was unavailable; native_only fell back to narration."
+            )
+        logger.info(
+            "Audio policy=%s native=%s narration=%s music=%s",
+            selection.policy.value,
+            bool(selection.scene_native_audio),
+            bool(selection.narration),
+            bool(selection.music),
+        )
         
         audio_warnings = mix_audio(
             concatenated_path,
             audio_mixed_path,
-            voiceover_path=voiceover_path,
-            music_path=music_path,
+            scene_native_audio=selection.scene_native_audio,
+            voiceover_path=selection.narration,
+            music_path=selection.music,
             music_volume=project.music_volume,
+            native_audio_volume=project.native_audio_volume,
+            audio_policy=selection.policy,
             video_duration=video_duration,
         )
         warnings.extend(audio_warnings)
@@ -225,6 +258,11 @@ def validate_output(output_path: Path, project: AssemblyProject) -> MediaInfo:
     
     if not info.has_audio:
         logger.warning("Output has no audio stream")
+    elif info.audio_stream_count != 1:
+        raise OutputValidationError(
+            str(output_path),
+            f"Expected exactly one audio stream, found {info.audio_stream_count}",
+        )
     
     # Check resolution
     if info.width != project.resolution.width or info.height != project.resolution.height:

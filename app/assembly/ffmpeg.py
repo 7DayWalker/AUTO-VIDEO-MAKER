@@ -21,6 +21,7 @@ from app.assembly.exceptions import (
     FFmpegExecutionError,
 )
 from app.assembly.models import MediaInfo
+from app.assembly.audio_contract import AudioMediaFacts
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,13 @@ class FFmpegRunner:
                 video_stream = stream
             elif codec_type == "audio" and audio_stream is None:
                 audio_stream = stream
+
+        video_stream_count = sum(
+            1 for stream in streams if stream.get("codec_type") == "video"
+        )
+        audio_stream_count = sum(
+            1 for stream in streams if stream.get("codec_type") == "audio"
+        )
         
         # Parse duration
         duration = 0.0
@@ -253,6 +261,46 @@ class FFmpegRunner:
                     frame_rate = float(fr)
             except (ValueError, TypeError, ZeroDivisionError):
                 pass
+
+        # Parse facts for the first audio stream. Missing/unparseable values
+        # remain null; the container duration is not substituted because it may
+        # describe the video rather than the audio stream.
+        audio_duration = None
+        if audio_stream:
+            try:
+                duration_value = audio_stream.get("duration")
+                if duration_value is not None:
+                    candidate = float(duration_value)
+                    if candidate >= 0:
+                        audio_duration = candidate
+            except (ValueError, TypeError):
+                pass
+
+        sample_rate = None
+        channels = None
+        if audio_stream:
+            try:
+                if audio_stream.get("sample_rate") is not None:
+                    candidate = int(audio_stream["sample_rate"])
+                    if candidate > 0:
+                        sample_rate = candidate
+            except (ValueError, TypeError):
+                pass
+            try:
+                if audio_stream.get("channels") is not None:
+                    candidate = int(audio_stream["channels"])
+                    if candidate > 0:
+                        channels = candidate
+            except (ValueError, TypeError):
+                pass
+
+        audio_facts = AudioMediaFacts(
+            has_audio=audio_stream is not None,
+            audio_codec=audio_stream.get("codec_name") if audio_stream else None,
+            audio_duration=audio_duration,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
         
         return MediaInfo(
             path=str(path),
@@ -262,10 +310,16 @@ class FFmpegRunner:
             frame_rate=frame_rate,
             video_codec=video_stream.get("codec_name") if video_stream else None,
             audio_codec=audio_stream.get("codec_name") if audio_stream else None,
+            audio_duration=audio_duration,
+            sample_rate=sample_rate,
+            channels=channels,
             has_video=video_stream is not None,
             has_audio=audio_stream is not None,
+            video_stream_count=video_stream_count,
+            audio_stream_count=audio_stream_count,
             file_size=path.stat().st_size,
             format_name=format_info.get("format_name"),
+            audio_facts=audio_facts,
         )
     
     def _format_command(self, cmd: List[str]) -> str:

@@ -71,6 +71,7 @@ from app.flow.scene_models import (
     FlowUIState,
     FlowHealthResult,
 )
+from app.assembly.audio_contract import AudioMediaFacts
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,8 @@ def validate_video_file(file_path: Path, expected_aspect_ratio: str = None) -> d
     """
     Validate a video file using FFprobe.
     
-    Returns dict with: valid, duration, width, height, codec, file_size
+    Returns dict with video validity and optional audio stream facts. Audio is
+    never required for a valid scene.
     """
     if not file_path.exists():
         return {"valid": False, "error": "File does not exist"}
@@ -142,6 +144,12 @@ def validate_video_file(file_path: Path, expected_aspect_ratio: str = None) -> d
         
         if not video_stream:
             return {"valid": False, "error": "No video stream found", "file_size": file_size}
+
+        audio_stream = next(
+            (stream for stream in data.get("streams", [])
+             if stream.get("codec_type") == "audio"),
+            None,
+        )
         
         # Extract info
         duration = float(data.get("format", {}).get("duration", 0))
@@ -167,6 +175,32 @@ def validate_video_file(file_path: Path, expected_aspect_ratio: str = None) -> d
                 "codec": codec,
             }
         
+        audio_duration = None
+        if audio_stream:
+            try:
+                duration_value = audio_stream.get("duration")
+                if duration_value is not None:
+                    candidate = float(duration_value)
+                    if candidate >= 0:
+                        audio_duration = candidate
+            except (TypeError, ValueError):
+                pass
+        sample_rate = None
+        channels = None
+        if audio_stream:
+            try:
+                candidate = int(audio_stream["sample_rate"])
+                if candidate > 0:
+                    sample_rate = candidate
+            except (KeyError, TypeError, ValueError):
+                pass
+            try:
+                candidate = int(audio_stream["channels"])
+                if candidate > 0:
+                    channels = candidate
+            except (KeyError, TypeError, ValueError):
+                pass
+
         return {
             "valid": True,
             "duration": duration,
@@ -175,10 +209,18 @@ def validate_video_file(file_path: Path, expected_aspect_ratio: str = None) -> d
             "codec": codec,
             "file_size": file_size,
             "has_video": True,
-            "has_audio": any(
-                stream.get("codec_type") == "audio"
-                for stream in data.get("streams", [])
-            ),
+            "has_audio": audio_stream is not None,
+            "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
+            "audio_duration": audio_duration,
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "audio_facts": AudioMediaFacts(
+                has_audio=audio_stream is not None,
+                audio_codec=audio_stream.get("codec_name") if audio_stream else None,
+                audio_duration=audio_duration,
+                sample_rate=sample_rate,
+                channels=channels,
+            ).model_dump(),
         }
         
     except FileNotFoundError:
@@ -1614,6 +1656,7 @@ class FlowSceneGenerator:
             width=validation["width"],
             height=validation["height"],
             codec=validation["codec"],
+            audio_facts=AudioMediaFacts.model_validate(validation.get("audio_facts", {})),
         )
         
         metadata_path = project_dir / f"{request.scene_id}.json"
@@ -1635,6 +1678,7 @@ class FlowSceneGenerator:
             generation_started_at=generation_started,
             generation_completed_at=generation_completed,
             downloaded_at=downloaded_at,
+            audio_facts=AudioMediaFacts.model_validate(validation.get("audio_facts", {})),
         )
 
         if checkpoint_callback:
@@ -1769,6 +1813,7 @@ class FlowSceneGenerator:
             generation_started_at=checkpoint.get("generation_started_at"),
             generation_completed_at=datetime.now().isoformat(),
             downloaded_at=downloaded_at,
+            audio_facts=AudioMediaFacts.model_validate(validation.get("audio_facts", {})),
         )
     
     def _get_confirmation(self, request: SceneGenerationRequest) -> bool:

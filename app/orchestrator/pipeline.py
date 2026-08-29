@@ -27,6 +27,11 @@ from app.orchestrator.models import (
     StageResult,
     OrchestratorConfig,
 )
+from app.assembly.audio_contract import (
+    AudioMediaFacts,
+    DEFAULT_AUDIO_POLICY,
+    normalize_audio_policy,
+)
 from app.orchestrator.captions import generate_srt_from_timing, validate_srt_file
 from app.voice.validator import validate_audio_file
 from app.orchestrator.exceptions import (
@@ -296,6 +301,15 @@ class ProductionOrchestrator:
         persisted_source = (self.manifest.scene_config or {}).get("visual_source")
         if persisted_source:
             self.config.image_source = persisted_source
+
+        # Phase 7D: the assembly snapshot is authoritative on resume. Legacy
+        # manifests without this additive field retain narration_only behavior.
+        persisted_audio_policy = (self.manifest.assembly_config or {}).get(
+            "audio_policy"
+        )
+        self.config.audio_policy = normalize_audio_policy(
+            persisted_audio_policy or DEFAULT_AUDIO_POLICY
+        )
         
         logger.info(f"Resumed project: {project_id}")
         logger.info(f"Current stage: {self.manifest.current_stage.value}")
@@ -1136,6 +1150,16 @@ class ProductionOrchestrator:
                                 f"Scene {scene.id} validation failed: {validation.get('error')}",
                                 path=str(result.file_path),
                             )
+
+                        # Preserve additive result facts, including the
+                        # synthetic-silence marker used by ImageMotion.
+                        result_audio_facts = (
+                            result.audio_facts.model_dump()
+                            if result.audio_facts is not None
+                            else validation.get("audio_facts")
+                        )
+                        if result_audio_facts is not None:
+                            validation = {**validation, "audio_facts": result_audio_facts}
                         
                         scene_paths.append(str(result.file_path))
                         
@@ -1160,6 +1184,7 @@ class ProductionOrchestrator:
                             "status": "completed",
                             "file_path": str(result.file_path),
                             "validation": validation,
+                            "audio_facts": result_audio_facts,
                             "generation_cost": result.generation_cost,
                             "generation_started_at": result.generation_started_at,
                             "generation_completed_at": result.generation_completed_at,
@@ -1949,10 +1974,27 @@ class ProductionOrchestrator:
                 
                 # Extract scene ID from path
                 scene_id = Path(video_path).stem
+
+                persisted_validation = (
+                    self.manifest.scene_checkpoints.get(scene_id, {}).get(
+                        "validation", {}
+                    )
+                )
+                persisted_facts = self.manifest.scene_checkpoints.get(
+                    scene_id, {}
+                ).get("audio_facts")
+                if not persisted_facts:
+                    persisted_facts = persisted_validation.get("audio_facts")
+                audio_facts = (
+                    AudioMediaFacts.model_validate(persisted_facts)
+                    if isinstance(persisted_facts, dict)
+                    else None
+                )
                 
                 assembly_scenes.append(AssemblyScene(
                     id=scene_id,
                     video=video_path,
+                    audio_facts=audio_facts,
                 ))
             
             logger.info(f"Assembling {len(assembly_scenes)} scenes")
@@ -1960,6 +2002,17 @@ class ProductionOrchestrator:
             # Assembly configuration is resolved before caption wiring so the
             # caption preset + play resolution are reproducible from it.
             assembly_config = self.config.to_assembly_config_dict()
+            persisted_audio_policy = (self.manifest.assembly_config or {}).get(
+                "audio_policy"
+            )
+            audio_policy = normalize_audio_policy(
+                persisted_audio_policy or self.config.audio_policy
+            )
+            assembly_config["audio_policy"] = audio_policy.value
+            self.manifest.assembly_config = {
+                **(self.manifest.assembly_config or {}),
+                **assembly_config,
+            }
 
             # Build caption config
             caption_config = CaptionConfig(enabled=False)
@@ -1987,8 +2040,6 @@ class ProductionOrchestrator:
                 )
             
             # Build assembly project
-            assembly_config = self.config.to_assembly_config_dict()
-            
             project = AssemblyProject(
                 project_id=self.manifest.project_id,
                 title=plan_data.get("title", "Untitled"),
@@ -2000,6 +2051,7 @@ class ProductionOrchestrator:
                 scenes=assembly_scenes,
                 voiceover=self.manifest.voice_audio_path,
                 music_volume=assembly_config.get("music_volume", 0.15),
+                audio_policy=audio_policy,
                 captions=caption_config,
                 output=OutputConfig(
                     filename=f"{self.manifest.project_id}_final.mp4",

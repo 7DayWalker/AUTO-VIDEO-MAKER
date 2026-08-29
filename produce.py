@@ -544,6 +544,16 @@ Examples:
         help="Background music volume (default: 0.15)",
     )
     assembly_group.add_argument(
+        "--audio-policy",
+        type=str,
+        default="narration_only",
+        choices=["narration_only", "native_only", "native_plus_narration"],
+        help=(
+            "Explicit final-audio policy: narration_only (legacy default), "
+            "native_only, or native_plus_narration. Persisted per project."
+        ),
+    )
+    assembly_group.add_argument(
         "--caption-preset",
         type=str,
         default="",
@@ -704,6 +714,7 @@ Examples:
             },
             enable_captions=not args.no_captions,
             music_volume=args.music_volume,
+            audio_policy=args.audio_policy,
             mock_mode=args.mock,
             dry_run=args.dry_run,
             ui_verify_only=args.ui_verify,

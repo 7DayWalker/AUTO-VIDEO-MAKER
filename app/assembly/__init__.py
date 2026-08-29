@@ -25,7 +25,9 @@ from app.assembly.models import (
     VideoResolution,
     AssemblyResult,
 )
+from app.assembly.audio_contract import AudioMediaFacts, AudioPolicy
 from app.assembly.pipeline import assemble_project
+from app.assembly.media import inspect_audio
 from app.assembly.exceptions import (
     AssemblyError,
     MediaValidationError,
@@ -46,8 +48,11 @@ __all__ = [
     "OutputConfig",
     "VideoResolution",
     "AssemblyResult",
+    "AudioMediaFacts",
+    "AudioPolicy",
     # Pipeline
     "assemble_project",
+    "inspect_audio",
     # Exceptions
     "AssemblyError",
     "MediaValidationError",

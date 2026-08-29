@@ -17,6 +17,11 @@ from app.assembly.config import (
     DURATION_MISMATCH_THRESHOLD,
     VOICEOVER_MAX_OVERAGE,
 )
+from app.assembly.audio_contract import (
+    AudioPolicy,
+    DEFAULT_AUDIO_POLICY,
+    select_audio_inputs,
+)
 from app.assembly.ffmpeg import run_ffmpeg, probe_media
 from app.assembly.exceptions import AudioMismatchError
 
@@ -31,6 +36,9 @@ def mix_audio(
     voiceover_volume: float = VOICEOVER_VOLUME,
     music_volume: float = MUSIC_VOLUME,
     video_duration: float = None,
+    scene_native_audio: Path = None,
+    native_audio_volume: float = 1.0,
+    audio_policy: AudioPolicy = DEFAULT_AUDIO_POLICY,
 ) -> list:
     """
     Mix audio tracks with video.
@@ -38,10 +46,15 @@ def mix_audio(
     Args:
         video_path: Input video (may have existing audio).
         output_path: Output video with mixed audio.
+        scene_native_audio: Explicit native scene audio input. Usually this is
+            the concatenated scene video itself, but it may be a separate
+            validated audio file.
         voiceover_path: Primary narration track.
         music_path: Background music track.
         voiceover_volume: Voiceover volume (0.0-2.0).
         music_volume: Music volume (0.0-1.0).
+        native_audio_volume: Native scene-audio volume (0.0-2.0).
+        audio_policy: Policy used when selecting native audio versus narration.
         video_duration: Video duration for sync checking.
     
     Returns:
@@ -49,26 +62,64 @@ def mix_audio(
     """
     warnings = []
     
-    if not voiceover_path and not music_path:
-        # No audio to mix - just copy video
-        import shutil
-        shutil.copy2(video_path, output_path)
-        logger.info("No audio tracks to mix, video copied")
-        return warnings
-    
     # Get durations for sync checking
     if video_duration is None:
         video_info = probe_media(video_path)
         video_duration = video_info.duration
     
-    # Build FFmpeg command
+    selection = select_audio_inputs(
+        audio_policy,
+        scene_native_audio=scene_native_audio,
+        narration=voiceover_path,
+        music=music_path,
+    )
+    if selection.fallback_used:
+        warnings.append(
+            "Native audio was unavailable; native_only fell back to narration."
+        )
+
+    # Build FFmpeg command. Stream 0 is always the video carrier. Audio is
+    # never inherited by default: every selected input is mapped through an
+    # explicit filter output below.
     inputs = ["-i", str(video_path)]
     filter_parts = []
     audio_inputs = []
     input_idx = 1
+
+    if not selection.scene_native_audio and not selection.narration and not selection.music:
+        args = [
+            "-y",
+            "-i", str(video_path),
+            "-map", "0:v:0",
+            "-c:v", "copy",
+            "-an",
+            "-t", str(video_duration),
+            str(output_path),
+        ]
+        run_ffmpeg(args, "Writing video without selected audio")
+        logger.info("No selected audio tracks, video written without audio")
+        return warnings
+
+    # Native scene audio is normally carried by input 0. A separate path is
+    # supported explicitly so the mixer never depends on default stream
+    # selection.
+    if selection.scene_native_audio:
+        native_path = Path(selection.scene_native_audio)
+        if native_path.resolve() == Path(video_path).resolve():
+            native_input_idx = 0
+        else:
+            inputs.extend(["-i", str(native_path)])
+            native_input_idx = input_idx
+            input_idx += 1
+        filter_parts.append(
+            f"[{native_input_idx}:a:0]atrim=0:{video_duration},"
+            f"asetpts=PTS-STARTPTS,apad=whole_dur={video_duration},"
+            f"atrim=0:{video_duration},volume={native_audio_volume}[native]"
+        )
+        audio_inputs.append("[native]")
     
     # Add voiceover
-    if voiceover_path:
+    if selection.narration:
         vo_info = probe_media(voiceover_path)
         vo_duration = vo_info.duration
         
@@ -87,32 +138,34 @@ def mix_audio(
             )
         
         inputs.extend(["-i", str(voiceover_path)])
-        # Apply volume and pad to video duration
+        # Apply volume, trim, and pad to exactly the video duration.
         filter_parts.append(
-            f"[{input_idx}:a]volume={voiceover_volume},apad=whole_dur={video_duration}[vo]"
+            f"[{input_idx}:a:0]atrim=0:{video_duration},"
+            f"asetpts=PTS-STARTPTS,volume={voiceover_volume},"
+            f"apad=whole_dur={video_duration},atrim=0:{video_duration}[vo]"
         )
         audio_inputs.append("[vo]")
         input_idx += 1
     
     # Add background music
-    if music_path:
-        music_info = probe_media(music_path)
+    if selection.music:
+        music_info = probe_media(selection.music)
         music_duration = music_info.duration
         
-        inputs.extend(["-i", str(music_path)])
+        inputs.extend(["-i", str(selection.music)])
         
         if music_duration < video_duration:
             # Loop music to fill video duration
             filter_parts.append(
-                f"[{input_idx}:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration},"
-                f"volume={music_volume},afade=t=out:st={video_duration-2}:d=2[music]"
+                f"[{input_idx}:a:0]aloop=loop=-1:size=2e+09,"
+                f"atrim=0:{video_duration},volume={music_volume}[music]"
             )
             logger.info(f"Music will loop ({music_duration:.1f}s -> {video_duration:.1f}s)")
         else:
             # Trim music to video duration with fade out
             filter_parts.append(
-                f"[{input_idx}:a]atrim=0:{video_duration},"
-                f"volume={music_volume},afade=t=out:st={video_duration-2}:d=2[music]"
+                f"[{input_idx}:a:0]atrim=0:{video_duration},"
+                f"asetpts=PTS-STARTPTS,volume={music_volume}[music]"
             )
         
         audio_inputs.append("[music]")
@@ -122,24 +175,31 @@ def mix_audio(
     if len(audio_inputs) == 1:
         # Single audio track
         mix_input = audio_inputs[0]
-        filter_parts.append(f"{mix_input}anull[aout]")
+        filter_parts.append(
+            f"{mix_input}aresample={AUDIO_SAMPLE_RATE},atrim=0:{video_duration},"
+            f"asetpts=PTS-STARTPTS[aout]"
+        )
     else:
         # Mix multiple tracks
         mix_str = "".join(audio_inputs)
-        filter_parts.append(f"{mix_str}amix=inputs={len(audio_inputs)}:normalize=0[aout]")
+        filter_parts.append(
+            f"{mix_str}amix=inputs={len(audio_inputs)}:duration=longest:"
+            f"normalize=0:dropout_transition=0,"
+            f"atrim=0:{video_duration},asetpts=PTS-STARTPTS[aout]"
+        )
     
     filter_complex = ";".join(filter_parts)
     
     args = inputs + [
         "-filter_complex", filter_complex,
-        "-map", "0:v",
+        "-map", "0:v:0",
         "-map", "[aout]",
         "-c:v", "copy",
         "-c:a", AUDIO_CODEC,
         "-b:a", AUDIO_BITRATE,
         "-ar", str(AUDIO_SAMPLE_RATE),
         "-ac", str(AUDIO_CHANNELS),
-        "-shortest",
+        "-t", str(video_duration),
         "-y",
         str(output_path),
     ]

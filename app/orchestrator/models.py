@@ -12,6 +12,11 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, field_validator
 
 from app.publishing.models import PublicationRecord, TikTokPublicationRecord
+from app.assembly.audio_contract import (
+    AudioPolicy,
+    DEFAULT_AUDIO_POLICY,
+    normalize_audio_policy,
+)
 
 
 class PipelineStage(str, Enum):
@@ -369,6 +374,10 @@ class OrchestratorConfig(BaseModel):
     resolution_width: int = Field(default=1080, ge=1)
     resolution_height: int = Field(default=1920, ge=1)
     music_volume: float = Field(default=0.15, ge=0, le=1.0)
+    audio_policy: AudioPolicy = Field(
+        default=DEFAULT_AUDIO_POLICY,
+        description="Explicit final-audio policy persisted in the project manifest",
+    )
     enable_captions: bool = Field(default=True)
     # Phase 6F: caption presentation preset (minimal/standard/bold/viral).
     # Persisted into assembly_config so resume reproduces the same
@@ -400,6 +409,11 @@ class OrchestratorConfig(BaseModel):
         if v not in valid:
             raise ValueError(f"Invalid aspect ratio. Valid: {valid}")
         return v
+
+    @field_validator("audio_policy", mode="before")
+    @classmethod
+    def validate_audio_policy(cls, v) -> AudioPolicy:
+        return normalize_audio_policy(v)
     
     def to_content_brief_dict(self) -> dict:
         """Convert to ContentBrief parameters."""
@@ -484,6 +498,7 @@ class OrchestratorConfig(BaseModel):
             "resolution_width": self.resolution_width,
             "resolution_height": self.resolution_height,
             "music_volume": self.music_volume,
+            "audio_policy": self.audio_policy.value,
             "enable_captions": self.enable_captions,
             "caption_preset": self.caption_preset,
         }

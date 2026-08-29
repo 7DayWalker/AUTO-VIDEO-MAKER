@@ -18,6 +18,7 @@ from app.assembly.exceptions import (
     InvalidProjectError,
 )
 from app.assembly.models import AssemblyProject, MediaInfo
+from app.assembly.audio_contract import AudioMediaFacts
 from app.assembly.ffmpeg import probe_media, check_ffprobe_available
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,20 @@ def validate_project(project: AssemblyProject, base_dir: Path = None) -> Tuple[L
             video_path = base_dir / video_path
         
         info = validate_video_file(video_path)
+        if scene.audio_facts is not None:
+            # The scene stage may provide the additive synthetic marker. The
+            # authoritative probe remains the source for all actual media
+            # facts, so stale metadata cannot rewrite what the file contains.
+            info.audio_facts = AudioMediaFacts(
+                has_audio=info.has_audio,
+                audio_codec=info.audio_codec,
+                audio_duration=info.audio_duration,
+                sample_rate=info.sample_rate,
+                channels=info.channels,
+                is_synthetic=(
+                    scene.audio_facts.is_synthetic if info.has_audio else False
+                ),
+            )
         scene_infos.append(info)
         logger.info(f"Scene '{scene.id}': {info.duration:.2f}s, {info.width}x{info.height}")
     

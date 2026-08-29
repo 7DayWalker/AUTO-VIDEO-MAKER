@@ -124,6 +124,8 @@ def burn_captions(
     args = [
         "-y",
         "-i", str(video_path),
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
         "-vf", sub_filter,
         "-c:v", VIDEO_CODEC,
         "-preset", VIDEO_PRESET,

@@ -84,7 +84,7 @@ def normalize_video(
     - Frame rate (30fps default)
     - Codec (H.264)
     - Pixel format (yuv420p)
-    - Audio (AAC stereo)
+    - Audio (exactly one AAC stereo stream; source audio or deterministic silence)
     """
     # Build filter chain
     filters = []
@@ -112,9 +112,19 @@ def normalize_video(
     
     filter_str = ",".join(filters)
     
-    args = [
-        "-y",  # Overwrite output
-        "-i", str(input_path),
+    # Every normalized scene has exactly one compatible audio stream. Native
+    # source audio is selected explicitly; silent scenes receive an explicit
+    # lavfi silence input so concat never depends on optional stream selection.
+    has_source_audio = bool(source_info and source_info.has_audio)
+    args = ["-y", "-i", str(input_path)]
+    if not has_source_audio:
+        args.extend([
+            "-f", "lavfi",
+            "-i", f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo",
+        ])
+    args.extend([
+        "-map", "0:v:0",
+        "-map", "0:a:0" if has_source_audio else "1:a:0",
         "-vf", filter_str,
         "-c:v", VIDEO_CODEC,
         "-preset", VIDEO_PRESET,
@@ -125,9 +135,15 @@ def normalize_video(
         "-b:a", AUDIO_BITRATE,
         "-ar", str(AUDIO_SAMPLE_RATE),
         "-ac", str(AUDIO_CHANNELS),
+        "-af", f"apad=whole_dur={source_info.duration}" if source_info and source_info.duration > 0 else "anull",
+        "-t", str(source_info.duration) if source_info and source_info.duration > 0 else "0",
         "-movflags", "+faststart",
         str(output_path),
-    ]
+    ])
+    if not source_info or source_info.duration <= 0:
+        # A probe-backed assembly always has a duration. This fallback keeps
+        # the helper usable in isolation without creating an unbounded file.
+        args[args.index("-t") + 1] = "1"
     
     run_ffmpeg(args, f"Normalizing video: {input_path.name}")
     logger.info(f"Normalized: {input_path.name} -> {output_path.name}")
@@ -148,10 +164,18 @@ def concatenate_videos(
         raise ValueError("No input videos to concatenate")
     
     if len(input_paths) == 1:
-        # Single video - just copy
-        import shutil
-        shutil.copy2(input_paths[0], output_path)
-        logger.info(f"Single video copied to {output_path}")
+        # Single normalized video: explicitly retain only the canonical video
+        # and first audio stream, preserving the one-stream topology.
+        args = [
+            "-y", "-i", str(input_paths[0]),
+            "-map", "0:v:0",
+            "-map", "0:a:0",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        run_ffmpeg(args, "Copying single normalized video")
+        logger.info(f"Single normalized video copied to {output_path}")
         return
     
     # Create concat file list
@@ -167,6 +191,8 @@ def concatenate_videos(
         "-f", "concat",
         "-safe", "0",
         "-i", str(concat_file),
+        "-map", "0:v:0",
+        "-map", "0:a:0",
         "-c", "copy",  # Stream copy since videos are already normalized
         "-movflags", "+faststart",
         str(output_path),

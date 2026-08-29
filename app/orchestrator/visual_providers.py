@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from app.assembly.ffmpeg import probe_media, run_ffmpeg
+from app.assembly.audio_contract import AudioMediaFacts
 from app.flow.scene_generator import (
     FlowAuthenticationError,
     FlowConnectionError,
@@ -343,6 +344,9 @@ class LocalAssetVisualProvider:
             generation_cost=0,
             downloaded_at=datetime.now(timezone.utc).isoformat(),
             warnings=[f"source_asset={source.name}"],
+            audio_facts=AudioMediaFacts.model_validate(
+                {**validation.get("audio_facts", {}), "is_synthetic": not info.has_audio}
+            ),
         )
         result.verification.update(
             {
@@ -787,6 +791,7 @@ class GeminiOmniVisualProvider:
             generation_cost=None,  # never fabricate cost values
             downloaded_at=datetime.now(timezone.utc).isoformat(),
             warnings=[f"model={self.model}", f"output_delivery={delivery}"],
+            audio_facts=AudioMediaFacts.model_validate(validation.get("audio_facts", {})),
         )
         result.verification.update(
             {
@@ -1082,6 +1087,9 @@ class ImageMotionVisualProvider:
             generation_cost=0,
             downloaded_at=datetime.now(timezone.utc).isoformat(),
             warnings=[f"source_image={source.name}", f"motion_preset={preset}"],
+            audio_facts=AudioMediaFacts.model_validate(
+                {**validation.get("audio_facts", {}), "is_synthetic": True}
+            ),
         )
         result.verification.update(
             {
