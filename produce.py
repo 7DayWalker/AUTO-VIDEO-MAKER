@@ -472,11 +472,12 @@ Examples:
         "--visual-default-provider",
         type=str,
         default="image_motion",
-        choices=["image_motion", "local_asset"],
+        choices=["image_motion", "local_asset", "openrouter_video"],
         help=(
             "Hybrid mode only: provider for scenes without an explicit "
             "routing override (default: image_motion). google_flow is never "
-            "a valid default."
+            "a valid default. openrouter_video uses the configured model and "
+            "never falls back to paid access automatically."
         ),
     )
     scene_group.add_argument(
@@ -486,8 +487,9 @@ Examples:
         default=[],
         help=(
             "Hybrid mode only: explicit per-scene provider override, e.g. "
-            "--route-scene scene_003=google_flow. Repeatable. This is the "
-            "ONLY way a scene is routed to Google Flow."
+            "--route-scene scene_003=google_flow or "
+            "scene_003=openrouter_video. Repeatable. This is the ONLY way a "
+            "scene is routed to Google Flow or OpenRouter."
         ),
     )
     scene_group.add_argument(
@@ -527,6 +529,48 @@ Examples:
             "(Phase 7B), e.g. 'google_flow_private'. Provenance metadata "
             "only - never a routable provider identity. Defaults to "
             "AVM_EXTERNAL_VIDEO_SOURCE or a truthful generic value."
+        ),
+    )
+    scene_group.add_argument(
+        "--openrouter-model",
+        type=str,
+        default=None,
+        help=(
+            "OpenRouter video model ID. If omitted, the current compatible "
+            "free model is selected deterministically."
+        ),
+    )
+    scene_group.add_argument(
+        "--openrouter-resolution",
+        type=str,
+        default=None,
+        help=(
+            "OpenRouter video resolution (for example 720p). It is checked "
+            "against the live model capability catalog before submission."
+        ),
+    )
+    scene_group.add_argument(
+        "--openrouter-allow-paid",
+        action="store_true",
+        help=(
+            "Explicitly authorize paid OpenRouter video generation for the "
+            "selected model. Default is disabled."
+        ),
+    )
+    scene_group.add_argument(
+        "--openrouter-allow-paid-fallback",
+        action="store_true",
+        help=(
+            "Persist the paid-fallback opt-in marker. Phase 7E still does not "
+            "automatically switch models or submit paid fallback jobs."
+        ),
+    )
+    scene_group.add_argument(
+        "--openrouter-generate-audio",
+        action="store_true",
+        help=(
+            "Request native audio from OpenRouter only when the selected model "
+            "advertises generate_audio support."
         ),
     )
 
@@ -692,6 +736,11 @@ Examples:
             scene_duration=args.scene_duration,
             max_scenes_per_run=args.max_scenes,
             credit_limit=args.credit_limit,
+            openrouter_model=args.openrouter_model,
+            openrouter_resolution=args.openrouter_resolution,
+            openrouter_allow_paid=args.openrouter_allow_paid,
+            openrouter_allow_paid_fallback=args.openrouter_allow_paid_fallback,
+            openrouter_generate_audio=args.openrouter_generate_audio,
             visual_mode=args.visual_mode,
             visual_default_provider=args.visual_default_provider,
             # Phase 6C: explicit per-scene assets. Parsed leniently here;

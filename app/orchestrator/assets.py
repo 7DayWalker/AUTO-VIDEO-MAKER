@@ -36,6 +36,8 @@ PROVIDER_IMAGE_MOTION = "image_motion"
 PROVIDER_EXTERNAL_VIDEO = "external_video"
 # Phase 7C: cost-bearing text-to-video generation; no local asset is required.
 PROVIDER_GEMINI_OMNI = "gemini_omni"
+# Phase 7E: generic OpenRouter video generation; no local asset is required.
+PROVIDER_OPENROUTER_VIDEO = "openrouter_video"
 
 # Media types each zero-cost provider can legitimately consume.
 REQUIRED_MEDIA_TYPES = {
@@ -46,7 +48,11 @@ REQUIRED_MEDIA_TYPES = {
 
 # Providers that own generation and require no local asset (asset intake and
 # preflight do not apply to them).
-GENERATION_PROVIDERS = {PROVIDER_GOOGLE_FLOW, PROVIDER_GEMINI_OMNI}
+GENERATION_PROVIDERS = {
+    PROVIDER_GOOGLE_FLOW,
+    PROVIDER_GEMINI_OMNI,
+    PROVIDER_OPENROUTER_VIDEO,
+}
 
 
 # ---------------------------------------------------------------------------

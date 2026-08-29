@@ -302,6 +302,18 @@ class ProductionOrchestrator:
         if persisted_source:
             self.config.image_source = persisted_source
 
+        # Phase 7E: persisted OpenRouter routing/configuration is authoritative
+        # on resume. API keys are never persisted; they remain environment-only.
+        for key in (
+            "openrouter_model",
+            "openrouter_resolution",
+            "openrouter_allow_paid",
+            "openrouter_allow_paid_fallback",
+            "openrouter_generate_audio",
+        ):
+            if key in (self.manifest.scene_config or {}):
+                setattr(self.config, key, self.manifest.scene_config[key])
+
         # Phase 7D: the assembly snapshot is authoritative on resume. Legacy
         # manifests without this additive field retain narration_only behavior.
         persisted_audio_policy = (self.manifest.assembly_config or {}).get(
@@ -1740,6 +1752,182 @@ class ProductionOrchestrator:
 
         logger.info(f"Local asset scene generation complete: {len(scene_paths)} scenes")
 
+    def _execute_scenes_stage_openrouter(
+        self,
+        *,
+        plan,
+        started_at: str,
+        only_scenes: frozenset,
+    ) -> None:
+        """Run explicitly routed generic OpenRouter video scenes.
+
+        This is separate from the deterministic local/ImageMotion pass because
+        a submitted OpenRouter job is billable and must be resumed by polling
+        the persisted remote job, never by entering a new submission loop.
+        """
+        from app.flow.scene_generator import (
+            load_manifest as load_scene_manifest,
+            save_manifest as save_scene_manifest,
+            validate_video_file,
+        )
+        from app.flow.scene_models import FlowGenerationConfig, SceneGenerationRequest
+        from app.orchestrator.visual_providers import (
+            OPENROUTER_VIDEO_PROVIDER,
+            create_visual_provider,
+        )
+
+        project_scenes_dir = self.project_dir / "scenes" / plan.project_id
+        scene_manifest = load_scene_manifest(project_scenes_dir, plan.project_id)
+        scene_paths = [
+            path for path in (self.manifest.scene_video_paths or [])
+            if Path(path).stem not in only_scenes
+        ]
+        scene_config = self.config.to_scene_config_dict()
+
+        for scene in sorted(plan.scenes, key=lambda item: item.sequence):
+            if scene.id not in only_scenes:
+                continue
+            existing = scene_manifest.get_scene(scene.id)
+            output_path = project_scenes_dir / f"{scene.id}.mp4"
+            if existing and existing.status in {"completed", "validated"} and output_path.exists():
+                validation = validate_video_file(output_path, self.config.scene_aspect_ratio)
+                if validation.get("valid"):
+                    logger.info("OpenRouter scene already exists, skipping: %s", output_path)
+                    scene_paths.append(str(output_path))
+                    continue
+
+            request = SceneGenerationRequest(
+                project_id=plan.project_id,
+                scene_id=scene.id,
+                sequence=scene.sequence,
+                visual_prompt=scene.visual_prompt,
+                config=FlowGenerationConfig(
+                    model=scene_config.get("openrouter_model") or "openrouter_video",
+                    aspect_ratio=self.config.scene_aspect_ratio,
+                    duration=max(1, int(scene.estimated_duration) or 4),
+                    count=1,
+                    agent_enabled=False,
+                ),
+            )
+
+            def persist_openrouter_checkpoint(update: Dict[str, Any]) -> None:
+                scene_id = update.get("scene_id", scene.id)
+                current = self.manifest.scene_checkpoints.get(scene_id, {})
+                current.update(update)
+                current["provider"] = OPENROUTER_VIDEO_PROVIDER
+                current["updated_at"] = datetime.now().isoformat()
+                self.manifest.scene_checkpoints[scene_id] = current
+                evidence = {
+                    key: current.get(key)
+                    for key in (
+                        "provider", "job_id", "polling_url", "model", "access",
+                        "estimated_cost", "actual_cost", "usage", "error",
+                    )
+                    if current.get(key) is not None
+                }
+                scene_manifest.add_scene(
+                    scene_id=scene.id,
+                    sequence=scene.sequence,
+                    file=f"{scene.id}.mp4",
+                    status=current.get("status", "generating"),
+                    generation_cost=None,
+                    checkpoint_evidence=evidence,
+                    file_path=current.get("file_path"),
+                    validation=current.get("validation", {}),
+                )
+                save_scene_manifest(scene_manifest, project_scenes_dir)
+                self._save_manifest()
+
+            provider = create_visual_provider(
+                "hybrid",
+                scene_config=scene_config,
+                scenes_output_dir=project_scenes_dir,
+                provider_name=OPENROUTER_VIDEO_PROVIDER,
+            )
+            checkpoint = self.manifest.scene_checkpoints.get(scene.id) or {}
+            has_remote_job = bool(checkpoint.get("job_id") and checkpoint.get("polling_url"))
+            if has_remote_job:
+                logger.info(
+                    "Resuming OpenRouter scene %s without resubmission (job=%s)",
+                    scene.id,
+                    checkpoint.get("job_id"),
+                )
+                result = provider.resume_scene(
+                    request,
+                    checkpoint,
+                    checkpoint_callback=persist_openrouter_checkpoint,
+                )
+            else:
+                result = provider.generate_scene(
+                    request,
+                    require_confirmation=False,
+                    checkpoint_callback=persist_openrouter_checkpoint,
+                )
+            if not result.success:
+                raise StageFailedError(
+                    "scenes",
+                    f"Scene {scene.id} failed: {result.error}",
+                    {"scene_id": scene.id, "status": result.status},
+                )
+
+            validation = validate_video_file(Path(result.file_path), request.config.aspect_ratio)
+            if not validation.get("valid"):
+                raise ValidationError(
+                    "scenes",
+                    f"Scene {scene.id} validation failed: {validation.get('error')}",
+                    path=str(result.file_path),
+                )
+            result_audio_facts = (
+                result.audio_facts.model_dump() if result.audio_facts is not None else None
+            )
+            if result_audio_facts is not None:
+                validation = {**validation, "audio_facts": result_audio_facts}
+            scene_paths.append(str(result.file_path))
+            current = self.manifest.scene_checkpoints.get(scene.id, {})
+            current.update(
+                {
+                    "provider": OPENROUTER_VIDEO_PROVIDER,
+                    "scene_id": scene.id,
+                    "sequence": scene.sequence,
+                    "status": "completed",
+                    "file_path": str(result.file_path),
+                    "validation": validation,
+                    "audio_facts": result_audio_facts,
+                    "model": result.verification.get("model", current.get("model")),
+                    "access": result.verification.get("access", current.get("access")),
+                    "job_id": result.verification.get("job_id", current.get("job_id")),
+                    "polling_url": result.verification.get("polling_url", current.get("polling_url")),
+                    "estimated_cost": result.verification.get("estimated_cost", current.get("estimated_cost")),
+                    "actual_cost": result.verification.get("actual_cost", current.get("actual_cost")),
+                    "usage": result.verification.get("usage", current.get("usage")),
+                    "updated_at": datetime.now().isoformat(),
+                }
+            )
+            self.manifest.scene_checkpoints[scene.id] = current
+            scene_manifest.add_scene(
+                scene_id=scene.id,
+                sequence=scene.sequence,
+                file=f"{scene.id}.mp4",
+                status="completed",
+                generation_cost=None,
+                checkpoint_evidence={
+                    key: current.get(key)
+                    for key in (
+                        "provider", "job_id", "polling_url", "model", "access",
+                        "estimated_cost", "actual_cost", "usage",
+                    )
+                    if current.get(key) is not None
+                },
+                file_path=str(result.file_path),
+                validation=validation,
+            )
+            save_scene_manifest(scene_manifest, project_scenes_dir)
+            self._save_manifest()
+
+        self.manifest.scene_video_paths = scene_paths
+        self.manifest.scene_manifest_path = str(project_scenes_dir / "scene_manifest.json")
+        self._save_manifest()
+
     def _execute_scenes_stage_hybrid(self, *, plan, started_at: str) -> None:
         """Step 6B: functional hybrid mode with durable per-scene routing.
 
@@ -1783,7 +1971,13 @@ class ProductionOrchestrator:
             for sid, item in routing.items()
             if item["provider"] == GOOGLE_FLOW_PROVIDER
         )
-        zero_ids = {sid for sid in routing if sid not in flow_ids}
+        from app.orchestrator.visual_providers import OPENROUTER_VIDEO_PROVIDER
+        openrouter_ids = frozenset(
+            sid
+            for sid, item in routing.items()
+            if item["provider"] == OPENROUTER_VIDEO_PROVIDER
+        )
+        zero_ids = {sid for sid in routing if sid not in flow_ids and sid not in openrouter_ids}
         credits_before = self.manifest.total_credits_used
 
         # 3) Zero-cost pass first: structurally cannot touch Flow.
@@ -1796,6 +1990,15 @@ class ProductionOrchestrator:
                     sid: routing[sid]["provider"] for sid in zero_ids
                 },
                 mode="hybrid",
+            )
+
+        # Explicit OpenRouter jobs are handled separately from local providers
+        # so submitted remote jobs can be resumed without another submission.
+        if openrouter_ids:
+            self._execute_scenes_stage_openrouter(
+                plan=plan,
+                started_at=started_at,
+                only_scenes=openrouter_ids,
             )
 
         # 4) Explicit Flow pass through the PROVEN Flow body, restricted to

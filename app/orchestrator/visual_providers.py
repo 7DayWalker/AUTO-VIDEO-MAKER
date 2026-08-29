@@ -41,6 +41,11 @@ from app.flow.scene_models import (
     SceneGenerationRequest,
     SceneGenerationResult,
 )
+from app.orchestrator.openrouter_video import (
+    OPENROUTER_VIDEO_PROVIDER,
+    OpenRouterVideoVisualProvider,
+    default_openrouter_cache_path,
+)
 
 VISUAL_MODES = {"local", "google_flow", "hybrid"}
 DEFAULT_VISUAL_MODE = "google_flow"
@@ -64,7 +69,11 @@ GEMINI_OMNI_DEFAULT_RESOLUTION = "720p"
 # enter zero-cost auto-sourcing behavior (Phase 6F targets image_motion /
 # local_asset scenes only).
 ZERO_COST_PROVIDERS = {LOCAL_ASSET_PROVIDER, IMAGE_MOTION_PROVIDER, EXTERNAL_VIDEO_PROVIDER}
-VALID_PROVIDERS = ZERO_COST_PROVIDERS | {GOOGLE_FLOW_PROVIDER, GEMINI_OMNI_PROVIDER}
+VALID_PROVIDERS = ZERO_COST_PROVIDERS | {
+    GOOGLE_FLOW_PROVIDER,
+    GEMINI_OMNI_PROVIDER,
+    OPENROUTER_VIDEO_PROVIDER,
+}
 
 DEFAULT_HYBRID_PROVIDER = IMAGE_MOTION_PROVIDER
 
@@ -1180,6 +1189,21 @@ def create_visual_provider(
             # Configuration (key/model/resolution) comes from the environment
             # inside the provider; construction never touches the network.
             return GeminiOmniVisualProvider(scenes_output_dir)
+        if provider == OPENROUTER_VIDEO_PROVIDER:
+            # OpenRouter configuration is read without network access. The
+            # provider performs discovery only when a scene is actually run.
+            return OpenRouterVideoVisualProvider(
+                scenes_output_dir,
+                model=scene_config.get("openrouter_model"),
+                resolution=scene_config.get("openrouter_resolution"),
+                allow_paid=scene_config.get("openrouter_allow_paid"),
+                allow_paid_fallback=scene_config.get("openrouter_allow_paid_fallback"),
+                cache_path=(
+                    scene_config.get("openrouter_model_cache")
+                    or default_openrouter_cache_path()
+                ),
+                generate_audio=scene_config.get("openrouter_generate_audio"),
+            )
 
     mode = normalize_visual_mode(mode)
     if mode == GOOGLE_FLOW_PROVIDER:

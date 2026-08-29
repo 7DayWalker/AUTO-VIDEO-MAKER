@@ -369,6 +369,26 @@ class OrchestratorConfig(BaseModel):
     external_video_source: str = Field(
         default_factory=lambda: (os.getenv("AVM_EXTERNAL_VIDEO_SOURCE") or "").strip()
     )
+    # Phase 7E: OpenRouter is a generic provider; model and billing controls
+    # are persisted with the project so resume cannot silently change them.
+    openrouter_model: Optional[str] = Field(
+        default_factory=lambda: (os.getenv("AVM_OPENROUTER_MODEL") or "").strip() or None
+    )
+    openrouter_resolution: Optional[str] = Field(
+        default_factory=lambda: (os.getenv("AVM_OPENROUTER_RESOLUTION") or "").strip() or None
+    )
+    openrouter_allow_paid: bool = Field(
+        default_factory=lambda: os.getenv("AVM_OPENROUTER_ALLOW_PAID", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    openrouter_allow_paid_fallback: bool = Field(
+        default_factory=lambda: os.getenv("AVM_OPENROUTER_ALLOW_PAID_FALLBACK", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    openrouter_generate_audio: bool = Field(
+        default_factory=lambda: os.getenv("AVM_OPENROUTER_GENERATE_AUDIO", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     
     # Assembly settings
     resolution_width: int = Field(default=1080, ge=1)
@@ -490,6 +510,11 @@ class OrchestratorConfig(BaseModel):
             "visual_default_provider": self.visual_default_provider,
             "visual_scene_routing": dict(self.visual_scene_routing),
             "visual_source": self.image_source,
+            "openrouter_model": self.openrouter_model,
+            "openrouter_resolution": self.openrouter_resolution,
+            "openrouter_allow_paid": self.openrouter_allow_paid,
+            "openrouter_allow_paid_fallback": self.openrouter_allow_paid_fallback,
+            "openrouter_generate_audio": self.openrouter_generate_audio,
         }
     
     def to_assembly_config_dict(self) -> dict:
