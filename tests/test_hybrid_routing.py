@@ -10,12 +10,14 @@ from pathlib import Path
 
 import pytest
 
+from app.flow.scene_models import SceneGenerationResult
 from app.orchestrator.models import OrchestratorConfig, ProjectManifest
 from app.orchestrator.pipeline import ProductionOrchestrator
 from app.orchestrator.visual_providers import (
     GOOGLE_FLOW_PROVIDER,
     IMAGE_MOTION_PROVIDER,
     LOCAL_ASSET_PROVIDER,
+    OPENROUTER_VIDEO_PROVIDER,
     ImageMotionVisualProvider,
     build_hybrid_routing,
     create_visual_provider,
@@ -451,3 +453,246 @@ def test_17_legacy_manifest_without_routing_keys_loads(tmp_path):
     m = ProjectManifest(project_id="p", topic="legacy load topic", scene_config=legacy)
     assert m.scene_config.get("scene_provider_routing") is None
     assert m.scene_config.get("visual_default_provider") is None
+# ---------------------------------------------------------------------------
+# Phase 7E pre-live hardening:
+#  - configured hybrid global default is actually effective (item 1)
+#  - pipeline-level OpenRouter routing (/resume) without network (item 2)
+# ---------------------------------------------------------------------------
+
+openrouter_calls = []
+openrouter_fail = set()
+
+
+class _FakeOpenRouterProvider:
+    """Hermetic double for OpenRouterVideoVisualProvider at the factory boundary.
+
+    Records every invocation (generate/resume) and either writes a valid local
+    MP4 fixture or fails a scene whose id is listed in ``openrouter_fail``.
+    """
+
+    name = OPENROUTER_VIDEO_PROVIDER
+    requires_browser = False
+
+    def __init__(self, output_dir, **kwargs):
+        self.output_dir = Path(output_dir)
+
+    def is_available(self):
+        return True
+
+    def generate_scene(self, request, *, require_confirmation=False, checkpoint_callback=None, **_):
+        openrouter_calls.append(("generate", request.scene_id))
+        return self._finish(request, f"job_{request.scene_id}", checkpoint_callback)
+
+    def resume_scene(self, request, checkpoint, *, checkpoint_callback=None, **_):
+        openrouter_calls.append(("resume", request.scene_id))
+        job_id = checkpoint.get("job_id") or f"job_{request.scene_id}"
+        polling_url = checkpoint.get("polling_url") or f"https://openrouter.test/videos/{job_id}"
+        result = self._finish(request, job_id, checkpoint_callback)
+        result.verification["job_id"] = job_id
+        result.verification["polling_url"] = polling_url
+        return result
+
+    def _finish(self, request, job_id, checkpoint_callback=None):
+        polling_url = f"https://openrouter.test/videos/{job_id}"
+        common = {
+            "provider": OPENROUTER_VIDEO_PROVIDER,
+            "job_id": job_id,
+            "polling_url": polling_url,
+            "model": "vendor/fake-video",
+            "access": "free",
+            "access_route": "free",
+        }
+        if request.scene_id in openrouter_fail:
+            if checkpoint_callback:
+                checkpoint_callback({
+                    **common,
+                    "scene_id": request.scene_id,
+                    "status": "failed",
+                    "error": "simulated openrouter failure",
+                })
+            return SceneGenerationResult.failure(
+                request.scene_id, request.sequence, "simulated openrouter failure"
+            )
+        out = self.output_dir / f"{request.scene_id}.mp4"
+        make_clip(out)
+        if checkpoint_callback:
+            checkpoint_callback({
+                **common,
+                "scene_id": request.scene_id,
+                "status": "generation_submitted",
+            })
+        result = SceneGenerationResult.success_result(
+            scene_id=request.scene_id,
+            sequence=request.sequence,
+            file_path=out,
+            file_size=out.stat().st_size,
+            actual_duration=2.0,
+            width=720,
+            height=1280,
+            codec="h264",
+            generation_cost=None,
+        )
+        result.verification.update(common)
+        if checkpoint_callback:
+            checkpoint_callback({
+                **common,
+                "scene_id": request.scene_id,
+                "status": "completed",
+                "file_path": str(out),
+            })
+        return result
+
+
+class _Scene:
+    """Minimal scene object with the attributes build_hybrid_routing reads."""
+
+    def __init__(self, scene_id, sequence):
+        self.id = scene_id
+        self.sequence = sequence
+
+
+def _routing_plan(tmp_path, scene_count=2):
+    plan = json.loads(make_plan_file(tmp_path, scene_count).read_text(encoding="utf-8"))
+    return [_Scene(item["id"], item["sequence"]) for item in plan["scenes"]]
+
+
+def test_18_no_explicit_default_keeps_image_motion_for_unrouted_scenes(tmp_path):
+    scenes = _routing_plan(tmp_path)
+    routing = build_hybrid_routing(scenes, scene_config={})
+    assert routing["scene_001"]["provider"] == IMAGE_MOTION_PROVIDER
+    assert routing["scene_002"]["provider"] == IMAGE_MOTION_PROVIDER
+    assert routing["scene_001"]["reason"] == "hybrid default"
+    assert resolve_scene_provider(
+        "scene_001", visual_mode="hybrid", scene_config={}
+    ) == IMAGE_MOTION_PROVIDER
+
+
+def test_19_explicit_openrouter_default_routes_unrouted_scenes_to_openrouter(tmp_path):
+    scenes = _routing_plan(tmp_path)
+    config = {"visual_default_provider": OPENROUTER_VIDEO_PROVIDER}
+    routing = build_hybrid_routing(scenes, scene_config=config)
+    assert routing["scene_001"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert routing["scene_002"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert resolve_scene_provider(
+        "scene_001", visual_mode="hybrid", scene_config=config
+    ) == OPENROUTER_VIDEO_PROVIDER
+
+
+def test_20_explicit_route_override_beats_configured_default(tmp_path):
+    scenes = _routing_plan(tmp_path)
+    config = {"visual_default_provider": OPENROUTER_VIDEO_PROVIDER}
+    routing = build_hybrid_routing(
+        scenes,
+        scene_config=config,
+        cli_overrides={"scene_001": IMAGE_MOTION_PROVIDER},
+    )
+    assert routing["scene_001"]["provider"] == IMAGE_MOTION_PROVIDER
+    assert routing["scene_001"]["reason"] == "explicit CLI/config override"
+    # The remaining unrouted scene still follows the configured default.
+    assert routing["scene_002"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+
+
+def test_21_explicit_flow_route_stays_isolated_from_openrouter_default(tmp_path):
+    scenes = _routing_plan(tmp_path)
+    config = {
+        "visual_default_provider": OPENROUTER_VIDEO_PROVIDER,
+        "scene_provider_routing": {
+            "scene_002": {"provider": GOOGLE_FLOW_PROVIDER, "reason": "persisted routing"},
+        },
+    }
+    routing = build_hybrid_routing(scenes, scene_config=config)
+    assert routing["scene_001"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert routing["scene_002"]["provider"] == GOOGLE_FLOW_PROVIDER
+def test_22_pipeline_openrouter_route_uses_openrouter_path_not_image_motion(
+    tmp_path, monkeypatch
+):
+    openrouter_calls.clear()
+    openrouter_fail.clear()
+    monkeypatch.setattr(
+        "app.orchestrator.visual_providers.OpenRouterVideoVisualProvider",
+        _FakeOpenRouterProvider,
+    )
+    orch, _pid = build_orchestrator(
+        tmp_path, monkeypatch, mode="hybrid", scene_count=2,
+        default_provider=OPENROUTER_VIDEO_PROVIDER,
+    )
+    orch._execute_scenes_stage()
+
+    assert openrouter_calls == [("generate", "scene_001"), ("generate", "scene_002")]
+    cks = orch.manifest.scene_checkpoints
+    assert cks["scene_001"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert cks["scene_001"]["status"] == "completed"
+    assert cks["scene_002"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert cks["scene_002"]["status"] == "completed"
+    assert {Path(p).name for p in orch.manifest.scene_video_paths} == {
+        "scene_001.mp4", "scene_002.mp4",
+    }
+    raw = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    routing = raw["scene_config"]["scene_provider_routing"]
+    assert all(item["provider"] == OPENROUTER_VIDEO_PROVIDER for item in routing.values())
+    # Every scene stayed on the OpenRouter path; no image_motion/local/Flow route.
+    assert all(ck.get("provider") == OPENROUTER_VIDEO_PROVIDER for ck in cks.values())
+
+
+def test_23_pipeline_failed_openrouter_scene_never_falls_back(tmp_path, monkeypatch):
+    openrouter_calls.clear()
+    openrouter_fail.clear()
+    openrouter_fail.add("scene_001")
+    monkeypatch.setattr(
+        "app.orchestrator.visual_providers.OpenRouterVideoVisualProvider",
+        _FakeOpenRouterProvider,
+    )
+    orch, _pid = build_orchestrator(
+        tmp_path, monkeypatch, mode="hybrid", scene_count=2,
+        assets={"scene_002": "image"},
+        routing={"scene_001": OPENROUTER_VIDEO_PROVIDER},
+    )
+    with pytest.raises(Exception, match="Scene scene_001 failed"):
+        orch._execute_scenes_stage()
+
+    ck1 = orch.manifest.scene_checkpoints.get("scene_001") or {}
+    assert ck1.get("provider") == OPENROUTER_VIDEO_PROVIDER
+    assert ck1.get("status") == "failed"
+    assert "simulated" in (ck1.get("error") or "")
+    # The failed OpenRouter scene does NOT appear as a successful scene and no
+    # alternate provider (image_motion/local/Flow) substituted it.
+    assert "scene_001" not in {Path(p).stem for p in orch.manifest.scene_video_paths}
+    ck2 = orch.manifest.scene_checkpoints["scene_002"]
+    assert ck2["provider"] == IMAGE_MOTION_PROVIDER
+    assert ck2["status"] == "completed"
+
+
+def test_24_pipeline_resume_polls_remote_job_without_new_submit(tmp_path, monkeypatch):
+    openrouter_calls.clear()
+    openrouter_fail.clear()
+    monkeypatch.setattr(
+        "app.orchestrator.visual_providers.OpenRouterVideoVisualProvider",
+        _FakeOpenRouterProvider,
+    )
+    orch, _pid = build_orchestrator(
+        tmp_path, monkeypatch, mode="hybrid", scene_count=1,
+        routing={"scene_001": OPENROUTER_VIDEO_PROVIDER},
+    )
+    # Pre-seed a submitted remote job, as if a previous run had already paid
+    # for generation. Resume must poll/recover it, never submit another job.
+    orch.manifest.scene_checkpoints["scene_001"] = {
+        "provider": OPENROUTER_VIDEO_PROVIDER,
+        "status": "generation_submitted",
+        "job_id": "job_001",
+        "polling_url": "https://openrouter.test/videos/job_001",
+        "model": "vendor/fake-video",
+        "access": "free",
+    }
+    orch._execute_scenes_stage()
+
+    assert openrouter_calls == [("resume", "scene_001")]
+    ck = orch.manifest.scene_checkpoints["scene_001"]
+    assert ck["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert ck["status"] == "completed"
+    assert ck["job_id"] == "job_001"
+    assert ck["polling_url"] == "https://openrouter.test/videos/job_001"
+    assert "scene_001.mp4" in {Path(p).name for p in orch.manifest.scene_video_paths}
+    raw = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert raw["scene_config"]["scene_provider_routing"]["scene_001"][
+        "provider"
+    ] == OPENROUTER_VIDEO_PROVIDER

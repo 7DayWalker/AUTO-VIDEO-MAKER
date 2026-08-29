@@ -431,6 +431,13 @@ def test_async_generation_downloads_atomically_validates_and_reports_audio(tmp_p
     assert result.audio_facts is not None
     assert result.audio_facts.has_audio is True
     assert result.audio_facts.is_synthetic is False
+    # Phase 7D audio facts must fully flow from the returned media (fixture is
+    # AAC / 44.1 kHz / stereo), not just the presence flags.
+    assert result.audio_facts.audio_codec == "aac"
+    assert result.audio_facts.sample_rate == 44100
+    assert result.audio_facts.channels == 2
+    assert result.audio_facts.audio_duration is not None
+    assert 0.4 <= result.audio_facts.audio_duration <= 1.6
     assert result.verification["provider"] == OPENROUTER_VIDEO_PROVIDER
     assert result.verification["model"] == model.model_id
     assert result.verification["access_route"] == OPENROUTER_FREE
@@ -458,6 +465,60 @@ def test_polling_timeout_preserves_remote_identity_and_never_resubmits(tmp_path)
     timeout = [item for item in checkpoints if item.get("status") == "timeout"][-1]
     assert timeout["job_id"] == "job_001"
     assert len(fake_client.submit_calls) == 1
+
+
+def test_expired_status_is_an_unrecoverable_terminal_failure(tmp_path):
+    """A remote ``expired`` job must be classified explicitly as unrecoverable,
+    never as a generic polling timeout, and never resubmitted."""
+    model = OpenRouterVideoModel.from_dict(model_payload("vendor/free-video", price="0"))
+    fake_client = FakeOpenRouterClient(
+        statuses=[{"status": "expired", "error": {"message": "generation window elapsed"}}],
+    )
+    checkpoints = []
+    result = provider(tmp_path, [model], fake_client, model=model.model_id).generate_scene(
+        make_request(), checkpoint_callback=checkpoints.append
+    )
+    assert result.success is False
+    assert result.status == "failed"
+    assert "expired" in result.error
+    assert "not resubmitted" in result.error
+    assert "polling timed out" not in result.error  # distinct from a timeout
+    assert result.verification["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert result.verification["model"] == model.model_id
+    assert result.verification["access"] == OPENROUTER_FREE
+    terminal = [item for item in checkpoints if item.get("remote_status") == "expired"][-1]
+    assert terminal["job_id"] == "job_001"
+    assert terminal["model"] == model.model_id
+    assert len(fake_client.submit_calls) == 1  # one submission, never a second
+
+
+def test_resume_of_expired_job_does_not_poll_or_resubmit(tmp_path):
+    """A checkpoint already marked terminal (expired) must be failed truthfully
+    without any new submission AND without even re-polling the dead job."""
+    model = OpenRouterVideoModel.from_dict(model_payload("vendor/free-video", price="0"))
+    fake_client = FakeOpenRouterClient()
+    checkpoints = []
+    result = provider(tmp_path, [model], fake_client, model=model.model_id).resume_scene(
+        make_request(),
+        {
+            "provider": OPENROUTER_VIDEO_PROVIDER,
+            "status": "failed",
+            "remote_status": "expired",
+            "error": "generation window elapsed",
+            "job_id": "job_001",
+            "polling_url": "https://openrouter.test/api/v1/videos/job_001",
+            "model": model.model_id,
+            "access": OPENROUTER_FREE,
+        },
+        checkpoint_callback=checkpoints.append,
+    )
+    assert result.success is False
+    assert "expired" in result.error
+    assert "not resubmitted" in result.error
+    assert result.verification["job_id"] == "job_001"
+    assert fake_client.submit_calls == []
+    assert fake_client.poll_calls == []  # terminal failure is not re-polled
+    assert fake_client.download_calls == []
 
 
 def test_remote_job_resume_polls_existing_job_without_submit(tmp_path):

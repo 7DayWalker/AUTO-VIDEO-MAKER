@@ -50,6 +50,12 @@ OPENROUTER_DEFAULT_POLL_INTERVAL = 30.0
 OPENROUTER_DEFAULT_POLL_MAX_ATTEMPTS = 20
 OPENROUTER_FREE = "free"
 OPENROUTER_PAID = "paid"
+# Remote statuses that are terminal generation failures. ``expired`` is an
+# unrecoverable remote state (distinct from an ordinary local polling timeout)
+# and must never be resubmitted.
+OPENROUTER_TERMINAL_FAILURE_STATUSES = frozenset(
+    {"failed", "error", "cancelled", "canceled", "expired"}
+)
 
 
 class OpenRouterVideoError(RuntimeError):
@@ -935,7 +941,7 @@ class OpenRouterVideoVisualProvider:
                     request, model, job_id=job_id, submit_payload=submit_payload,
                     status_payload=payload, access=access, checkpoint_callback=checkpoint_callback,
                 )
-            if status in {"failed", "error", "cancelled", "canceled"}:
+            if status in OPENROUTER_TERMINAL_FAILURE_STATUSES:
                 error = _extract_error(payload) or "unknown error"
                 self._checkpoint(
                     checkpoint_callback,
@@ -951,7 +957,14 @@ class OpenRouterVideoVisualProvider:
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
-                return self._fail(request, f"OpenRouter video job failed (status={status}; error={error})", model=model.model_id, access=access, job_id=job_id)
+                if status == "expired":
+                    message = (
+                        f"OpenRouter video job expired (status=expired; error={error}); "
+                        "the remote generation is unrecoverable and was not resubmitted"
+                    )
+                else:
+                    message = f"OpenRouter video job failed (status={status}; error={error})"
+                return self._fail(request, message, model=model.model_id, access=access, job_id=job_id)
             self._checkpoint(
                 checkpoint_callback,
                 {"scene_id": request.scene_id, "status": "generating", "job_id": job_id, "polling_url": polling_url, "model": model.model_id, "access": access, "remote_status": status, "updated_at": datetime.now(timezone.utc).isoformat()},
@@ -1072,6 +1085,23 @@ class OpenRouterVideoVisualProvider:
         polling_url = checkpoint.get("polling_url")
         if not job_id or not polling_url:
             return self._fail(request, "OpenRouter checkpoint has no recoverable remote job ID/polling URL; deliberate new generation is required", model=checkpoint.get("model", self.model), access=checkpoint.get("access"))
+        # A checkpoint that already observed a terminal remote failure (failed,
+        # cancelled, or expired) cannot be recovered by polling and must never
+        # be re-submitted. Fail truthfully instead of entering a new poll loop.
+        # ``remote_status`` is preferred because it carries the actual
+        # OpenRouter terminal state (e.g. ``expired``); ``status`` is the
+        # AVM-level checkpoint state.
+        terminal_status = checkpoint.get("remote_status") or checkpoint.get("status")
+        if terminal_status in OPENROUTER_TERMINAL_FAILURE_STATUSES:
+            error = checkpoint.get("error") or "remote generation ended in a terminal failure"
+            return self._fail(
+                request,
+                f"OpenRouter remote job {job_id} ended in a terminal state ({terminal_status}); "
+                f"it was not recovered and not resubmitted ({error})",
+                model=checkpoint.get("model", self.model),
+                access=checkpoint.get("access"),
+                job_id=job_id,
+            )
         model_id = checkpoint.get("model") or self.model
         try:
             models = self._get_catalog().models()

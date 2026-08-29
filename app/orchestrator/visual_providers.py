@@ -865,6 +865,25 @@ def normalize_provider(value: Optional[str]) -> str:
     return provider
 
 
+def _default_hybrid_provider(scene_config: Optional[Dict[str, Any]]) -> str:
+    """Return the durable hybrid default provider for unrouted scenes.
+
+    ``visual_default_provider`` (persisted per project / CLI) is honored when
+    present and valid. Google Flow can never be a default; a configured
+    ``google_flow`` default collapses to ImageMotion (safe default).
+    """
+    configured = (scene_config or {}).get("visual_default_provider")
+    if not configured:
+        return DEFAULT_HYBRID_PROVIDER
+    try:
+        provider = normalize_provider(configured)
+    except ValueError:
+        return DEFAULT_HYBRID_PROVIDER
+    if provider == GOOGLE_FLOW_PROVIDER:
+        return DEFAULT_HYBRID_PROVIDER
+    return provider
+
+
 def resolve_scene_provider(
     scene_id: str,
     *,
@@ -875,7 +894,8 @@ def resolve_scene_provider(
 
     Resolution order:
       1. explicit persisted entry in ``scene_provider_routing[scene_id]``
-      2. hybrid ``default_provider`` (never google_flow)
+      2. configured hybrid default (``visual_default_provider``; defaults to
+         image_motion when unset; never google_flow)
       3. mode defaults: google_flow -> google_flow; local -> local_asset
 
     In hybrid mode an unresolved scene can NEVER default to google_flow.
@@ -892,7 +912,7 @@ def resolve_scene_provider(
         return normalize_provider(explicit["provider"])
     if isinstance(explicit, str) and explicit:
         return normalize_provider(explicit)
-    return DEFAULT_HYBRID_PROVIDER
+    return _default_hybrid_provider(scene_config)
 
 
 def build_hybrid_routing(
@@ -904,13 +924,15 @@ def build_hybrid_routing(
     """Build the complete authoritative routing map for a hybrid project.
 
     Called BEFORE any generation. Precedence: CLI overrides > persisted
-    explicit entries > hybrid default (image_motion). Flow is reachable only
-    through an explicit override.
+    explicit entries > configured hybrid default (``visual_default_provider``,
+    defaulting to image_motion when unset). Flow is reachable only through an
+    explicit override. No automatic cross-provider fallback is ever created.
     """
     routing: Dict[str, Dict[str, Any]] = {}
     existing = (scene_config or {}).get("scene_provider_routing") or {}
+    default_provider = _default_hybrid_provider(scene_config)
     for scene in sorted(plan_scenes, key=lambda s: s.sequence):
-        provider = DEFAULT_HYBRID_PROVIDER
+        provider = default_provider
         reason = "hybrid default"
         prior = existing.get(scene.id)
         if isinstance(prior, dict) and prior.get("provider"):
