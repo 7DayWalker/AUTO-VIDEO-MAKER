@@ -696,3 +696,110 @@ def test_24_pipeline_resume_polls_remote_job_without_new_submit(tmp_path, monkey
     assert raw["scene_config"]["scene_provider_routing"]["scene_001"][
         "provider"
     ] == OPENROUTER_VIDEO_PROVIDER
+
+# ---------------------------------------------------------------------------
+# Phase 8 hardening: ONE hybrid run partitioned between the OpenRouter pass
+# and the provider-agnostic boundary pass (audit gap: mixed successful run).
+# ---------------------------------------------------------------------------
+
+def test_25_mixed_openrouter_and_boundary_pass_partition(tmp_path, monkeypatch):
+    """A single hybrid production routes scene_001 explicitly to
+    openrouter_video and leaves scene_002 on the image_motion hybrid default.
+
+    Through the REAL ``_execute_scenes_stage()`` hybrid partition this proves:
+    - the OpenRouter execution pass handled exactly its routed scene
+      (one fresh ``generate``, no second submission, no other scene);
+    - the boundary scene executed through the provider-agnostic boundary pass
+      with the real ImageMotion provider (zero-cost provenance, no remote-job
+      identity);
+    - checkpoints carry truthful per-provider identity with no
+      cross-provider contamination in either direction;
+    - both scene paths are recorded in ``scene_video_paths`` and validate;
+    - Flow is never constructed and no provider substitution/fallback occurs.
+
+    Fully hermetic: the OpenRouter provider is faked at the factory boundary
+    (established Phase 7E pattern); ImageMotion renders a local fixture;
+    no network, no credentials, no live generation.
+    """
+    from app.flow.scene_generator import validate_video_file
+    from app.orchestrator.models import PipelineStage
+
+    openrouter_calls.clear()
+    openrouter_fail.clear()
+    monkeypatch.setattr(
+        "app.orchestrator.visual_providers.OpenRouterVideoVisualProvider",
+        _FakeOpenRouterProvider,
+    )
+    # Cost firewall sentinel: Flow must never be constructed in this run.
+    monkeypatch.setattr(
+        "app.orchestrator.visual_providers.GoogleFlowVisualProvider",
+        _NeverConstructed,
+    )
+    monkeypatch.setattr(
+        "app.flow.scene_generator.FlowSceneGenerator",
+        _NeverConstructed,
+    )
+
+    orch, _pid = build_orchestrator(
+        tmp_path, monkeypatch, mode="hybrid", scene_count=2,
+        # scene_001: explicit route to OpenRouter (highest precedence).
+        # scene_002: unrouted -> visual default (image_motion) -> boundary pass.
+        routing={"scene_001": OPENROUTER_VIDEO_PROVIDER},
+    )
+    orch._execute_scenes_stage()
+
+    # Partition: the OpenRouter pass ran exactly once, for its routed scene
+    # only, as a fresh generation (never a duplicate submission, never the
+    # boundary scene).
+    assert openrouter_calls == [("generate", "scene_001")]
+
+    # Both scenes completed; both paths recorded; both artifacts valid (7A).
+    paths = {Path(p).name: p for p in orch.manifest.scene_video_paths}
+    assert set(paths.keys()) == {"scene_001.mp4", "scene_002.mp4"}
+    for path in paths.values():
+        assert validate_video_file(Path(path), "9:16").get("valid")
+
+    # OpenRouter checkpoint: truthful OpenRouter identity + remote-job
+    # provenance, and NO boundary-pass (zero-cost source-asset) provenance.
+    ck1 = orch.manifest.scene_checkpoints["scene_001"]
+    assert ck1["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert ck1["status"] == "completed"
+    assert ck1["model"] == "vendor/fake-video"
+    assert ck1["access"] == "free"
+    assert ck1["job_id"] == "job_scene_001"
+    assert ck1["polling_url"] == "https://openrouter.test/videos/job_scene_001"
+    assert ck1["validation"]["valid"] is True
+    assert ck1["file_path"].endswith("scene_001.mp4")
+    assert "source_asset" not in ck1
+
+    # Boundary checkpoint: truthful ImageMotion identity + zero-cost
+    # provenance, and NO remote-job identity (a fake OpenRouter result cannot
+    # leak into the boundary scene, and vice versa).
+    ck2 = orch.manifest.scene_checkpoints["scene_002"]
+    assert ck2["provider"] == IMAGE_MOTION_PROVIDER
+    assert ck2["status"] == "completed"
+    assert ck2["generation_cost"] == 0
+    assert "source_asset" in ck2
+    assert "job_id" not in ck2
+    assert "polling_url" not in ck2
+    assert "model" not in ck2
+    assert ck2["validation"]["valid"] is True
+
+    # Durable persisted state agrees with the in-memory checkpoints.
+    raw = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    raw_cks = raw["scene_checkpoints"]
+    assert raw_cks["scene_001"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert raw_cks["scene_002"]["provider"] == IMAGE_MOTION_PROVIDER
+    routing = raw["scene_config"]["scene_provider_routing"]
+    assert routing["scene_001"]["provider"] == OPENROUTER_VIDEO_PROVIDER
+    assert routing["scene_002"]["provider"] == IMAGE_MOTION_PROVIDER
+
+    # Hybrid stage result records both providers; zero credits consumed
+    # (fake access is "free"; ImageMotion is zero-cost).
+    meta = orch.manifest.get_stage_result(PipelineStage.SCENES).metadata
+    assert sorted(meta["providers"]) == [
+        IMAGE_MOTION_PROVIDER,
+        OPENROUTER_VIDEO_PROVIDER,
+    ]
+    assert meta["scene_count"] == 2
+    assert orch.manifest.total_credits_used == 0
