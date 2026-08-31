@@ -49,6 +49,9 @@ logs/
 # ----- Project Working Files (generated content) -----
 projects/
 
+# ----- Phase 9: Durable Production INTENT artifacts (runtime data) -----
+productions/
+
 # ----- Playwright Browser Profile (session data) -----
 browser_profile/
 

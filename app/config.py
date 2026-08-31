@@ -36,6 +36,10 @@ ASSETS_DIR = PROJECT_ROOT / "assets"
 LOGS_DIR = PROJECT_ROOT / "logs"
 CREDENTIALS_DIR = PROJECT_ROOT / "credentials"
 
+# Phase 9: durable production INTENT artifacts (distinct from execution
+# artifacts/state which live under projects/ and output/).
+PRODUCTIONS_DIR = PROJECT_ROOT / "productions"
+
 # All directories that must exist for the system to operate
 REQUIRED_DIRS = [
     PROJECTS_DIR,
@@ -43,6 +47,7 @@ REQUIRED_DIRS = [
     ASSETS_DIR,
     LOGS_DIR,
     CREDENTIALS_DIR,
+    PRODUCTIONS_DIR,
 ]
 
 
