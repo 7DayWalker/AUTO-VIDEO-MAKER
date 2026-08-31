@@ -896,3 +896,111 @@ class TestSerializationContract:
         assert PRODUCTIONS_DIR in REQUIRED_DIRS
         assert PRODUCTIONS_DIR.name == "productions"
 
+
+
+# ---------------------------------------------------------------------------
+# 17. Sixty-unit episodic production stress coverage (spec §30 cat. 5)
+# ---------------------------------------------------------------------------
+
+
+class TestSixtyUnitEpisodicStress:
+    """The frozen §30.5 requirement: a 60-unit episodic production serializes,
+    validates, reloads, and remains inspectable as ONE Production artifact."""
+
+    def _sixty_unit_episodic(self) -> Production:
+        bible = ProductionBible(
+            elements=[
+                BibleElement(
+                    element_id="characters/kai",
+                    section="characters",
+                    content={"name": "Kai", "role": "host"},
+                ),
+                BibleElement(
+                    element_id="world/reef",
+                    section="world",
+                    content={"name": "The Reef"},
+                ),
+            ]
+        )
+        units = [
+            make_unit(
+                f"ep-{number:03d}",
+                number,
+                "episode",
+                episode=EpisodeMetadata(
+                    season_number=1,
+                    episode_number=number,
+                    episode_title=f"Reef Series Episode {number:03d}",
+                    continuity_refs=[f"ep-{number - 1:03d}"] if number > 1 else [],
+                ),
+                bible_refs=["characters/kai", "world/reef"],
+                dependencies=[f"ep-{number - 1:03d}"] if number > 1 else [],
+            )
+            for number in range(1, 61)
+        ]
+        return make_production(
+            pid="prd_20260831_reef60_001",
+            title="Reef Series (60 episodes)",
+            bible=bible,
+            units=units,
+            command=make_command(
+                text="Create a 60-episode animated series about the Reef.",
+                workload_shape="unit_count",
+                intended_unit_count=60,
+            ),
+        )
+
+    def test_60_unit_episodic_production_round_trip(self, tmp_path):
+        production = self._sixty_unit_episodic()
+
+        # Structural validation happens at model construction; save + reload
+        # the real artifact through the Phase 9 storage API.
+        save_new_production(production, root=tmp_path)
+        loaded = load_production(production.production_id, root=tmp_path)
+
+        # Full equivalence and unit count.
+        assert loaded == production
+        assert len(loaded.units) == 60
+
+        # Deterministic ordering: total order 1..60 with no ties.
+        ordinals = [unit.ordinal for unit in loaded.units]
+        assert sorted(ordinals) == list(range(1, 61))
+
+        # Stable identities survive; every unit remains an episode with
+        # intact episodic metadata and Bible references.
+        by_id = {unit.unit_id: unit for unit in loaded.units}
+        assert len(by_id) == 60  # identities unique and complete
+        for number in range(1, 61):
+            unit = by_id[f"ep-{number:03d}"]
+            assert unit.ordinal == number
+            assert unit.unit_type == "episode"
+            assert unit.episode.season_number == 1
+            assert unit.episode.episode_number == number
+            assert unit.episode.episode_title == f"Reef Series Episode {number:03d}"
+            assert unit.bible_refs == ["characters/kai", "world/reef"]
+            if number > 1:
+                assert unit.dependencies == [f"ep-{number - 1:03d}"]
+
+        # Bible context survives the round trip.
+        assert loaded.bible is not None
+        assert [e.element_id for e in loaded.bible.elements] == [
+            "characters/kai",
+            "world/reef",
+        ]
+
+        # Command provenance survives (60-unit workload intent).
+        assert loaded.command.workload_shape == "unit_count"
+        assert loaded.command.intended_unit_count == 60
+
+        # The durable artifact stays INTENT-only: no execution-state or
+        # secret-shaped key anywhere in the persisted JSON.
+        artifact = json.loads(
+            current_path(production.production_id, tmp_path).read_text("utf-8")
+        )
+        assert scan_for_forbidden_keys(artifact) == []
+        assert validate_production(loaded) == []
+
+        # Inspection: identity, layout, and Phase 10 binding targets.
+        assert production_exists(production.production_id, tmp_path)
+        assert unit_plan_dir(production.production_id, "ep-060", tmp_path).is_dir()
+        assert list_versions(production.production_id, root=tmp_path) == []
