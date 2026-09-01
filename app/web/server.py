@@ -20,9 +20,10 @@ import logging
 import os
 import re
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from app.config import PROJECT_ROOT
 
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 WEBAPP_DIR = PROJECT_ROOT / "webapp"
 PROJECTS_DIR = PROJECT_ROOT / "output" / "projects"
+PRODUCTIONS_DIR = PROJECT_ROOT / "productions"
 DEFAULT_PORT = int(os.getenv("AVM_WEB_PORT", "8787"))
 
 MIME = {
@@ -446,6 +448,734 @@ def tiktok_publish_now(project_id: str, privacy_level=None):
 
 
 # ---------------------------------------------------------------------------
+# Phase 11 — PERSONAL COMMAND CENTER (thin production inspection/control)
+#
+# Every read derives ON DEMAND from the three disk authorities:
+#   1. INTENT    : productions/<id>/production.json        (Phase 9)
+#   2. EXECUTION : output/projects/<id>/manifest.json      (Phase 10)
+#   3. BINDING   : ProjectManifest.production_binding      (Phase 10)
+#
+# Every state classification comes from the Phase 10 ProductionExecutor
+# (derive_progress()); this layer NEVER re-implements the six-state
+# vocabulary and NEVER caches derived state. Execution commands flow
+# EXCLUSIVELY through ProductionExecutor.execute() in a background
+# thread (one operator command per production at a time); polling
+# endpoints are read-only and never spawn, continue, or retry execution.
+# No database, no scheduler, no daemon, no queue.
+# ---------------------------------------------------------------------------
+
+# Single-flight registry: at most one in-flight operator execution command
+# per production. Ephemeral presentation state only — never durable.
+_production_runs: dict = {}
+_production_runs_lock = threading.Lock()
+
+_SECRET_KEY_PATTERN = re.compile(
+    r"(secret|token|api[_-]?key|password|credential|authori[sz]ation|bearer|"
+    r"refresh[_-]?token|access[_-]?key|private[_-]?key|cookie|session|"
+    r"webhook|client[_-]?secret|signature)",
+    re.IGNORECASE,
+)
+
+
+def _redact_secrets(value):
+    """Recursively redact secret-looking keys from any disk-derived payload."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                "<redacted>"
+                if _SECRET_KEY_PATTERN.search(str(key))
+                else _redact_secrets(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    return value
+
+
+def _relative_display(path: Path) -> str:
+    """Forward-slash display path relative to the project root (never absolute)."""
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.name
+
+
+def _intent_malformed(production_id: str, exc: Exception) -> dict:
+    """F-03 (audit): structured, actionable error for unreadable intent."""
+    return {
+        "error": "PRODUCTION_INTENT_MALFORMED",
+        "production_id": production_id,
+        "message": (
+            f"Production intent for {production_id} could not be loaded: "
+            f"{type(exc).__name__}: {exc}"
+        ),
+        "guidance": (
+            "The on-disk production.json is corrupt or no longer matches "
+            "the Phase 9 schema. The Command Center never silently repairs "
+            "or mutates intent. Fix the file on disk or issue a revised "
+            "intent via produce.py, then retry. Genuinely unknown "
+            "production IDs still return 404."
+        ),
+    }
+
+
+def _production_executor(production_id: str):
+    """Build the Phase 10 ProductionExecutor — the ONLY execution engine."""
+    from app.orchestrator.production_execution import ProductionExecutor
+
+    return ProductionExecutor(
+        production_id,
+        productions_root=PRODUCTIONS_DIR,
+        projects_root=PROJECTS_DIR,
+    )
+
+
+def _production_or_none(production_id: str):
+    from app.production.storage import load_production, production_exists
+
+    if not production_exists(production_id, root=PRODUCTIONS_DIR):
+        return None
+    try:
+        return load_production(production_id, root=PRODUCTIONS_DIR)
+    except Exception as exc:
+        logger.warning("malformed production intent %s: %s", production_id, exc)
+        raise ValueError(
+            f"malformed production intent for {production_id}: {exc}"
+        ) from exc
+
+
+def _production_not_found(production_id: str) -> dict:
+    return {
+        "error": "PRODUCTION_NOT_FOUND",
+        "production_id": production_id,
+        "message": "Production not found in the productions/ intent area. "
+                   "Verify the production_id and try again.",
+    }
+
+
+def _executor_error(exc: Exception) -> dict:
+    logger.exception("ProductionExecutor failed truthfully")
+    return {
+        "error": "EXECUTOR_ERROR",
+        "message": f"ProductionExecutor raised {type(exc).__name__}: {exc}. "
+                   "Check logs for the full trace; durable artifacts on disk "
+                   "are the source of truth.",
+    }
+
+
+def _confirmation_required(action: str) -> dict:
+    return {
+        "error": "CONFIRMATION_REQUIRED",
+        "message": f"Confirmation required: pass \"confirm\": true to "
+                   f"{action}. State-changing operations are never implicit.",
+    }
+
+
+def _unit_progress_dict(item) -> dict:
+    return {
+        "unit_id": item.unit_id,
+        "ordinal": item.ordinal,
+        "state": item.state.value,
+        "project_id": item.project_id,
+        "bound_plan_version": item.bound_plan_version,
+        "reason": item.reason,
+    }
+
+
+def _state_counts(report) -> dict:
+    """Counts keyed by the Phase 10 six-state vocabulary, verbatim."""
+    from app.orchestrator.production_execution import UnitExecutionState
+
+    counts = report.counts()
+    return {state.value: counts[state] for state in UnitExecutionState}
+
+
+def _blocking_units(unit, progress_by_id: dict) -> list:
+    """Presentation-only: dependencies that are not COMPLETED per the executor."""
+    completed = {
+        unit_id
+        for unit_id, progress in progress_by_id.items()
+        if progress["state"] == "COMPLETED"
+    }
+    return [dep for dep in unit.dependencies if dep not in completed]
+
+
+def _derive_progress(production_id: str):
+    """Fresh, uncached derivation via the Phase 10 authority."""
+    return _production_executor(production_id).derive_progress()
+
+
+def _unit_intent(unit) -> dict:
+    data = {
+        "unit_id": unit.unit_id,
+        "ordinal": unit.ordinal,
+        "unit_type": unit.unit_type,
+        "title": unit.title,
+        "description": unit.description,
+        "premise": unit.premise,
+        "dependencies": list(unit.dependencies),
+        "content_intent": dict(unit.content_intent),
+        "bible_refs": list(unit.bible_refs),
+        "provider_intent": unit.provider_intent,
+    }
+    if unit.episode is not None:
+        data["episode"] = unit.episode.model_dump()
+    return data
+
+
+def _plan_evidence(production_id: str, unit_id: str) -> dict:
+    """Plan artifacts shown as SUPPORTING EVIDENCE only — never binding authority."""
+    from app.production.storage import unit_plan_dir
+
+    directory = unit_plan_dir(production_id, unit_id, root=PRODUCTIONS_DIR)
+    plan_path = directory / "production_plan.json"
+    brief_path = directory / "content_brief.json"
+    meta_path = directory / "plan_meta.json"
+    evidence = {
+        "plan_directory": _relative_display(directory),
+        "exists": any(p.is_file() for p in (plan_path, brief_path, meta_path)),
+        "complete": all(p.is_file() for p in (plan_path, brief_path, meta_path)),
+        "meta": None,
+        "note": "Plan artifacts are evidence only; the binding authority is "
+                "ProjectManifest.production_binding.",
+    }
+    if meta_path.is_file():
+        try:
+            evidence["meta"] = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            evidence["meta_error"] = f"malformed plan metadata: {exc}"
+    return evidence
+
+
+def _manifest_payload(manifest) -> dict:
+    """Read-only, secret-free snapshot of a bound project manifest."""
+    data = manifest.model_dump()
+    stages = {}
+    for name, result in manifest.stages.items():
+        status = getattr(result.status, "value", str(result.status))
+        stages[name.upper()] = {
+            "status": str(status).upper(),
+            "error": result.error,
+            "started_at": result.started_at,
+            "completed_at": result.completed_at,
+            "duration_seconds": result.duration_seconds,
+        }
+    # Config snapshots and the Flow project URL are deliberately omitted:
+    # they are runtime transport detail, never operator inspection surface.
+    return {
+        "project_id": manifest.project_id,
+        "topic": manifest.topic,
+        "created_at": manifest.created_at,
+        "updated_at": manifest.updated_at,
+        "completed_at": manifest.completed_at,
+        "current_stage": str(getattr(manifest.current_stage, "value", manifest.current_stage)),
+        "dry_run": manifest.dry_run,
+        "mock_mode": manifest.mock_mode,
+        "stages": stages,
+        "scene_checkpoints": data.get("scene_checkpoints") or {},
+        "production_binding": data.get("production_binding"),
+        "publications": _publication_summary(data),
+        "artifacts": {
+            "content_plan_path": manifest.content_plan_path,
+            "voice_audio_path": manifest.voice_audio_path,
+            "voice_timing_path": manifest.voice_timing_path,
+            "scene_manifest_path": manifest.scene_manifest_path,
+            "scene_video_paths": list(manifest.scene_video_paths or []),
+            "captions_path": manifest.captions_path,
+            "final_video_path": manifest.final_video_path,
+        },
+    }
+
+
+def _failure_details(manifest) -> list:
+    """Failing stages with truthful error text (empty when healthy)."""
+    failing = []
+    for name, result in manifest.stages.items():
+        status = getattr(result.status, "value", str(result.status))
+        if str(status).upper() == "FAILED":
+            failing.append({
+                "stage": name.upper(),
+                "error": result.error,
+                "completed_at": result.completed_at,
+            })
+    return failing
+
+
+def _scene_checkpoint_rows(scene_checkpoints: dict) -> list:
+    """Table-friendly rows; the raw checkpoint dict stays available untouched."""
+    rows = []
+    for scene_id, checkpoint in sorted(scene_checkpoints.items()):
+        if not isinstance(checkpoint, dict):
+            continue
+        evidence = checkpoint.get("checkpoint_evidence") or {}
+        rows.append({
+            "scene_id": scene_id,
+            "status": checkpoint.get("status"),
+            "provider": checkpoint.get("provider") or evidence.get("provider"),
+            "job_id": checkpoint.get("job_id"),
+            "polling_url": checkpoint.get("polling_url"),
+            "generation_cost": checkpoint.get("generation_cost"),
+            "video_path": checkpoint.get("video_path") or evidence.get("video_path"),
+            "updated_at": checkpoint.get("updated_at") or checkpoint.get("timestamp"),
+        })
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — read-only inspection payloads
+# ---------------------------------------------------------------------------
+
+
+def productions_index_payload():
+    """Production overview: intent + freshly derived aggregate progress."""
+    from app.production.storage import list_productions
+
+    items = []
+    for production_id in list_productions(root=PRODUCTIONS_DIR):
+        try:
+            production = _production_or_none(production_id)
+        except ValueError as exc:
+            items.append({
+                "production_id": production_id,
+                "title": production_id,
+                "counts": None,
+                "error": str(exc),
+                "sample": False,
+            })
+            continue
+        item = {
+            "production_id": production.production_id,
+            "title": production.title,
+            "command_text": production.command.text,
+            "workload_shape": production.command.workload_shape,
+            "intended_unit_count": production.command.intended_unit_count,
+            "unit_count": len(production.units),
+            "plan_version": production.plan_version,
+            "created_at": production.created_at,
+            "revised_at": production.revised_at,
+            "sample": False,
+        }
+        try:
+            report = _derive_progress(production_id)
+            item["counts"] = _state_counts(report)
+            item["complete"] = report.complete
+        except Exception as exc:
+            logger.warning(
+                "progress derivation failed truthfully for %s: %s", production_id, exc
+            )
+            item["counts"] = None
+            item["error"] = f"progress derivation failed: {type(exc).__name__}: {exc}"
+        items.append(item)
+    return 200, _redact_secrets(items)
+
+
+def production_detail_payload(production_id: str):
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    try:
+        report = _derive_progress(production_id)
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    progress_by_id = {
+        item.unit_id: _unit_progress_dict(item) for item in report.units
+    }
+    units = []
+    for unit in sorted(production.units, key=lambda item: item.ordinal):
+        progress = progress_by_id[unit.unit_id]
+        units.append({
+            "intent": _unit_intent(unit),
+            "execution": progress,
+            "blocking_units": _blocking_units(unit, progress_by_id),
+            "plan_exists": _plan_evidence(production_id, unit.unit_id)["exists"],
+        })
+    payload = {
+        "production_id": production.production_id,
+        "title": production.title,
+        "command": production.command.model_dump(),
+        "plan_version": production.plan_version,
+        "created_at": production.created_at,
+        "revised_at": production.revised_at,
+        "unit_count": len(production.units),
+        "counts": _state_counts(report),
+        "complete": report.complete,
+        "units": units,
+        "run": dict(_production_runs.get(production.production_id) or {"running": False}),
+        "sample": False,
+    }
+    return 200, _redact_secrets(payload)
+
+
+def production_units_payload(production_id: str):
+    status, payload = production_detail_payload(production_id)
+    if status != 200:
+        return status, payload
+    return 200, {
+        "production_id": payload["production_id"],
+        "counts": payload["counts"],
+        "units": payload["units"],
+    }
+
+
+def production_progress_payload(production_id: str):
+    """Polling surface: re-derived on EVERY call; never persisted, never executes."""
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    try:
+        report = _derive_progress(production_id)
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    payload = {
+        "production_id": production_id,
+        "plan_version": production.plan_version,
+        "units": [_unit_progress_dict(item) for item in report.units],
+        "counts": _state_counts(report),
+        "complete": report.complete,
+        "derived_at": datetime.now().isoformat(),
+        "run": dict(_production_runs.get(production_id) or {"running": False}),
+        "sample": False,
+    }
+    return 200, _redact_secrets(payload)
+
+
+def unit_detail_payload(production_id: str, unit_id: str):
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    unit = next(
+        (item for item in production.units if item.unit_id == unit_id), None
+    )
+    if unit is None:
+        return 400, {
+            "error": "UNIT_NOT_FOUND",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "message": f"unit {unit_id!r} is not part of {production_id}.",
+        }
+    try:
+        executor = _production_executor(production_id)
+        report = executor.derive_progress()
+        bindings = executor.discover_bindings(production)
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    progress_by_id = {
+        item.unit_id: _unit_progress_dict(item) for item in report.units
+    }
+    bound = bindings.get(unit_id)
+    manifest_payload = _manifest_payload(bound.manifest) if bound else None
+    payload = {
+        "production_id": production_id,
+        "production_title": production.title,
+        "plan_version": production.plan_version,
+        "unit_intent": _unit_intent(unit),
+        "execution": progress_by_id.get(unit_id),
+        "blocking_units": _blocking_units(unit, progress_by_id),
+        "plan_evidence": _plan_evidence(production_id, unit_id),
+        "bound_project": manifest_payload,
+        "scene_checkpoint_rows": (
+            _scene_checkpoint_rows(manifest_payload["scene_checkpoints"])
+            if manifest_payload else []
+        ),
+        "failure_details": _failure_details(bound.manifest) if bound else [],
+        "sample": False,
+    }
+    return 200, _redact_secrets(payload)
+
+
+def unit_reconciliation_payload(production_id: str, unit_id: str):
+    """On-demand, read-only reconciliation through the existing Phase 10 oracle."""
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    unit = next(
+        (item for item in production.units if item.unit_id == unit_id), None
+    )
+    if unit is None:
+        return 400, {
+            "error": "UNIT_NOT_FOUND",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "message": f"unit {unit_id!r} is not part of {production_id}.",
+        }
+    try:
+        bindings = _production_executor(production_id).discover_bindings(production)
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    bound = bindings.get(unit_id)
+    if bound is None:
+        return 400, {
+            "error": "UNIT_NOT_BOUND",
+            "unit_id": unit_id,
+            "message": "Unit has no bound execution project; there is nothing "
+                       "to reconcile yet.",
+        }
+    from app.orchestrator.reconciliation import reconcile_project
+
+    # Identical oracle call to Phase 10's derive_progress(); persist=False
+    # keeps this strictly read-only.
+    report = reconcile_project(
+        bound.manifest.project_id, bound.project_dir, persist=False
+    )
+    payload = {
+        "production_id": production_id,
+        "unit_id": unit_id,
+        "project_id": bound.directory_id,
+        "reconciliation": report.to_dict(),
+        "persisted": False,
+        "sample": False,
+    }
+    return 200, _redact_secrets(payload)
+
+
+def production_command_payload(
+    production_id: str, unit_id, action: str, body: dict
+):
+    """Execute/Resume production or unit — delegating ONLY to Phase 10.
+
+    ``action`` is presentation terminology ("execute"/"resume"); both map to
+    ``ProductionExecutor.execute()``, whose re-entrant semantics never restart
+    COMPLETED units and respect remote-job protection.
+    """
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    if not body.get("confirm"):
+        return 400, _confirmation_required(
+            f"POST /api/productions/{production_id}/{action}"
+        )
+    try:
+        report = _derive_progress(production_id)
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    progress_by_id = {item.unit_id: item for item in report.units}
+
+    current_state = None
+    if unit_id:
+        if unit_id not in progress_by_id:
+            return 400, {
+                "error": "UNIT_NOT_FOUND",
+                "production_id": production_id,
+                "unit_id": unit_id,
+                "message": f"unit {unit_id!r} is not part of {production_id}.",
+            }
+        progress = progress_by_id[unit_id]
+        current_state = progress.state.value
+        unit = next(
+            (item for item in production.units if item.unit_id == unit_id)
+        )
+        if current_state == "BLOCKED":
+            blocking = _blocking_units(
+                unit,
+                {key: _unit_progress_dict(value) for key, value in progress_by_id.items()},
+            )
+            return 400, {
+                "error": "BLOCKED_DEPENDENCY",
+                "production_id": production_id,
+                "unit_id": unit_id,
+                "blocking_units": blocking,
+                "message": (
+                    f"Cannot execute {unit_id}: dependencies "
+                    f"{', '.join(blocking)} are not COMPLETED. Complete them "
+                    "first (Phase 10 enforces dependencies)."
+                ),
+            }
+        if current_state == "FAILED":
+            # F-01 (audit): ProductionExecutor.execute() never treats FAILED
+            # as an actionable candidate (frozen Phase 10 semantics), so a
+            # 202 "executing" here would be a lie. Refuse truthfully BEFORE
+            # any worker, registry entry, or executor call exists, and point
+            # only at recovery mechanisms that already exist.
+            bound_project_id = progress.project_id
+            return 409, {
+                "error": "FAILED_UNIT_REQUIRES_EXPLICIT_RECOVERY",
+                "production_id": production_id,
+                "unit_id": unit_id,
+                "state": "FAILED",
+                "bound_project_id": bound_project_id,
+                "message": (
+                    f"Unit {unit_id} is FAILED. The Phase 10 "
+                    "ProductionExecutor does not automatically resume FAILED "
+                    "units, so nothing was executed, no worker was started, "
+                    "and the production intent was not modified. Phase 11 "
+                    "deliberately adds no retry, skip, or fallback. Existing "
+                    "recovery options: (1) inspect this unit's failure "
+                    "details, then resume the bound project through the "
+                    "existing engine recovery path (python produce.py "
+                    "--resume <project_id>"
+                    + (
+                        f"; currently bound project: {bound_project_id}"
+                        if bound_project_id
+                        else "; no project is bound to this unit yet"
+                    )
+                    + "), or (2) issue a revised Phase 9 intent."
+                ),
+            }
+        if current_state == "COMPLETED":
+            return 200, {
+                "status": "complete",
+                "production_id": production_id,
+                "unit_id": unit_id,
+                "message": "Unit is already COMPLETED; Phase 10 never "
+                           "re-executes completed units. Nothing was done.",
+            }
+
+    with _production_runs_lock:
+        run = _production_runs.get(production_id)
+        if run and run.get("running"):
+            return 409, {
+                "error": "EXECUTION_ALREADY_RUNNING",
+                "production_id": production_id,
+                "message": "An execution command for this production is "
+                           "already in progress. The Phase 10 executor "
+                           "continues from durable state; poll progress or "
+                           "wait for it to finish. Nothing was re-submitted.",
+            }
+        _production_runs[production_id] = {
+            "running": True,
+            "action": action,
+            "unit_id": unit_id,
+            "started_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "complete": False,
+            "error": None,
+        }
+
+    def worker():
+        try:
+            _production_executor(production_id).execute(unit_id=unit_id)
+            with _production_runs_lock:
+                # F-09 (audit): successful runs carry no display value (the
+                # run badge only renders "executing" or "last run failed"),
+                # so evict them to keep the process-lifetime registry small.
+                # FAILED runs are retained for truthful error display.
+                _production_runs.pop(production_id, None)
+        except Exception as exc:
+            logger.exception("Production execution failed: %s", production_id)
+            with _production_runs_lock:
+                _production_runs[production_id].update({
+                    "running": False,
+                    "finished_at": datetime.now().isoformat(),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+    threading.Thread(target=worker, daemon=True).start()
+    scope = f"unit {unit_id}" if unit_id else f"production {production_id}"
+    message = (
+        f"{action.capitalize()} command accepted for {scope}. The Phase 10 "
+        "ProductionExecutor is running in the background; COMPLETED units are "
+        "never restarted and remote in-flight jobs are never re-submitted. "
+        f"Poll GET /api/productions/{production_id}/progress for live state."
+    )
+    return 202, _redact_secrets({
+        "status": "executing",
+        "production_id": production_id,
+        "unit_id": unit_id,
+        "current_state": current_state,
+        "message": message,
+    })
+
+
+def unit_publish_payload(production_id: str, unit_id: str, body: dict):
+    """Publish Unit — thin adapter over the EXISTING publishing bridge."""
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    if not body.get("confirm"):
+        return 400, _confirmation_required(
+            f"POST /api/productions/{production_id}/units/{unit_id}/publish"
+        )
+    try:
+        report = _derive_progress(production_id)
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    progress_by_id = {item.unit_id: item for item in report.units}
+    if unit_id not in progress_by_id:
+        return 400, {
+            "error": "UNIT_NOT_FOUND",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "message": f"unit {unit_id!r} is not part of {production_id}.",
+        }
+    progress = progress_by_id[unit_id]
+    if progress.state.value != "COMPLETED":
+        return 400, {
+            "error": "UNIT_NOT_COMPLETED",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "state": progress.state.value,
+            "message": (
+                "Publish Unit requires a COMPLETED unit; this unit is "
+                f"{progress.state.value}. Resume the unit and let the Phase 10 "
+                "executor finish it before publishing."
+            ),
+        }
+    project_id = progress.project_id
+    if not project_id:
+        return 400, {
+            "error": "UNIT_NOT_BOUND",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "message": "Unit is COMPLETED but has no bound execution project.",
+        }
+
+    platforms = body.get("platforms") or ["tiktok"]
+    unsupported = [item for item in platforms if item != "tiktok"]
+    if unsupported:
+        return 400, {
+            "error": "PUBLISH_PLATFORM_NOT_SUPPORTED",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "platforms": platforms,
+            "message": (
+                "No existing web publishing adapter for "
+                f"{', '.join(unsupported)}; Phase 11 only delegates to the "
+                "existing publishing flows. YouTube publishing remains a "
+                "produce.py flow in this phase."
+            ),
+        }
+
+    # Delegate to the EXISTING Phase 7A/8A web publishing bridge (same code
+    # path as POST /api/projects/<id>/publish/tiktok). All durability,
+    # duplicate protection, and truthful errors belong to that bridge.
+    status, result = tiktok_publish_now(
+        project_id, privacy_level=body.get("privacy_level")
+    )
+    payload = {
+        "status": "published" if status == 200 else "failed",
+        "production_id": production_id,
+        "unit_id": unit_id,
+        "project_id": project_id,
+        "platforms": platforms,
+        "result": result,
+        "message": (
+            "Delegated to the existing publishing flow; the durable "
+            "publication state machine owns all outcomes."
+        ),
+    }
+    return status, _redact_secrets(payload)
+
+
+# ---------------------------------------------------------------------------
 # HTTP layer
 # ---------------------------------------------------------------------------
 
@@ -464,6 +1194,70 @@ class AVMHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # quiet console
         logger.debug("%s %s", self.address_string(), fmt % args)
+
+    def _request_json_body(self) -> dict:
+        """Best-effort JSON object body ({} when absent or malformed)."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            if not raw:
+                return {}
+            body = json.loads(raw.decode("utf-8"))
+            return body if isinstance(body, dict) else {}
+        except Exception:
+            return {}
+
+    def _query_param(self, name: str):
+        values = parse_qs(urlparse(self.path).query).get(name) or []
+        return values[0] if values else None
+
+    # -- Phase 11 production routes (thin Command Center surface) ---------
+    def _productions_get(self, path: str):
+        match = re.match(r"^/api/productions/?$", path)
+        if match:
+            status, payload = productions_index_payload()
+            return self._json(status, payload)
+        match = re.match(r"^/api/productions/([^/]+)/progress/?$", path)
+        if match:
+            status, payload = production_progress_payload(match.group(1))
+            return self._json(status, payload)
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/reconciliation/?$", path)
+        if match:
+            status, payload = unit_reconciliation_payload(
+                match.group(1), match.group(2)
+            )
+            return self._json(status, payload)
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/?$", path)
+        if match:
+            status, payload = unit_detail_payload(match.group(1), match.group(2))
+            return self._json(status, payload)
+        match = re.match(r"^/api/productions/([^/]+)/units/?$", path)
+        if match:
+            status, payload = production_units_payload(match.group(1))
+            return self._json(status, payload)
+        match = re.match(r"^/api/productions/([^/]+)/?$", path)
+        if match:
+            status, payload = production_detail_payload(match.group(1))
+            return self._json(status, payload)
+        return self._json(404, {"detail": "not found"})
+
+    def _productions_post(self, path: str):
+        match = re.match(r"^/api/productions/([^/]+)/(execute|resume)/?$", path)
+        if match:
+            status, payload = production_command_payload(
+                match.group(1),
+                self._query_param("unit_id"),
+                match.group(2),
+                self._request_json_body(),
+            )
+            return self._json(status, payload)
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/publish/?$", path)
+        if match:
+            status, payload = unit_publish_payload(
+                match.group(1), match.group(2), self._request_json_body()
+            )
+            return self._json(status, payload)
+        return self._json(404, {"detail": "not found"})
 
     # -- routing ----------------------------------------------------------
     def do_GET(self):
@@ -488,6 +1282,8 @@ class AVMHandler(BaseHTTPRequestHandler):
                 if detail:
                     return self._json(200, detail)
                 return self._json(404, {"detail": "not found"})
+            if path.startswith("/api/productions"):
+                return self._productions_get(path)
             return self._static(path)
         except Exception:
             logger.exception("GET %s failed", path)
@@ -495,26 +1291,43 @@ class AVMHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        match = re.match(r"^/api/platforms/(youtube|tiktok)/connect$", path)
-        if match:
-            status, payload = _start_connect(match.group(1))
-            return self._json(status, payload)
-        match = re.match(r"^/api/projects/([^/]+)/publish/tiktok$", path)
-        if match:
-            # Explicit, deliberate publishing request only.
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length > 0 else b"{}"
-                body = json.loads(raw.decode("utf-8")) if raw else {}
-            except Exception:
-                body = {}
-            if not isinstance(body, dict):
-                body = {}
-            status, payload = tiktok_publish_now(
-                match.group(1), privacy_level=body.get("privacy_level")
-            )
-            return self._json(status, payload)
-        return self._json(404, {"detail": "not found"})
+        try:
+            match = re.match(r"^/api/platforms/(youtube|tiktok)/connect$", path)
+            if match:
+                status, payload = _start_connect(match.group(1))
+                return self._json(status, payload)
+            match = re.match(r"^/api/projects/([^/]+)/publish/tiktok$", path)
+            if match:
+                # Explicit, deliberate publishing request only.
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(length) if length > 0 else b"{}"
+                    body = json.loads(raw.decode("utf-8")) if raw else {}
+                except Exception:
+                    body = {}
+                if not isinstance(body, dict):
+                    body = {}
+                status, payload = tiktok_publish_now(
+                    match.group(1), privacy_level=body.get("privacy_level")
+                )
+                return self._json(status, payload)
+            if path.startswith("/api/productions"):
+                return self._productions_post(path)
+            return self._json(404, {"detail": "not found"})
+        except Exception as exc:
+            # F-02 (audit): unexpected POST failures now return the truthful
+            # JSON 500 envelope instead of dropping the connection. Known
+            # validation errors are handled inside the payload functions and
+            # never reach this branch; nothing is retried automatically.
+            logger.exception("POST %s failed", path)
+            return self._json(500, {
+                "error": "INTERNAL_ERROR",
+                "message": f"unexpected server error: {type(exc).__name__}: {exc}",
+                "guidance": (
+                    "The command was not retried. Check the engine log for "
+                    "the full traceback before retrying manually."
+                ),
+            })
 
     # -- media (range-aware enough for <video> seeking) --------------------
     def _serve_media(self, project_id: str):

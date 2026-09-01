@@ -380,6 +380,38 @@ textarea.input { resize: vertical; min-height: 90px; }
 .toast.err svg { color: var(--danger); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px);} }
 
+/* ----- Phase 11: Command Center ------------------------------------------ */
+
+.view-head { margin-bottom: 26px; }
+.view-head h2 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+.view-head p { color: var(--text-muted); margin-top: 4px; max-width: 70ch; }
+
+.productions-grid { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 900px) { .productions-grid { grid-template-columns: 1fr; } }
+
+.statebar {
+  height: 8px; border-radius: 6px; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border);
+  margin: 10px 0 6px;
+}
+.statebar-fill { height: 100%; background: linear-gradient(90deg, #34d399, #4f8cff); }
+
+.kv-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.kv-table th {
+  text-align: left; color: var(--text-muted); font-weight: 600;
+  padding: 7px 12px 7px 0; width: 34%; vertical-align: top; white-space: nowrap;
+}
+.kv-table td { padding: 7px 0; border-bottom: 1px solid var(--border); }
+.kv-table tr:last-child td { border-bottom: none; }
+.kv-table code {
+  font-family: ui-monospace, monospace; font-size: 12px;
+  background: var(--surface-2); padding: 2px 6px; border-radius: 6px;
+  word-break: break-all;
+}
+
+.unit-grid { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 1080px) { .unit-grid { grid-template-columns: 1fr; } }
+
 /* ----- Empty states ---------------------------------------------------- */
 
 .empty {

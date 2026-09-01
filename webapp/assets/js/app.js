@@ -8,6 +8,7 @@ window.App = (function () {
   const NAV = [
     { section: "Studio" },
     { id: "dashboard", route: "#/",           label: "Dashboard", icon: "dashboard", view: "dashboard" },
+    { id: "productions", route: "#/productions", label: "Command Center", icon: "sparkle", view: "productions" },
     { id: "projects",  route: "#/projects",   label: "Projects",  icon: "projects",  view: "projects" },
     { id: "create",    route: "#/create",     label: "Create Video", icon: "create", view: "create" },
     { section: "Distribution" },
@@ -18,13 +19,18 @@ window.App = (function () {
   ];
 
   const ROUTES = [
-    { id: "dashboard", pattern: /^#\/$/,                      view: function () { return VIEWS.dashboard; }, params: {} },
-    { id: "create",    pattern: /^#\/create\/?$/,             view: function () { return VIEWS.create; },    params: {} },
-    { id: "projects",  pattern: /^#\/projects\/?$/,           view: function () { return VIEWS.projects; },  params: {} },
-    { id: "project",   pattern: /^#\/projects\/([^\/]+)\/?$/, view: function () { return VIEWS.projectDetail; }, params: function (m) { return { id: decodeURIComponent(m[1]) }; } },
-    { id: "platforms", pattern: /^#\/platforms\/?$/,          view: function () { return VIEWS.platforms; }, params: {} },
-    { id: "activity",  pattern: /^#\/activity\/?$/,           view: function () { return VIEWS.activity; },  params: {} },
-    { id: "settings",  pattern: /^#\/settings\/?$/,           view: function () { return VIEWS.settings; },  params: {} }
+    { id: "dashboard",  pattern: /^#\/$/,                      view: function () { return VIEWS.dashboard; }, params: {} },
+    { id: "create",     pattern: /^#\/create\/?$/,             view: function () { return VIEWS.create; },    params: {} },
+    { id: "productions", pattern: /^#\/productions\/?$/,       view: function () { return VIEWS.productions; }, params: {} },
+    { id: "production", pattern: /^#\/productions\/([^\/]+)\/?$/, view: function () { return VIEWS.productionDetail; },
+      params: function (m) { return { id: decodeURIComponent(m[1]) }; } },
+    { id: "unit",       pattern: /^#\/productions\/([^\/]+)\/units\/([^\/]+)\/?$/, view: function () { return VIEWS.unitDetail; },
+      params: function (m) { return { productionId: decodeURIComponent(m[1]), unitId: decodeURIComponent(m[2]) }; } },
+    { id: "projects",   pattern: /^#\/projects\/?$/,           view: function () { return VIEWS.projects; },  params: {} },
+    { id: "project",    pattern: /^#\/projects\/([^\/]+)\/?$/, view: function () { return VIEWS.projectDetail; }, params: function (m) { return { id: decodeURIComponent(m[1]) }; } },
+    { id: "platforms",  pattern: /^#\/platforms\/?$/,          view: function () { return VIEWS.platforms; }, params: {} },
+    { id: "activity",   pattern: /^#\/activity\/?$/,           view: function () { return VIEWS.activity; },  params: {} },
+    { id: "settings",   pattern: /^#\/settings\/?$/,           view: function () { return VIEWS.settings; },  params: {} }
   ];
 
   let currentRoute = null;

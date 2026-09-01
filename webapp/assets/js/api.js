@@ -10,7 +10,12 @@ window.API = (function () {
     const res = await fetch(url, Object.assign({ headers: { "Accept": "application/json" } }, options || {}));
     if (!res.ok) {
       let detail = res.statusText;
-      try { detail = (await res.json()).detail || detail; } catch (e) { /* keep */ }
+      try {
+        const errBody = await res.json();
+        // Phase 11 structured errors carry message/error; legacy payloads
+        // carry detail. Surface the most specific truthful text available.
+        detail = errBody.message || errBody.error || errBody.detail || detail;
+      } catch (e) { /* keep */ }
       throw new Error(detail);
     }
     return res.json();
@@ -81,6 +86,63 @@ window.API = (function () {
     tiktokPublishStatus(projectId) {
       return jsonFetch(
         "/api/projects/" + encodeURIComponent(projectId) + "/publish/tiktok/status"
+      );
+    },
+
+    /* ---- Phase 11: Personal Command Center (production inspection/control) ---- */
+
+    getProductions() {
+      return jsonFetch("/api/productions");
+    },
+
+    getProduction(id) {
+      return jsonFetch("/api/productions/" + encodeURIComponent(id));
+    },
+
+    /** Live six-state progress; re-derived on every call (never cached). */
+    getProductionProgress(id) {
+      return jsonFetch("/api/productions/" + encodeURIComponent(id) + "/progress");
+    },
+
+    getUnit(productionId, unitId) {
+      return jsonFetch(
+        "/api/productions/" + encodeURIComponent(productionId) +
+        "/units/" + encodeURIComponent(unitId)
+      );
+    },
+
+    /** On-demand read-only reconciliation report (persist=false server-side). */
+    getUnitReconciliation(productionId, unitId) {
+      return jsonFetch(
+        "/api/productions/" + encodeURIComponent(productionId) +
+        "/units/" + encodeURIComponent(unitId) + "/reconciliation"
+      );
+    },
+
+    /** Execute/Resume production (or a single unit). confirm is always true:
+        the UI only calls this from an explicit confirmation dialog. */
+    productionCommand(id, action, unitId) {
+      var url = "/api/productions/" + encodeURIComponent(id) + "/" + action;
+      if (unitId) url += "?unit_id=" + encodeURIComponent(unitId);
+      return jsonFetch(url, {
+        method: "POST",
+        headers: { "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true })
+      });
+    },
+
+    /** Publish Unit: thin delegation to the existing publishing flow. */
+    publishUnit(productionId, unitId, platforms) {
+      var body = { confirm: true };
+      if (platforms && platforms.length) body.platforms = platforms;
+      return jsonFetch(
+        "/api/productions/" + encodeURIComponent(productionId) +
+        "/units/" + encodeURIComponent(unitId) + "/publish",
+        {
+          method: "POST",
+          headers: { "Accept": "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }
       );
     }
   };
