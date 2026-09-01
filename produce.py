@@ -315,6 +315,21 @@ Examples:
         help="Resume an existing project by ID",
     )
     topic_group.add_argument(
+        "--production",
+        type=str,
+        metavar="PRODUCTION_ID",
+        help=(
+            "Execute or continue a durable Phase 9 Production through the "
+            "existing per-project engine. Re-run the same command to resume."
+        ),
+    )
+    parser.add_argument(
+        "--unit",
+        type=str,
+        metavar="UNIT_ID",
+        help="Restrict --production execution to one declared unit",
+    )
+    topic_group.add_argument(
         "--publish-youtube", "-p",
         type=str,
         metavar="PROJECT_ID",
@@ -703,7 +718,10 @@ Examples:
     # possible (Phase 6E): new projects keep the historical contract; resumed
     # projects are validated against their PERSISTED configuration, which is
     # authoritative over CLI defaults.
-    flow_error = flow_url_required_error(
+    # Production-backed execution validates Flow only after the unit plan
+    # exists and exact scene routing is known. Legacy topic/resume validation
+    # remains byte-for-byte on this existing helper path.
+    flow_error = None if args.production else flow_url_required_error(
         args, persisted=load_persisted_visual_config(args.resume)
     )
     if flow_error:
@@ -721,7 +739,7 @@ Examples:
     # Build configuration
     try:
         config_kwargs = dict(
-            topic=args.topic or "Resume Project",  # Placeholder for resume
+            topic=args.topic or "Production Unit",  # Replaced by bound brief
             flow_project_url=args.flow_project_url,
             niche=args.niche,
             target_audience=args.audience,
@@ -787,6 +805,9 @@ Examples:
         print(f"ERROR: Invalid configuration: {e}")
         return 1
 
+    if args.unit and not args.production:
+        parser.error("--unit requires --production")
+
     # Phase 6C: validate explicit asset mappings truthfully BEFORE any work.
     # Paths are NOT split on later '=' characters (Windows drive letters and
     # paths containing '=' survive intact).
@@ -835,7 +856,40 @@ Examples:
             return 0
         print()
     
-    # Run orchestrator
+    # Phase 10 production composition. The executor invokes the same
+    # ProductionOrchestrator once per eligible unit; re-invocation resumes from
+    # durable bindings/manifests and never mutates Production intent.
+    if args.production:
+        try:
+            from app.orchestrator.production_execution import ProductionExecutor
+
+            executor = ProductionExecutor(args.production, base_config=config)
+            initial = executor.derive_progress()
+            print(f"Production: {initial.production_id} (v{initial.plan_version})")
+            for item in initial.units:
+                suffix = f" - {item.reason}" if item.reason else ""
+                print(f"  {item.unit_id}: {item.state.value}{suffix}")
+            print()
+            final = executor.execute(unit_id=args.unit)
+            print("Production progress:")
+            for item in final.units:
+                project = f" [{item.project_id}]" if item.project_id else ""
+                print(f"  {item.unit_id}: {item.state.value}{project}")
+            if args.unit:
+                selected = next(
+                    (item for item in final.units if item.unit_id == args.unit),
+                    None,
+                )
+                return 0 if final.complete or (
+                    selected is not None and selected.state.value == "COMPLETED"
+                ) else 1
+            return 0 if final.complete else 1
+        except Exception as e:
+            logger.exception("Production execution failed: %s", e)
+            print(f"PRODUCTION EXECUTION ERROR: {e}")
+            return 1
+
+    # Run legacy single-project orchestrator
     try:
         orchestrator = ProductionOrchestrator(config)
         manifest = orchestrator.run()

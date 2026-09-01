@@ -4,7 +4,22 @@ AUTO Video Maker - Scene Planning Prompts
 Prompts for converting scripts into structured scene plans.
 """
 
+import json
+
 from app.content.models import ContentBrief
+
+
+def _production_context_section(brief: ContentBrief) -> str:
+    """Render the additive Phase 10 context block, or nothing for legacy briefs."""
+    if not brief.production_context:
+        return ""
+    rendered = json.dumps(
+        brief.production_context,
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"\n\nPRODUCTION CONTEXT (creative planning input only):\n{rendered}"
 
 
 def get_scene_planner_system_prompt() -> str:
@@ -70,6 +85,8 @@ Script to convert:
 \"\"\"
 """
     
+    production_context_section = _production_context_section(brief)
+
     return f"""Create a production plan for this short-form video:
 
 Topic: {brief.topic}
@@ -79,7 +96,7 @@ Tone: {brief.tone}
 Style: {brief.style}
 Target Duration: {brief.target_duration} seconds
 Platform: {brief.platform}
-Number of Scenes: {brief.number_of_scenes}
+Number of Scenes: {brief.number_of_scenes}{production_context_section}
 {script_section}
 Requirements:
 1. Create exactly {brief.number_of_scenes} scenes
@@ -168,6 +185,7 @@ For factual/educational content:
 Output ONLY valid JSON matching the ProductionPlan schema. No markdown, no explanation."""
 
     cta_text = brief.call_to_action or "Follow for more"
+    production_context_section = _production_context_section(brief)
     
     user_prompt = f"""Create a complete production plan for this short-form video:
 
@@ -181,7 +199,7 @@ Platform: {brief.platform}
 Language: {brief.language}
 Content Goal: {brief.content_goal}
 Call to Action: {cta_text}
-Number of Scenes: {brief.number_of_scenes}
+Number of Scenes: {brief.number_of_scenes}{production_context_section}
 
 Create a production plan with:
 1. Exactly {brief.number_of_scenes} scenes

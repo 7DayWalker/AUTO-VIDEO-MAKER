@@ -22,6 +22,7 @@ from typing import Optional, List, Dict, Any
 from app.config import PROJECT_ROOT
 from app.orchestrator.models import (
     ProjectManifest,
+    ProductionBinding,
     PipelineStage,
     StageStatus,
     StageResult,
@@ -214,9 +215,37 @@ class ProductionOrchestrator:
         
         project_id = generate_project_id(self.config.topic)
         
+        binding_values = (
+            self.config.production_id,
+            self.config.unit_id,
+            self.config.production_plan_version,
+            self.config.unit_plan_identity,
+            self.config.unit_plan_version,
+            self.config.unit_plan_content_hash,
+        )
+        if any(value is not None for value in binding_values) and not all(
+            value is not None for value in binding_values
+        ):
+            raise OrchestratorError(
+                "production binding inputs must be supplied together"
+            )
+        production_binding = None
+        if all(value is not None for value in binding_values):
+            production_binding = ProductionBinding(
+                production_id=self.config.production_id,
+                unit_id=self.config.unit_id,
+                production_plan_version=self.config.production_plan_version,
+                unit_plan_identity=self.config.unit_plan_identity,
+                unit_plan_version=self.config.unit_plan_version,
+                unit_plan_content_hash=self.config.unit_plan_content_hash,
+                project_id=project_id,
+                bound_at=datetime.now().isoformat(),
+            )
+
         self.manifest = ProjectManifest(
             project_id=project_id,
             topic=self.config.topic,
+            production_binding=production_binding,
             flow_project_url=self.config.flow_project_url,
             content_config=self.config.to_content_brief_dict(),
             voice_config=self.config.to_voice_config_dict(),
@@ -229,6 +258,11 @@ class ProductionOrchestrator:
         
         # Create project directory
         self.project_dir = ORCHESTRATOR_OUTPUT_DIR / project_id
+        if production_binding is not None and self.project_dir.exists():
+            raise OrchestratorError(
+                "refusing to bind a production unit to an existing project directory: "
+                f"{self.project_dir}"
+            )
         self.project_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Initialized new project: {project_id}")
@@ -251,6 +285,35 @@ class ProductionOrchestrator:
             data = json.load(f)
         
         self.manifest = ProjectManifest.from_dict(data)
+
+        expected_binding_values = (
+            self.config.production_id,
+            self.config.unit_id,
+            self.config.production_plan_version,
+            self.config.unit_plan_identity,
+            self.config.unit_plan_version,
+            self.config.unit_plan_content_hash,
+        )
+        if any(value is not None for value in expected_binding_values):
+            if not all(value is not None for value in expected_binding_values):
+                raise ResumeError("production binding inputs must be supplied together")
+            expected = {
+                "production_id": self.config.production_id,
+                "unit_id": self.config.unit_id,
+                "production_plan_version": self.config.production_plan_version,
+                "unit_plan_identity": self.config.unit_plan_identity,
+                "unit_plan_version": self.config.unit_plan_version,
+                "unit_plan_content_hash": self.config.unit_plan_content_hash,
+                "project_id": project_id,
+            }
+            actual = self.manifest.production_binding
+            if actual is None or any(
+                getattr(actual, key) != value for key, value in expected.items()
+            ):
+                raise ResumeError(
+                    "resume production binding does not match the bound project"
+                )
+
         
         # Evidence-based reconciliation before deciding resumability. A
         # manifest that claims completion but fails physical validation must
@@ -359,64 +422,111 @@ class ProductionOrchestrator:
             logger.info(f"Duration: {brief.target_duration}s")
             logger.info(f"Scenes: {brief.number_of_scenes}")
             
-            # Select provider
-            if self.config.mock_mode:
-                provider = MockLLMProvider()
-                logger.info("Provider: MOCK")
-            else:
-                provider = get_default_provider()
-                if not provider.is_available():
-                    raise DependencyError(
-                        provider.name.upper(),
-                        f"{provider.name.upper()} API key not configured. Use --mock or set the API key."
-                    )
-                logger.info(f"Provider: {provider.name} ({provider.model})")
-            
-            # Generate production plan
             content_output_dir = self.project_dir / "content"
-            planner = ScenePlanner(provider=provider, output_dir=content_output_dir)
-            
-            result = planner.plan_and_save(brief)
-            
-            if not result.success or not result.plan:
-                raise StageFailedError(
-                    "content",
-                    result.error or "Content generation failed",
-                    {"provider": result.provider, "model": result.model},
+            supplied_plan_path = self.config.supplied_content_plan_path
+            if supplied_plan_path is not None:
+                # Phase 10 exact-plan seam: production-backed execution loads
+                # and copies pinned bytes; ScenePlanner is never invoked.
+                supplied_plan_path = Path(supplied_plan_path)
+                if not supplied_plan_path.is_file():
+                    raise ValidationError(
+                        "content",
+                        f"Supplied production plan not found: {supplied_plan_path}",
+                    )
+                supplied_hash = hashlib.sha256(
+                    supplied_plan_path.read_bytes()
+                ).hexdigest()
+                if (
+                    self.config.unit_plan_content_hash
+                    and supplied_hash != self.config.unit_plan_content_hash
+                ):
+                    raise ValidationError(
+                        "content",
+                        "Supplied production plan hash does not match the pinned binding",
+                    )
+                from app.content.models import ProductionPlan
+
+                plan = ProductionPlan.model_validate(
+                    json.loads(supplied_plan_path.read_text(encoding="utf-8"))
                 )
-            
-            # Validate production plan
-            validation = validate_production_plan(result.plan, brief)
-            if not validation.valid:
-                raise ValidationError(
-                    "content",
-                    f"Production plan validation failed: {validation.errors}",
-                )
-            
-            # Update manifest
-            plan_path = content_output_dir / result.plan.project_id / "production_plan.json"
+                if (
+                    self.config.unit_plan_identity
+                    and plan.project_id != self.config.unit_plan_identity
+                ):
+                    raise ValidationError(
+                        "content",
+                        "Supplied production plan identity does not match the pinned binding",
+                    )
+                validation = validate_production_plan(plan, brief)
+                if not validation.valid:
+                    raise ValidationError(
+                        "content",
+                        f"Supplied production plan validation failed: {validation.errors}",
+                    )
+                plan_path = content_output_dir / plan.project_id / "production_plan.json"
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(supplied_plan_path, plan_path)
+                provider_name = "supplied_plan"
+                model_name = None
+                generation_warnings = []
+                logger.info("Content plan source: supplied pinned plan")
+            else:
+                # Legacy path: provider selection and in-stage planning remain
+                # exactly as before for non-production execution.
+                if self.config.mock_mode:
+                    provider = MockLLMProvider()
+                    logger.info("Provider: MOCK")
+                else:
+                    provider = get_default_provider()
+                    if not provider.is_available():
+                        raise DependencyError(
+                            provider.name.upper(),
+                            f"{provider.name.upper()} API key not configured. Use --mock or set the API key."
+                        )
+                    logger.info(f"Provider: {provider.name} ({provider.model})")
+
+                planner = ScenePlanner(provider=provider, output_dir=content_output_dir)
+                result = planner.plan_and_save(brief)
+                if not result.success or not result.plan:
+                    raise StageFailedError(
+                        "content",
+                        result.error or "Content generation failed",
+                        {"provider": result.provider, "model": result.model},
+                    )
+                plan = result.plan
+                validation = validate_production_plan(plan, brief)
+                if not validation.valid:
+                    raise ValidationError(
+                        "content",
+                        f"Production plan validation failed: {validation.errors}",
+                    )
+                plan_path = content_output_dir / plan.project_id / "production_plan.json"
+                provider_name = result.provider
+                model_name = result.model
+                generation_warnings = result.warnings
+
             self.manifest.content_plan_path = str(plan_path)
             
-            # Update project_id to match content plan
-            self.manifest.project_id = result.plan.project_id
+            # Preserve the existing legacy project-id replacement quirk.
+            self.manifest.project_id = plan.project_id
             
             # Mark stage complete
             self.manifest.set_stage_result(StageResult.completed(
                 stage=PipelineStage.CONTENT,
                 output_path=str(plan_path),
                 output_files=[str(plan_path)],
-                warnings=result.warnings + validation.warnings,
+                warnings=generation_warnings + validation.warnings,
                 metadata={
-                    "provider": result.provider,
-                    "model": result.model,
-                    "scene_count": len(result.plan.scenes),
-                    "estimated_duration": result.plan.estimated_duration,
+                    "provider": provider_name,
+                    "model": model_name,
+                    "scene_count": len(plan.scenes),
+                    "estimated_duration": plan.estimated_duration,
                 },
                 started_at=started_at,
             ))
             self._save_manifest()
             
-            logger.info(f"Content generation complete: {len(result.plan.scenes)} scenes")
+            logger.info(f"Content generation complete: {len(plan.scenes)} scenes")
             logger.info(f"Output: {plan_path}")
             
         except StageFailedError:

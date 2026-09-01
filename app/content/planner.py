@@ -146,3 +146,15 @@ class ScenePlanner:
             data = json.load(f)
         
         return ContentBrief(**data)
+
+
+def create_scene_planner(*, mock_mode: bool = False, output_dir: Path = None) -> ScenePlanner:
+    """Build the existing planner from runtime provider configuration."""
+    if mock_mode:
+        return ScenePlanner(mock_mode=True, output_dir=output_dir)
+    from app.content.providers import get_default_provider
+
+    provider = get_default_provider()
+    if not provider.is_available():
+        raise RuntimeError(f"content provider unavailable: {provider.name}")
+    return ScenePlanner(provider=provider, output_dir=output_dir)

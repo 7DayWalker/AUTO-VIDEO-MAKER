@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 import os
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.publishing.models import PublicationRecord, TikTokPublicationRecord
 from app.assembly.audio_contract import (
@@ -151,6 +151,23 @@ class StageResult(BaseModel):
         )
 
 
+class ProductionBinding(BaseModel):
+    """Immutable Phase 10 execution-side binding for one production unit."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    production_id: str = Field(min_length=1)
+    unit_id: str = Field(min_length=1)
+    production_plan_version: int = Field(ge=1)
+    unit_plan_identity: str = Field(min_length=1)
+    unit_plan_version: int = Field(default=1, ge=1)
+    unit_plan_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Captured directory identity assertion; never re-derived from the legacy
+    # mutable top-level manifest.project_id field.
+    project_id: str = Field(min_length=1)
+    bound_at: str = Field(min_length=1)
+
+
 class ProjectManifest(BaseModel):
     """
     Unified project manifest for tracking pipeline state.
@@ -161,6 +178,9 @@ class ProjectManifest(BaseModel):
     # Project identification
     project_id: str = Field(min_length=1, description="Unique project identifier")
     topic: str = Field(min_length=1, description="Video topic")
+    # Phase 10: optional execution-side binding. Legacy manifests omit it.
+    production_binding: Optional[ProductionBinding] = None
+
     
     # Pipeline state
     current_stage: PipelineStage = Field(default=PipelineStage.CONTENT)
@@ -326,6 +346,21 @@ class OrchestratorConfig(BaseModel):
     platform: str = Field(default="youtube_shorts")
     language: str = Field(default="en")
     content_goal: str = Field(default="education")
+    production_context: Optional[Dict[str, Any]] = None
+    # Phase 10 exact-plan seam. Runtime path only; never durable identity.
+    supplied_content_plan_path: Optional[Path] = None
+
+    # Phase 10 binding inputs. The engine captures the actual directory name
+    # as ProductionBinding.project_id during initialization.
+    production_id: Optional[str] = None
+    unit_id: Optional[str] = None
+    production_plan_version: Optional[int] = Field(default=None, ge=1)
+    unit_plan_identity: Optional[str] = None
+    unit_plan_version: Optional[int] = Field(default=None, ge=1)
+    unit_plan_content_hash: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
     call_to_action: Optional[str] = None
     style: str = Field(default="fast-paced documentary")
     number_of_scenes: int = Field(default=6, ge=2, le=20)
@@ -449,6 +484,7 @@ class OrchestratorConfig(BaseModel):
             "call_to_action": self.call_to_action,
             "style": self.style,
             "number_of_scenes": self.number_of_scenes,
+            "production_context": self.production_context,
         }
     
     def to_voice_config_dict(self) -> dict:

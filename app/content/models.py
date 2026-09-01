@@ -6,7 +6,7 @@ Pydantic models for content briefs, scripts, scenes, and production plans.
 
 import re
 from datetime import datetime
-from typing import Optional, List, Literal
+from typing import Any, Dict, Optional, List, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.content.config import (
@@ -54,6 +54,12 @@ class ContentBrief(BaseModel):
         ge=2,
         le=20,
         description="Target number of scenes"
+    )
+    # Phase 10: optional production-derived creative context.  None is the
+    # exact legacy path; this field never carries execution state or routing.
+    production_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional production-derived planning context",
     )
     
     @field_validator("platform")
