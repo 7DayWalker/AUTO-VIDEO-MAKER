@@ -116,6 +116,7 @@ does **not** mean everything before SaaS is disposable personal-only software:
           │ Phase 9  Durable Plan     │
           │ Phase 10 Plan Execution   │
           │ Phase 11 Command Center   │
+          │ Phase 11B Experience      │
           │ Phase 12 Automation       │
           │ Phase 13 Quality + Scale  │
           │ Phase 14 Provider Intel   │
@@ -241,7 +242,7 @@ documented non-blocking concerns (see Section 9).
 
 **Status:** ✅ FORMALLY ACCEPTED.
 
-### 4.6 PERSONAL AVM MATURITY — Phase 9 🟡
+### 4.6 PERSONAL AVM MATURITY — Phase 9 ✅
 
 **Name:** Durable Production Plan.
 
@@ -254,12 +255,12 @@ sufficiently for later execution, inspection, resume, and automation.
 
 **Question this phase answers:** *"What are we making?"*
 
-No implementation details are defined here. Phase 9 must receive its own frozen
-specification / design gate before implementation.
+**Authoritative specification:** `PHASE_9_DURABLE_PRODUCTION_PLAN.md` (frozen;
+closed by final acceptance).
 
-**Status:** 🟡 FUTURE.
+**Status:** ✅ COMPLETE.
 
-### 4.7 PERSONAL AVM MATURITY — Phase 10 🟡
+### 4.7 PERSONAL AVM MATURITY — Phase 10 ✅
 
 **Name:** Plan-Backed Execution.
 
@@ -277,9 +278,12 @@ should be grounded in the durable plan so that AVM can:
 
 **Question this phase answers:** *"Execute the plan."*
 
-**Status:** 🟡 FUTURE.
+**Authoritative specification:** `PHASE_10_PLAN_BACKED_EXECUTION.md` (frozen;
+closed by final acceptance).
 
-### 4.8 PERSONAL AVM MATURITY — Phase 11 🟡
+**Status:** ✅ COMPLETE.
+
+### 4.8 PERSONAL AVM MATURITY — Phase 11 ✅
 
 **Name:** Personal Command Center.
 
@@ -305,9 +309,82 @@ The interface must remain **separable from the AVM Core** (UI is not the engine)
 **Question this phase answers:** *"Give me a command center to inspect and control
 production."*
 
+**Authoritative specification:** `PHASE_11_PERSONAL_COMMAND_CENTER.md` (frozen;
+closed by final acceptance; Git checkpoint `b50503c`).
+
+**Status:** ✅ COMPLETE.
+
+### 4.9 PERSONAL AVM MATURITY — Phase 11B 🟡
+
+**Name:** Command Center Experience.
+
+**Purpose:** Transform the functional Phase 11 Personal Command Center into a
+substantially more coherent, polished, understandable, and production-oriented
+operator experience — **without changing the underlying AVM production architecture
+or execution semantics**.
+
+Phase 11B is **UX/UI refinement and experience architecture only**: a bounded
+refinement of the existing Phase 11 Personal Command Center control surface.
+
+**Scope direction for the future Phase 11B Discovery stage** (direction only —
+these are **not** implementation requirements, and no Phase 11B specification exists
+yet):
+
+- information hierarchy
+- navigation and screen organization
+- production cards
+- production/unit status visualization
+- progress visualization
+- empty states
+- execution-control presentation
+- unit/scene presentation
+- project ↔ production relationship visualization
+- media thumbnails/previews where existing data permits
+- checkpoint/artifact presentation
+- typography, spacing, layout and responsive behavior
+- loading and error states
+- confirmation-dialog presentation
+- visual consistency across the web experience
+- clearer distinction between production intent, execution state, project, and media
+- overall Command Center usability and polish
+
+**Question this phase answers:** *"Make the Command Center a coherent, polished,
+production-oriented operator experience."*
+
+**Hard scope boundaries — Phase 11B does NOT:**
+
+- modify Phase 9 production-intent semantics
+- modify Phase 10 ProductionExecutor semantics
+- create a second execution engine
+- introduce a scheduler
+- introduce automation
+- introduce a database
+- introduce durable execution state
+- introduce authentication/tenancy
+- redesign provider routing
+- introduce provider fallback/retry
+- introduce new publishing orchestration
+- add YouTube publishing orchestration
+- change ProductionExecutor authority
+- change ProjectManifest.production_binding authority
+- make plan artifacts authoritative
+- alter production intent
+- create a parallel frontend architecture
+- bypass the existing AVM Core
+
+**Governing principle:** **ONE AVM CORE, MULTIPLE CONTROL SURFACES.** Phase 11B is
+a refinement of the existing Personal Command Center surface — not a new engine and
+not a separate product core.
+
+Phase 11B exists **only before Phase 12** — to polish the operator experience
+before automation is introduced. Phase 11B must receive its own frozen
+specification / design gate (the future Phase 11B Discovery stage) before any
+implementation begins. This roadmap entry grants **no permission** to implement
+Phase 11B early.
+
 **Status:** 🟡 FUTURE.
 
-### 4.9 PERSONAL AVM MATURITY — Phase 12 🟡
+### 4.10 PERSONAL AVM MATURITY — Phase 12 🟡
 
 **Name:** Personal Automation.
 
@@ -328,7 +405,7 @@ significant.
 
 **Status:** 🟡 FUTURE.
 
-### 4.10 PERSONAL AVM MATURITY — Phase 13 🟡
+### 4.11 PERSONAL AVM MATURITY — Phase 13 🟡
 
 **Name:** Autonomous Production Quality + Scale.
 
@@ -357,7 +434,7 @@ The conceptual distinction:
 
 **Status:** 🟡 FUTURE.
 
-### 4.11 PERSONAL AVM MATURITY — Phase 14 🟡
+### 4.12 PERSONAL AVM MATURITY — Phase 14 🟡
 
 **Name:** Multi-Provider Intelligence.
 
@@ -388,7 +465,7 @@ evidence."*
 
 **Status:** 🟡 FUTURE.
 
-### 4.12 PERSONAL AVM MATURITY — Phase 15 🟡
+### 4.13 PERSONAL AVM MATURITY — Phase 15 🟡
 
 **Name:** Recovery, Retry & Fallback.
 
@@ -417,7 +494,7 @@ when things go wrong."*
 
 **Status:** 🟡 FUTURE.
 
-### 4.13 PERSONAL AVM MATURITY — Phase 16+ 🟡
+### 4.14 PERSONAL AVM MATURITY — Phase 16+ 🟡
 
 **Name:** Full Personal AVM.
 
@@ -668,14 +745,14 @@ A concise conceptual ladder. Levels are **not** claimed as achieved unless state
 | **LEVEL 0** | Manual production | Historical starting point |
 | **LEVEL 1** | AVM can execute individual production steps | **Existing capability** (individual stages/steps execute under operator control) |
 | **LEVEL 2** | AVM can execute a defined production workflow | **Existing capability** (single-project pipeline: content → voice → scenes → captions → assembly) |
-| **LEVEL 3** | AVM can execute a durable production plan | 🟡 Future — Phase 9 + Phase 10 |
+| **LEVEL 3** | AVM can execute a durable production plan | ✅ Achieved — Phase 9 + Phase 10 (completed) |
 | **LEVEL 4** | AVM can continue production autonomously | 🟡 Future — Phase 12 |
 | **LEVEL 5** | AVM can autonomously maintain quality, recover from failures, and optimize provider usage under explicit policies | 🟡 Future — Phase 13 + Phase 14 + Phase 15 |
 | **LEVEL 6** | AVM can operate ongoing content-production workloads | 🔵 Intended end state — Phase 16+ and beyond |
 
-Existing capabilities are grounded in the completed engine phases (5A–5J, 6A–6F, 7A–7E,
-8). Future capabilities require their own specifications. Nothing above LEVEL 2 is
-claimed as achieved today.
+Existing capabilities are grounded in the completed phases (5A–5J, 6A–6F, 7A–7E, 8,
+9, 10, and 11). Future capabilities require their own specifications. Nothing above
+LEVEL 3 is claimed as achieved today.
 
 ---
 
@@ -692,15 +769,17 @@ claimed as achieved today.
 
 The current repository state (six visual providers, provider-agnostic execution
 boundary, durable per-scene checkpoints/resume, hybrid routing, audio policy, captions,
-assembly, publishing) corresponds to **LEVEL 2** on the autonomy maturity model.
+assembly, publishing, plus the completed Phase 9 durable production plan, Phase 10
+plan-backed execution, and Phase 11 Personal Command Center) corresponds to **LEVEL 3**
+on the autonomy maturity model.
 
 **The immediate next phase is:**
 
-> **PHASE 9 — DURABLE PRODUCTION PLAN** 🟡
+> **PHASE 11B — COMMAND CENTER EXPERIENCE** 🟡
 
-Phase 9 must still receive its own frozen specification / design gate before any
-implementation begins. This roadmap does **not** constitute a Phase 9 specification and
-grants **no permission** to implement it early.
+Phase 11B must still receive its own frozen specification / design gate before any
+implementation begins. This roadmap does **not** constitute a Phase 11B specification
+and grants **no permission** to implement it early.
 
 ---
 
@@ -733,6 +812,33 @@ track used Phases 6A–6F, 7A–7E, and 8, while the publishing track independen
 8A" are **different, unrelated milestones**. Future roadmap naming (Phases 9+) belongs
 to the visual/production / personal-maturity track and deliberately avoids reusing the
 "8A"-style collision space.
+
+Phase 11B — COMMAND CENTER EXPERIENCE is a deliberately lettered, bounded refinement
+phase inserted between Phase 11 and Phase 12 on the personal-maturity track. It is a
+roadmap insertion, not a reuse of the historical publishing-track "8A" collision
+space.
+
+---
+
+## 13. Roadmap Amendment Log
+
+This roadmap carries no version number. Amendments are recorded here, per the footer
+convention: amendments require an explicit, documented update to this file.
+
+- **2026-09-01 — Phase 11B insertion (roadmap-only amendment).**
+  - Inserted **PHASE 11B — COMMAND CENTER EXPERIENCE** between the completed
+    Phase 11 and Phase 12, as a bounded UX/UI refinement phase of the Phase 11
+    Personal Command Center.
+  - Reason: the newly implemented Phase 11 Command Center (accepted and checkpointed
+    at Git commit `b50503c`) is functional but needs experience polish before
+    automation work begins.
+  - Phase 12 — Personal Automation (automation / scheduling) remains unchanged in
+    name, position, and meaning, and remains the next substantive phase after
+    Phase 11B.
+  - Recorded Phases 9, 10, and 11 as COMPLETE (each closed by its own frozen
+    specification and final acceptance). No change to Phase 9/10/11 semantics.
+  - No architectural authority changes and no implementation are included in this
+    amendment.
 
 ---
 
