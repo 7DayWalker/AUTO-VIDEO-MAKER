@@ -793,8 +793,10 @@ def test_secret_redaction_extends_to_unexpected_key_names(
     snapshot = payload["bound_project"]["scene_checkpoints"]["scene_01"][
         "config_snapshot"
     ]
-    for key in ("session_id", "cookie", "webhook_url", "client_secret", "signature"):
+    for key in ("session_id", "client_secret", "signature"):
         assert snapshot[key] == "<redacted>"
+    for key in ("cookie", "webhook_url"):
+        assert key not in snapshot
 
 
 def test_scene_checkpoint_rows_expose_generation_cost_when_available(
@@ -917,8 +919,438 @@ def test_phase11_ui_source_contract():
     # F-08: real generation cost is rendered when available.
     assert "generation_cost" in src["unit-detail.js"]
 
+    # Phase 11B AC-21/31/32: lifecycle sections, stage evidence and the
+    # existing TikTok-only Command Center action remain explicit.
+    assert 'aria-label="Unit sections"' in src["unit-detail.js"]
+    assert "stagePanel" in src["unit-detail.js"]
+    assert "Project stage progression" in src["unit-detail.js"]
+    assert "publishingPanel" in src["unit-detail.js"]
+    assert "Unsupported here" in src["unit-detail.js"]
+    assert 'platform.id === "youtube" || platform.id === "tiktok"' in src["unit-detail.js"]
+    components_src = (root / "webapp" / "assets" / "js" / "components.js").read_text(encoding="utf-8")
+    activity_src = (views / "activity.js").read_text(encoding="utf-8")
+    assert "VERIFIED_SANDBOX_PRIVATE" in components_src
+    assert 'p.stage_status === "failed"' in components_src
+    assert "var returnTarget = modalTrigger" in components_src
+    assert "returnTarget.focus()" in components_src
+    assert "pub.updated_at || null" in activity_src
+    assert "when: p.created_at" not in activity_src
+    assert "if (API.live) projects.forEach" in activity_src
+    app_src = (root / "webapp" / "assets" / "js" / "app.js").read_text(encoding="utf-8")
+    assert 'role="status" aria-live="polite"' in app_src
+    assert 'setAttribute("aria-busy", "true")' in app_src
+    assert 'setAttribute("aria-busy", "false")' in app_src
+    assert "production-command-feedback" in src["productions.js"]
+    assert "production-action-feedback" in src["production-detail.js"]
+    assert "unit-action-feedback" in src["unit-detail.js"]
+    project_src = (views / "project-detail.js").read_text(encoding="utf-8")
+    assert "project-publish-feedback" in project_src
+    assert "role=\"alert\"" in project_src
+    assert "attentionPriority" in src["productions.js"]
+
     # Structured API errors surface truthfully in the UI (F-01/F-02/F-03).
     assert "errBody.message || errBody.error || errBody.detail" in api_src
+
+
+def test_phase11b_overview_source_contract():
+    """Overview is attention-first and keeps all data-state dimensions distinct."""
+    root = Path(web.__file__).resolve().parents[2]
+    source = (root / "webapp" / "assets" / "js" / "views" / "dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "API.getProductions()" in source
+    assert "API.getProjects()" in source
+    assert "Production data" in source
+    assert "Live empty" in source
+    assert "Demo samples" in source
+    assert "The Command Center does not create production records" in source
+    assert source.index("counts.FAILED") < source.index("counts.BLOCKED")
+    assert source.index("counts.BLOCKED") < source.index("counts.IN_FLIGHT")
+    assert source.index("counts.IN_FLIGHT") < source.index("counts.INCOMPLETE")
+    assert "API.productionCommand" not in source
+    assert "malformedProduction" in source
+    assert "malformedProject" in source
+    assert "Manifest unavailable" in source
+
+
+def test_phase11b_publication_summary_uses_durable_record_timestamps():
+    """Activity chronology comes from publication records, not project creation."""
+    payload = web._publication_summary({
+        "publication": {
+            "state": "VERIFIED",
+            "youtube_video_id": "video-1",
+            "updated_at": "2026-09-03T11:00:00",
+        },
+        "tiktok_publication": {
+            "state": "PROCESSING",
+            "tiktok_publish_id": "publish-1",
+            "updated_at": "2026-09-03T12:00:00",
+        },
+    })
+
+    assert payload[0]["updated_at"] == "2026-09-03T11:00:00"
+    assert payload[1]["updated_at"] == "2026-09-03T12:00:00"
+
+
+def test_phase11b_projects_index_reports_malformed_manifest_safely(cc_server):
+    """Unreadable project manifests are not misreported as an empty source."""
+    base, tmp = cc_server
+    project = tmp / "projects" / "broken-project"
+    project.mkdir(parents=True)
+    (project / "manifest.json").write_text("{not-json", encoding="utf-8")
+
+    status, items = _get(base + "/api/projects")
+    assert status == 200
+    assert items == [{
+        "project_id": "broken-project",
+        "directory_id": "broken-project",
+        "topic": "broken-project",
+        "created_at": None,
+        "current_stage": "",
+        "stage_status": "unavailable",
+        "final_video_available": False,
+        "publications": [],
+        "error": "PROJECT_MANIFEST_UNAVAILABLE",
+        "sample": False,
+    }]
+    assert str(project) not in json.dumps(items)
+
+
+def test_phase11b_projects_index_normalizes_failed_stage_status(cc_server):
+    """Lowercase persisted failures outrank stale project completion metadata."""
+    base, tmp = cc_server
+    project = tmp / "projects" / "failed-project"
+    project.mkdir(parents=True)
+    (project / "manifest.json").write_text(json.dumps({
+        "project_id": "failed-project",
+        "topic": "Failed project",
+        "completed_at": "2026-09-03T10:00:00",
+        "stages": {"scenes": {"status": "failed"}},
+    }), encoding="utf-8")
+
+    status, items = _get(base + "/api/projects")
+    assert status == 200
+    assert len(items) == 1
+    assert items[0]["stage_status"] == "failed"
+
+
+def test_phase11b_artifact_precedence_and_safe_representation(tmp_path, monkeypatch):
+    """Phase 11B: artifact state is derived without exposing internal paths."""
+    monkeypatch.setattr(web, "PROJECTS_DIR", tmp_path / "projects")
+    project_dir = tmp_path / "projects" / "bound-project"
+    project_dir.mkdir(parents=True)
+    available = project_dir / "final.mp4"
+    available.write_bytes(b"valid media evidence")
+
+    manifest = ProjectManifest(
+        project_id="bound-project",
+        topic="Artifact test",
+        final_video_path=str(available),
+    )
+    manifest.initialize_stages()
+    manifest.set_stage_result(StageResult.failed(PipelineStage.ASSEMBLY, "assembly failed"))
+    payload = web._artifact_payload(manifest, "bound-project")
+    assert payload["final_video"]["state"] == "FAILED"
+    assert payload["final_video"]["available"] is False
+    assert str(available) not in json.dumps(payload)
+
+    manifest.set_stage_result(StageResult.completed(PipelineStage.ASSEMBLY))
+    payload = web._artifact_payload(manifest, "bound-project")
+    assert payload["final_video"]["state"] == "AVAILABLE"
+    assert payload["final_video"]["safe_path"]
+    assert str(available) not in json.dumps(payload)
+
+    manifest.final_video_path = str(project_dir / "missing.mp4")
+    payload = web._artifact_payload(manifest, "bound-project")
+    assert payload["final_video"]["state"] == "RECORDED BUT MISSING"
+
+
+def test_phase11b_scene_rows_omit_transport_and_raw_paths(tmp_path, monkeypatch):
+    """Scene rows expose evidence and safe actions, never transport URLs/paths."""
+    monkeypatch.setattr(web, "PROJECTS_DIR", tmp_path / "projects")
+    project_dir = tmp_path / "projects" / "bound-project"
+    project_dir.mkdir(parents=True)
+    media = project_dir / "scene_01.mp4"
+    media.write_bytes(b"scene evidence")
+    rows = web._scene_checkpoint_rows({
+        "scene_01": {
+            "status": "COMPLETED",
+            "provider": "openrouter_video",
+            "polling_url": "https://remote.example/poll/secret",
+            "video_path": str(media),
+            "generation_cost": 4,
+        }
+    }, "bound-project")
+    assert rows[0]["artifact_state"] == "AVAILABLE"
+    assert rows[0]["video_available"] is True
+    assert rows[0]["media_url"].endswith("/scenes/scene_01/media")
+    assert "polling_url" not in rows[0]
+    assert "video_path" not in rows[0]
+    assert str(media) not in json.dumps(rows)
+
+
+def test_phase11b_diagnostic_and_reconciliation_payloads_are_path_free():
+    """Browser diagnostics preserve meaning without paths, URLs, or token values."""
+    source = (
+        "failed at C:/private/source.mp4; poll https://remote.example/job; "
+        "authorization Bearer token-value"
+    )
+    safe = web._browser_safe_diagnostic(source)
+    assert "C:/private/source.mp4" not in safe
+    assert "https://remote.example/job" not in safe
+    assert "token-value" not in safe
+    assert "<absolute-path-omitted>" in safe
+    assert "<remote-url-omitted>" in safe
+    assert "<secret-omitted>" in safe
+
+    manifest = ProjectManifest(project_id="safe-diagnostics", topic="Safe diagnostics")
+    manifest.initialize_stages()
+    manifest.set_stage_result(StageResult.failed(PipelineStage.SCENES, source))
+    payload = web._manifest_payload(manifest, "safe-diagnostics")
+    serialized = json.dumps(payload)
+    assert "C:/private/source.mp4" not in serialized
+    assert "https://remote.example/job" not in serialized
+    assert "token-value" not in serialized
+
+    class Report:
+        def to_dict(self):
+            return {
+                "verdict": "PROJECT_INCOMPLETE",
+                "reasons": [source],
+                "content": {"status": "VALID", "path": "C:/private/plan.json"},
+                "voice": {"status": "MISSING", "path": "/private/voice.mp3"},
+                "scenes": {"status": "MISSING", "items": [{"path": source}]},
+                "captions": {"status": "NOT_REQUIRED"},
+                "assembly": {"status": "MISSING", "path": source},
+            }
+
+    summary = web._reconciliation_summary(Report())
+    serialized = json.dumps(summary)
+    assert summary["verdict"] == "PROJECT_INCOMPLETE"
+    assert summary["content"] == {"status": "VALID"}
+    assert summary["voice"] == {"status": "MISSING"}
+    assert '"path"' not in serialized.lower()
+    assert "https://remote.example/job" not in serialized
+    assert "token-value" not in serialized
+
+
+def test_phase11b_plan_metadata_is_limited_to_safe_identity_fields(tmp_path, monkeypatch):
+    """Plan evidence never forwards arbitrary metadata fields to the browser."""
+    monkeypatch.setattr(web, "PRODUCTIONS_DIR", tmp_path / "productions")
+    plan_dir = tmp_path / "productions" / PID / "units" / "unit-001" / "plan"
+    plan_dir.mkdir(parents=True)
+    (plan_dir / "plan_meta.json").write_text(json.dumps({
+        "production_plan_version": 1,
+        "unit_plan_version": 1,
+        "plan_identity": "safe-plan",
+        "content_hash": "a" * 64,
+        "polling_url": "https://remote.example/private",
+        "source_path": "C:/private/source.json",
+        "api_key": "secret-value",
+    }), encoding="utf-8")
+
+    payload = web._plan_evidence(PID, "unit-001")
+    assert payload["meta"] == {
+        "production_plan_version": 1,
+        "unit_plan_version": 1,
+        "plan_identity": "safe-plan",
+        "content_hash": "a" * 64,
+    }
+
+
+def test_phase11b_checkpoint_payload_omits_unexpected_transport_values():
+    """Transport/path values stay server-side even under unexpected key names."""
+    payload = web._safe_checkpoint_payload({
+        "provider": "openrouter_video",
+        "download_url": "https://remote.example/video",
+        "source_asset": "C:/private/source.mp4",
+        "note": "https://remote.example/poll",
+        "values": ["safe-status", "C:/private/file.mp4", "https://remote.example"],
+        "nested": {"diagnostic_path": "/private/diagnostic.json", "state": "READY"},
+    })
+
+    assert payload == {
+        "provider": "openrouter_video",
+        "values": ["safe-status"],
+        "nested": {"state": "READY"},
+    }
+
+
+def test_phase11b_scene_rows_preserve_numeric_scene_order():
+    """Storyboard rows use scene order, not lexicographic scene identifiers."""
+    rows = web._scene_checkpoint_rows({
+        "scene_10": {"status": "COMPLETED"},
+        "scene_2": {"status": "COMPLETED"},
+        "scene_1": {"status": "COMPLETED", "sequence": 1},
+    })
+
+    assert [row["scene_id"] for row in rows] == [
+        "scene_1", "scene_2", "scene_10"
+    ]
+
+
+def test_phase11b_scene_media_route_is_confined_and_get_only(cc_server):
+    """Scene delivery is authoritative, confined, allowlisted, and read-only."""
+    base, tmp = cc_server
+    project_dir = tmp / "projects" / "scene-project"
+    project_dir.mkdir(parents=True)
+    media = project_dir / "scene_01.mp4"
+    media.write_bytes(b"scene media")
+    manifest = {
+        "project_id": "scene-project",
+        "topic": "Scene route",
+        "scene_checkpoints": {
+            "scene_01": {"status": "COMPLETED", "file_path": str(media)},
+            "scene_02": {"status": "COMPLETED", "file_path": str(project_dir / "missing.mp4")},
+        },
+        "stages": {"scenes": {"status": "COMPLETED"}},
+    }
+    (project_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    import urllib.request
+    with urllib.request.urlopen(base + "/api/projects/scene-project/scenes/scene_01/media") as response:
+        assert response.status == 200
+        assert response.headers["Content-Type"] == "video/mp4"
+        assert response.read() == b"scene media"
+
+    status, body = _get(base + "/api/projects/scene-project/scenes/scene_02/media")
+    assert status == 404
+    assert body["error"] == "SCENE_MEDIA_MISSING"
+
+    status, body = _get(base + "/api/projects/scene-project/scenes/..%2Fscene_01/media")
+    assert status in (400, 404)
+    assert body.get("error") != "INTERNAL_ERROR"
+
+    (project_dir / "scene_03.txt").write_bytes(b"not video")
+    manifest["scene_checkpoints"]["scene_03"] = {
+        "status": "COMPLETED", "file_path": str(project_dir / "scene_03.txt")
+    }
+    (project_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    status, body = _get(base + "/api/projects/scene-project/scenes/scene_03/media")
+    assert status == 400
+    assert body["error"] == "SCENE_MEDIA_TYPE_UNSUPPORTED"
+
+    outside = tmp / "outside.mp4"
+    outside.write_bytes(b"outside")
+    link = project_dir / "scene_04.mp4"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        link = None
+    if link is not None:
+        manifest["scene_checkpoints"]["scene_04"] = {
+            "status": "COMPLETED", "file_path": str(link)
+        }
+        (project_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        status, body = _get(base + "/api/projects/scene-project/scenes/scene_04/media")
+        assert status == 400
+        assert body["error"] == "SCENE_MEDIA_UNAVAILABLE"
+
+    manifest["scene_checkpoints"]["scene_05"] = {
+        "status": "FAILED", "file_path": str(media)
+    }
+    (project_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    status, body = _get(base + "/api/projects/scene-project/scenes/scene_05/media")
+    assert status == 400
+    assert body["error"] == "SCENE_MEDIA_FAILED"
+
+    status, body = _post(base + "/api/projects/scene-project/scenes/scene_01/media", {})
+    assert status == 405
+    assert body["error"] == "METHOD_NOT_ALLOWED"
+
+
+def test_phase11b_project_binding_summary_valid_and_legacy_null(
+    production_on_disk
+):
+    """Project Detail returns only exact authoritative binding fields or null."""
+    base, tmp = production_on_disk
+    fields = {
+        "production_id": PID,
+        "unit_id": "unit-001",
+        "production_plan_version": 1,
+        "unit_plan_identity": "unit-plan-001",
+        "unit_plan_version": 1,
+        "unit_plan_content_hash": "a" * 64,
+        "project_id": "bound-project",
+        "bound_at": CREATED,
+    }
+    bound = tmp / "projects" / "bound-project"
+    bound.mkdir(parents=True)
+    (bound / "manifest.json").write_text(json.dumps({
+        "project_id": "bound-project",
+        "topic": "Bound project",
+        "stages": {},
+        "production_binding": fields,
+    }), encoding="utf-8")
+    legacy = tmp / "projects" / "legacy-project"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({
+        "project_id": "legacy-project",
+        "topic": "Legacy project",
+        "stages": {},
+    }), encoding="utf-8")
+    before_bound = (bound / "manifest.json").read_bytes()
+    before_legacy = (legacy / "manifest.json").read_bytes()
+
+    status, payload = _get(base + "/api/projects/bound-project")
+    assert status == 200
+    assert payload["production_binding"] == fields
+    status, payload = _get(base + "/api/projects/legacy-project")
+    assert status == 200
+    assert payload["production_binding"] is None
+    assert (bound / "manifest.json").read_bytes() == before_bound
+    assert (legacy / "manifest.json").read_bytes() == before_legacy
+
+
+def test_phase11b_project_detail_uses_resolved_directory_identity(
+    cc_server
+):
+    """Duplicate manifest IDs cannot substitute another directory's metadata."""
+    base, tmp = cc_server
+    for directory, topic in (("project-a", "Requested A"), ("project-b", "Wrong B")):
+        project = tmp / "projects" / directory
+        project.mkdir(parents=True)
+        (project / "manifest.json").write_text(json.dumps({
+            "project_id": "shared-manifest-id",
+            "topic": topic,
+            "stages": {},
+        }), encoding="utf-8")
+
+    status, body = _get(base + "/api/projects/project-a")
+    assert status == 200
+    assert body["directory_id"] == "project-a"
+    assert body["topic"] == "Requested A"
+
+
+def test_phase11b_project_binding_summary_is_safe_and_invalid_is_explicit(
+    cc_server
+):
+    """Project Detail uses only the manifest binding and flags malformed data."""
+    base, tmp = cc_server
+    project = tmp / "projects" / "bound-project"
+    project.mkdir(parents=True)
+    manifest = {
+        "project_id": "bound-project",
+        "topic": "Bound project",
+        "created_at": "2026-09-01T10:00:00",
+        "stages": {},
+        "production_binding": {
+            "production_id": "production-1",
+            "unit_id": "unit-1",
+            "production_plan_version": 1,
+            "unit_plan_identity": "unit-identity",
+            "unit_plan_version": 1,
+            "unit_plan_content_hash": "a" * 64,
+            "project_id": "wrong-directory",
+            "bound_at": "2026-09-01T10:00:00",
+        },
+    }
+    (project / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    status, body = _get(base + "/api/projects/bound-project")
+    assert status == 400
+    assert body["error"] == "PROJECT_BINDING_INVALID"
+    assert "production_binding" not in body
 
 
 

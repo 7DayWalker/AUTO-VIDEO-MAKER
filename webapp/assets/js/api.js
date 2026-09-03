@@ -70,6 +70,12 @@ window.API = (function () {
       return "/api/projects/" + encodeURIComponent(projectId) + "/media";
     },
 
+    /** Safe same-origin scene delivery URL; the server validates the scene. */
+    sceneMediaUrl(projectId, sceneId) {
+      return "/api/projects/" + encodeURIComponent(projectId) +
+        "/scenes/" + encodeURIComponent(sceneId) + "/media";
+    },
+
     /** Explicit publish request — only ever called from the confirm dialog. */
     publishTiktok(projectId, privacyLevel) {
       return jsonFetch(

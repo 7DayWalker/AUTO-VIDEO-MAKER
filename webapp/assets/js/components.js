@@ -34,6 +34,7 @@ window.COMPONENTS = (function () {
   function pubBadge(state, sample) {
     const map = {
       VERIFIED:                        ["ok",   "Published"],
+      VERIFIED_SANDBOX_PRIVATE:        ["ok",   "Published privately"],
       PROCESSING:                      ["info", "Processing"],
       IDENTITY_PERSISTED:              ["info", "Submitted"],
       UPLOAD_SUBMITTED:                ["warn", "Uploading"],
@@ -80,6 +81,13 @@ window.COMPONENTS = (function () {
   }
 
   function projectCard(p) {
+    if (p.error) {
+      return '<article class="card project-card card-pad"><div class="pc-meta">' +
+        '<div class="project-title">' + esc(p.topic || p.directory_id || "Unreadable project") + '</div>' +
+        '<div class="project-chips"><span class="badge err">Manifest unavailable</span></div>' +
+        '<p class="hint">This project cannot be inspected until its durable manifest is readable. No relationship was inferred.</p>' +
+        '</div></article>';
+    }
     const chips = [];
     (p.publications || []).forEach(function (pub) {
       const pf = platformById(pub.platform);
@@ -88,6 +96,7 @@ window.COMPONENTS = (function () {
                  ICONS[pf.icon] + esc(pf.name) + "</span>");
     });
     const stage = p.stage_status === "complete" ? ["ok", "Ready"] :
+                  p.stage_status === "failed" ? ["err", "Failed"] :
                   p.stage_status === "running" ? ["warn", "Generating"] : ["muted", "Draft"];
     return (
       '<a class="card card-hover project-card" href="#/projects/' + encodeURIComponent(p.project_id) + '">' +
@@ -145,16 +154,53 @@ window.COMPONENTS = (function (C) {
     setTimeout(function () { el.remove(); }, 3800);
   }
 
-  function modal(html) {
+  var modalTrigger = null;
+  var modalKeyHandler = null;
+
+  function modal(html, trigger) {
     const root = document.getElementById("modal-root");
-    root.innerHTML = '<div class="modal-backdrop"><div class="modal">' + html + "</div></div>";
+    modalTrigger = trigger || document.activeElement;
+    root.innerHTML = '<div class="modal-backdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="avm-modal-title" aria-describedby="avm-modal-description" tabindex="-1">' + html + "</div></div>";
+    var dialog = root.querySelector(".modal");
+    var heading = dialog.querySelector("h3, h2");
+    if (heading) heading.id = "avm-modal-title";
+    var description = dialog.querySelector("p");
+    if (description) description.id = "avm-modal-description";
     root.querySelector(".modal-backdrop").addEventListener("click", function (e) {
       if (e.target === this) closeModal();
     });
+    modalKeyHandler = function (event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeModal();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog.contains(document.activeElement)) return;
+      var focusable = dialog.querySelectorAll("button:not(:disabled), [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
+    };
+    document.addEventListener("keydown", modalKeyHandler);
+    var initial = dialog.querySelector("button:not(:disabled), input, select, textarea, [href]") || dialog;
+    setTimeout(function () { initial.focus(); }, 0);
   }
 
   function closeModal() {
     document.getElementById("modal-root").innerHTML = "";
+    if (modalKeyHandler) {
+      document.removeEventListener("keydown", modalKeyHandler);
+      modalKeyHandler = null;
+    }
+    var returnTarget = modalTrigger;
+    modalTrigger = null;
+    if (returnTarget && typeof returnTarget.focus === "function") {
+      setTimeout(function () { returnTarget.focus(); }, 0);
+    }
   }
 
   C.statTile = statTile;

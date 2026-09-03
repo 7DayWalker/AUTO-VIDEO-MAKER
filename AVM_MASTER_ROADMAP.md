@@ -384,7 +384,396 @@ Phase 11B early.
 
 **Status:** 🟡 FUTURE.
 
-### 4.10 PERSONAL AVM MATURITY — Phase 12 🟡
+### 4.10 PERSONAL AVM PRODUCT — Phase 11C 🟡
+
+**Name:** AVM V1 Product Implementation & Expansion.
+
+**Purpose:** Provide the controlled bridge from the existing AVM architecture into an
+integrated AVM V1 product. Phase 11C is an additive integration and productization
+phase, not a greenfield rebuild and not a replacement for Phases 1–11B.
+
+The governing implementation philosophy is:
+
+> **DISCOVER → REUSE → POLISH → INTEGRATE → HARDEN → FILL GENUINE GAPS**
+
+not:
+
+> **REWRITE → REBUILD EVERYTHING**
+
+Phase 11C is the approved roadmap for controlled V1 implementation. It is not blanket
+permission to implement every capability listed below immediately. Each implementation
+increment still requires a separately authorized task, an appropriate design or
+implementation checkpoint, validation, and acceptance evidence.
+
+**Strategic objective:** Make the existing AVM Core operate and feel like one coherent
+creative AI video studio across the Personal AVM/local control surface, while preserving
+the architectural path toward a future public SaaS control surface and future mobile
+distribution surface.
+
+**Question this phase answers:** *"Integrate the proven AVM capabilities into a coherent
+V1 product, then build only the genuinely missing product workflows around them."*
+
+#### Relationship to previous phases
+
+Phase 11C starts from a substantial existing base:
+
+- Phase 1–8 established the production engine, media pipeline, provider architecture,
+  local processing, Google Flow, OpenRouter, narration, captions, assembly, and
+  publishing foundations.
+- Phase 9 established durable production intent, units, optional Production Bible,
+  dependencies, versioning, and immutable intent snapshots.
+- Phase 10 established plan-backed execution, `ProductionExecutor`, explicit project
+  binding, derived progress, and resumable multi-unit composition.
+- Phase 11 established the Personal Command Center control surface.
+- Phase 11B froze the Command Center experience boundary and its no-new-authority rules;
+  its interrupted implementation must be separately reviewed and accepted before it is
+  treated as complete.
+
+Phase 11C shall preserve these boundaries. It shall not reopen completed phases merely
+because V1 exposes their capabilities through a more integrated product workflow.
+
+#### Current starting point — evidence-based baseline
+
+The AVM Product Architecture V1 Baseline identified the following starting point:
+
+| Area | Current evidence | 11C treatment |
+|---|---|---|
+| Production intent | `app/production/models.py` and `app/production/storage.py` provide `Production`, `ProductionUnit`, optional `ProductionBible`, dependencies, provider intent, versioning, and durable intent storage | Preserve and integrate |
+| Plan-backed execution | `app/orchestrator/production_execution.py` provides `ProductionExecutor`, `derive_progress()`, binding discovery, per-unit plans, and resumable execution around the existing engine | Preserve; correct wiring where required; do not replace |
+| Project binding | `ProjectManifest.production_binding` is the authoritative Production → Unit → Project relationship | Preserve as the only binding authority |
+| Scene execution | `app/orchestrator/scene_execution.py` provides the provider-independent execution boundary | Preserve and extend additively |
+| Local video | ImageMotion, local asset normalization, external video intake, FFmpeg, and FFprobe paths exist in `app/orchestrator/visual_providers.py` and `app/assembly/` | Consolidate, validate, and integrate |
+| Google Flow | Browser/CDP Flow route and credit protections exist in `app/flow/` and the Flow provider wrapper | Preserve as a first-class route |
+| AI video | Gemini Omni and OpenRouter video routes exist; OpenRouter includes catalog/access/cost gates and remote-job handling | Integrate and harden; no premature intelligence layer |
+| Narration | `app/voice/` provides plan narration extraction, Edge TTS, mock TTS, validation, and timing | Reuse for existing workflows; add source-video narration only as a genuine workflow gap |
+| Assembly/captions | `app/assembly/` and `app/orchestrator/captions.py` provide local assembly, audio policy, captions, and validation | Preserve and connect to new workflows |
+| Publishing | YouTube and TikTok adapters, OAuth/connection paths, durable records, and reconciliation exist in `app/publishing/` | Consolidate through existing adapters; do not add a new state machine |
+| Command Center | Phase 11 API/UI exists; Phase 11B implementation is interrupted and unaccepted | Complete and polish through controlled review |
+| Long-video repurposing | No transcription, source-video analysis, segment planner, or derived-episode lineage was found | Genuine additive gap |
+| SaaS/mobile | No identity, tenancy, billing, credit ledger, cloud storage, or mobile API exists | Keep as preparation/direction, not premature infrastructure |
+
+The baseline also found that `productions/` is empty in the inspected working tree,
+while `output/projects/` contains existing execution artifacts. Existing code and tests
+must be inspected before any capability is described as missing: absence of a product
+surface is not proof that the underlying engine does not exist.
+
+#### Existing-capability reuse rule
+
+Every 11C capability task shall begin with a short evidence record answering:
+
+1. What already exists?
+2. What actually works under current tests and runtime conditions?
+3. What is incomplete?
+4. What is merely rough UX?
+5. What is disconnected from the rest of AVM?
+6. What is fragile or externally blocked?
+7. What is genuinely missing?
+8. What can be reused without architectural changes?
+
+The implementation record shall classify each finding as one of:
+
+- **EXISTS** — capability is present in the repository.
+- **POLISH / HARDEN** — capability exists but requires UX, reliability, safety, or
+  operational improvement.
+- **INTEGRATE** — capability exists but is not connected to the intended V1 workflow.
+- **GENUINE GAP** — the required primitive or workflow does not exist.
+- **DEFERRED** — intentionally outside the current increment or protected by a later
+  phase boundary.
+
+No rewrite is justified solely because an existing component is not yet exposed through
+the preferred V1 experience.
+
+#### V1 capability direction and classification
+
+The following is the initial product classification. It is a controlled baseline, not a
+permanent freeze; changes are governed by the new-idea rule below.
+
+| Capability | Evidence-based treatment | Initial product classification |
+|---|---|---|
+| Local video creation through ImageMotion | EXISTS; `ImageMotionVisualProvider` and local FFmpeg processing exist | **V1 — POLISH / HARDEN / INTEGRATE** |
+| Local asset/video normalization and assembly | EXISTS; asset intake, FFmpeg, audio policy, captions, and validation exist | **V1 — INTEGRATE** |
+| Google Flow production route | EXISTS; Flow browser/CDP provider and credit firewall exist | **V1 — INTEGRATE / HARDEN** |
+| OpenRouter AI video creation | EXISTS; video gateway, catalog, async jobs, cost gates, and resume protections exist | **V1 — INTEGRATE / HARDEN** |
+| Multi-model routing and suitable-model selection | Basic provider/model configuration exists; evidence-based intelligent ranking does not | **DECISION REQUIRED for V1; otherwise V1.x / Phase 14** |
+| Cost-aware AI usage | Provider-specific controls exist, including Flow limits and OpenRouter paid gates; no unified ledger exists | **V1 — preserve existing controls; V1.x for unified accounting** |
+| Single Video Production | Supported by one Production with one Unit and the existing single-project engine | **V1 — INTEGRATE / POLISH** |
+| Multiple Independent Video Production | Production/Unit schema and serial executor support representation and composition; batch product workflow is incomplete | **V1 — INTEGRATE; parallel/batch expansion V1.x** |
+| Series / Episodic Production | Optional Bible, episode metadata, dependencies, and shared context exist; continuity enforcement does not | **V1 — model/workflow integration; continuity intelligence V1.x / DECISION REQUIRED** |
+| Approximately 45–60 second episodic output | Existing short-form plan and assembly constraints can produce short episodes | **V1 — INTEGRATE** |
+| Production Bible-required series workflow | Bible is optional in the core by design; a series workflow may require it at creation/validation | **V1 — DECISION REQUIRED for exact product gate** |
+| Long-video repurposing from approximately 45–60 minute source | External video intake exists, but transcription, analysis, segmentation, and lineage are absent | **V1 — GENUINE GAP, controlled additive track** |
+| Approximately 60-second derived clips/episodes | Existing units and assembly can represent outputs; repurposing planner is missing | **V1 — GENUINE GAP for planner; output polish reuses existing core** |
+| Video Upload → AI Narration | Voice/TTS exists for generated plans; upload ingestion and transcription do not | **V1 — GENUINE GAP for source workflow** |
+| Manual publishing | YouTube/TikTok adapters and durable publication records exist | **V1 — INTEGRATE / HARDEN** |
+| Automated publishing | Existing roadmap places automation after 11B; no automatic publishing in 11C | **POST-V1 / Phase 12** |
+| Additional publishing platforms | Platform registry and adapter direction exist; Instagram/Facebook are not implemented | **V1.x / DECISION REQUIRED** |
+| Personal AVM Command Center | Phase 11 exists; interrupted Phase 11B implementation needs review and completion | **V1 — POLISH / HARDEN / INTEGRATE** |
+| Future public SaaS | Strategic one-core direction exists; identity, tenancy, billing, and service infrastructure do not | **V1 — architecture preparation only; SaaS product V1.x / POST-V1** |
+| Subscriptions and billing | No implementation and no approved prices, tiers, provider, or revenue share | **DECISION REQUIRED; V1.x / POST-V1** |
+| Credits and credit consumption | Provider-specific cost controls exist; no product credit ledger exists | **V1 — define boundaries only; V1.x implementation** |
+| Future mobile application | Product direction is approved; no mobile application/API surface exists | **V1 — mobile-readiness constraints; POST-V1 application** |
+| Advertising/revenue sharing | No authoritative commercial rules exist | **POST-V1 / DECISION REQUIRED** |
+
+No prices, subscription tiers, billing provider, advertising model, or revenue-share
+percentage is established by this amendment.
+
+#### Major capability tracks
+
+11C is organized into dependency-aware tracks rather than implementing the product list
+in presentation order:
+
+1. **Core and repository hardening** — make the current baseline reproducible and
+   trustworthy; preserve existing artifacts and authorities.
+2. **Existing production consolidation** — bring the Production/Unit model, plan-backed
+   execution, local pipeline, providers, manifests, checkpoints, and reconciliation into
+   one proven operational path.
+3. **Personal Command Center completion** — complete the Phase 11B review and polish
+   without changing Phase 11 authority boundaries.
+4. **Local creation integration** — make ImageMotion, local assets, FFmpeg, captions,
+   audio policy, and final outputs coherent in the V1 creation experience.
+5. **AI creation integration** — expose existing OpenRouter/Gemini capability safely,
+   preserving cost gates and explicit provider evidence.
+6. **Google Flow integration** — preserve Flow as a first-class route and verify its
+   operator controls, credit protections, and failure boundaries.
+7. **Production-mode consolidation** — provide one coherent workflow over Single,
+   Multiple Independent, and Series/Episodic productions; do not create separate
+   engines for each mode.
+8. **Long-video repurposing** — add only the missing source ingestion, transcription,
+   analysis, segmentation, derived-unit, and lineage primitives; reuse the existing
+   media, narration, caption, assembly, and publishing core.
+9. **AI narration** — extend the existing voice layer for source-video/transcript-driven
+   narration without weakening the current plan-driven narration path.
+10. **Publishing consolidation** — integrate manual YouTube/TikTok publishing and
+    publication evidence; keep automatic publishing and scheduling in Phase 12.
+11. **SaaS foundation preparation** — define seams for identity, tenant scope, storage,
+    jobs, secrets, usage, and media delivery without implementing the whole SaaS stack.
+12. **Subscription/credit architecture preparation** — document metering boundaries and
+    cost semantics; do not invent commercial terms or prematurely add billing.
+13. **Mobile readiness** — keep core commands and payloads surface-neutral and avoid
+    making the personal web UI the only expression of AVM behavior.
+14. **V1 validation and stabilization** — validate the integrated product against actual
+    workflows, safety boundaries, runtime prerequisites, and acceptance criteria.
+
+#### Controlled implementation sequence
+
+The expected 11C sequence is:
+
+| Order | Stage | Dependency rationale | Initial treatment |
+|---:|---|---|---|
+| 1 | V1 foundation and repository hardening | All later work depends on a trustworthy baseline, runtime prerequisites, evidence, and clean authority boundaries | DISCOVER; POLISH / HARDEN |
+| 2 | Existing production-system consolidation | Production modes must use the existing intent, plan, binding, executor, manifest, checkpoint, and reconciliation chain | REUSE; INTEGRATE |
+| 3 | Personal Command Center completion and polish | The operator needs a truthful control surface before broader production workflows are exposed | REUSE; POLISH / HARDEN; separately accept 11B |
+| 4 | Local video-creation integration | The lowest-cost path and existing FFmpeg/ImageMotion primitives provide the baseline production route | REUSE; INTEGRATE |
+| 5 | AI generation and OpenRouter integration | Existing provider/cost controls must be exposed only after the core local route is coherent | REUSE; INTEGRATE / HARDEN |
+| 6 | Google Flow integration | Flow remains first-class but is externally/runtime sensitive and must retain credit protections | REUSE; INTEGRATE / HARDEN |
+| 7 | Single, multiple-independent, and episodic mode consolidation | These modes share the Production/Unit architecture; product workflows depend on the consolidated execution path | REUSE; INTEGRATE; genuine UX gaps only |
+| 8 | Long-video repurposing | Requires stable media ownership, units, assembly, captions, and publishing before adding source analysis | GENUINE GAP; additive workflow |
+| 9 | AI narration for uploaded/source media | Depends on source ingestion, transcription, and segment context; extends existing voice and timing primitives | GENUINE GAP plus REUSE |
+| 10 | Publishing consolidation | Requires stable final artifact evidence and unit/project relationships; automated publishing remains excluded | REUSE; INTEGRATE / HARDEN |
+| 11 | SaaS foundation preparation | Must be informed by real personal production evidence; define seams without premature infrastructure | PROPOSED preparation only |
+| 12 | Subscription and credit architecture preparation | Requires evidence of actual resource/cost behavior and approved commercial decisions | DECISION REQUIRED; design only unless separately authorized |
+| 13 | Mobile-readiness preparation | Depends on stable control contracts and surface-neutral core operations | PROPOSED preparation only |
+| 14 | V1 validation and stabilization | Final acceptance must cover integrated workflows and ensure later-phase boundaries remain intact | HARDEN; validate; accept |
+
+The sequence may be amended only through the new-idea/change rule below. A later stage
+must not be pulled forward merely because its UI can be sketched before its authority,
+cost, security, or persistence implications are understood.
+
+#### Architecture constraints
+
+Phase 11C preserves the established AVM authority model:
+
+- **Intent authority:** `productions/<production_id>/production.json`.
+- **Execution authority:** `ProductionExecutor` plus the existing execution pipeline and
+  project manifests/checkpoints.
+- **State authority:** `ProductionExecutor.derive_progress()` for production-unit state.
+- **Binding authority:** `ProjectManifest.production_binding`.
+- **Artifact authority:** existing manifest, checkpoint, filesystem-validation, and
+  reconciliation evidence.
+- **Publishing authority:** existing publishing modules and durable publication records.
+
+11C shall not introduce:
+
+- a second execution engine;
+- a second state machine for production progress;
+- a fourth authority or competing state authority;
+- an independent frontend execution or production-state authority;
+- a competing project-binding mechanism;
+- a new durable execution-history authority;
+- an unnecessary database;
+- a scheduler, unattended automation, or automatic continuation;
+- retry/fallback/substitution policy before its approved later phase;
+- provider intelligence/ranking before its approved later phase;
+- a new quality engine before its approved later phase;
+- a new media-processing architecture where the approved local/FFmpeg primitives fit;
+- a new publishing state machine;
+- a frontend framework or unnecessary build-system migration.
+
+New workflow artifacts such as transcripts, segment plans, source-media records, and
+derived-unit lineage may become durable evidence when separately designed. They must not
+silently replace Production intent, execution evidence, or binding authority.
+
+#### New-idea and change-management rule
+
+The Founder has approved continued introduction of new ideas during V1 development. V1
+is therefore not architecturally frozen forever. It is controlled rather than closed.
+
+For each proposed idea, the implementation owner should record a lightweight decision
+note answering:
+
+- Is it necessary for V1, or only attractive?
+- Is it compatible with the existing architecture?
+- What can be reused?
+- What is its dependency impact?
+- What is its scope impact?
+- What is its security/data-boundary impact?
+- What is its SaaS impact?
+- What is its mobile impact?
+- Does it leak into the Phase 12–15 boundaries?
+- What is its implementation cost and complexity?
+
+The idea is then classified as exactly one of:
+
+1. **ADOPT INTO CURRENT 11C** — necessary or strongly enabling for V1, compatible with
+   the authority model, and bounded by an authorized task.
+2. **DEFER TO V1.x** — valuable but not required for the first integrated V1 baseline.
+3. **DEFER POST-V1** — belongs after the proven core/product milestone.
+4. **REQUIRES ARCHITECTURAL DECISION** — changes authority, persistence, cost, security,
+   tenancy, phase boundaries, or core assumptions and requires Founder/CTO decision
+   before implementation.
+
+This is intentionally a lightweight classification, not a new bureaucracy. The rule
+exists to preserve room for useful ideas without allowing uncontrolled scope expansion,
+architecture drift, or silent leakage into Phases 12–15.
+
+#### SaaS-readiness direction
+
+The strategic target remains **ONE AVM CORE WITH MULTIPLE CONTROL/PRODUCT SURFACES**.
+Personal AVM is the immediate proving environment; future public SaaS should use the
+same core where practical rather than requiring a second production engine.
+
+During 11C, implementation should keep future seams visible for:
+
+- identity and tenant context;
+- tenant-scoped storage and media delivery;
+- durable job ownership and execution lifecycle;
+- secret/credential providers;
+- usage and cost metering;
+- subscription/credit policy;
+- API versioning and client-neutral command contracts.
+
+11C shall not implement authentication, tenancy, subscriptions, billing, payment
+providers, a credit ledger, cloud infrastructure, or a database merely to claim SaaS
+readiness. Personal/local operation remains the immediate constraint. SaaS design work
+belongs only where it prevents an avoidable architectural dead end in the shared core.
+
+Commercial direction is recorded without invented terms:
+
+- Local creation: free initially / potentially monetized later.
+- AI creation: higher-cost paid capability.
+- Long-video repurposing: paid capability.
+- AI narration: paid capability.
+- Publishing: subscription-gated capability with applicable future usage/feature
+  charges.
+- SaaS: subscription plus credit-based direction.
+
+Prices, tiers, billing rules, payment providers, and revenue-sharing terms remain
+**DECISION REQUIRED** at a later stage.
+
+#### Mobile-readiness direction
+
+11C shall prepare for a future mobile surface without creating a mobile application.
+The core should remain expressible through stable, surface-neutral operations such as:
+
+- inspect production;
+- inspect unit;
+- inspect project/media evidence;
+- initiate an explicitly authorized command;
+- inspect derived progress;
+- inspect publication state.
+
+The personal web UI may remain richer and more diagnostic than a future mobile UI. Mobile
+readiness does not require a mobile framework, a separate execution engine, or a new
+mobile-specific authority.
+
+#### Validation and checkpoint strategy
+
+Each 11C increment shall use the smallest appropriate acceptance checkpoint:
+
+1. **Evidence checkpoint** — repository paths, actual behavior, dependencies, and
+   reuse/gap classification are recorded.
+2. **Architecture checkpoint** — authority, persistence, security, cost, SaaS, mobile,
+   and Phase 12–15 boundary impact are reviewed.
+3. **Implementation checkpoint** — separately authorized code is limited to the agreed
+   scope; unrelated worktree changes are not overwritten.
+4. **Behavior checkpoint** — focused tests, static/source checks, local media validation,
+   and provider-safe tests are run as appropriate.
+5. **Integration checkpoint** — the workflow is traced end-to-end through intent,
+   execution, binding, artifacts, reconciliation, and publication where applicable.
+6. **Acceptance checkpoint** — status is explicitly recorded as EXISTING, WORKING,
+   PARTIALLY IMPLEMENTED, BROKEN, MISSING, or COMPLETE; assumptions and external blocks
+   remain visible.
+
+Validation must distinguish local processing from paid/external operations. Expensive or
+irreversible operations require explicit authorization and must not be used merely to
+produce acceptance evidence. Existing tests remain regression protection; they are not
+permission to widen scope.
+
+#### Exit criteria
+
+Phase 11C may be accepted only when evidence demonstrates, at minimum:
+
+- the V1 product boundary and accepted V1/V1.x/Post-V1 classifications are recorded;
+- existing Phase 1–11B capabilities have been inventoried and reused where sound;
+- the Production/Unit/Project/Manifest/Checkpoint authority model remains intact;
+- `ProductionExecutor`, `derive_progress()`, and `ProjectManifest.production_binding`
+  remain authoritative;
+- the Personal Command Center is accepted after its separate Phase 11B implementation
+  review and truthful execution/media verification;
+- local creation, existing AI routes, Google Flow, and manual publishing are integrated
+  or have explicit documented external/runtime limitations;
+- Single, Multiple Independent, and Series/Episodic workflows use the shared
+  Production/Unit architecture rather than parallel engines;
+- the long-video repurposing workflow has either met its separately defined V1
+  acceptance criteria or has an explicit Founder/CTO decision to classify it V1.x;
+- Upload → AI Narration has either met its separately defined V1 acceptance criteria or
+  has an explicit Founder/CTO decision to classify it V1.x;
+- cost controls remain explicit and no paid operation is silently introduced;
+- publishing state remains owned by existing publishing modules and records;
+- SaaS and mobile seams are documented without premature platform infrastructure;
+- no Phase 12, 13, 14, or 15 responsibility has been silently absorbed;
+- focused and integration validation evidence is available, with external/runtime
+  limitations clearly reported;
+- the resulting product is coherent enough to serve as the proven V1 baseline rather
+  than a collection of disconnected demonstrations.
+
+#### Explicit non-goals
+
+Phase 11C does **not**:
+
+- restart AVM as a greenfield project;
+- discard or rewrite working Phase 1–11B architecture;
+- absorb Phase 12 personal automation, scheduling, unattended execution, or automatic
+  continuation;
+- absorb Phase 13 quality scoring, quality gates, or autonomous scale systems;
+- absorb Phase 14 provider ranking, optimization, or intelligent model selection;
+- absorb Phase 15 retry, fallback, substitution, or automated recovery policy;
+- introduce a database, authentication, tenancy, billing, subscriptions, or payment
+  provider without a separately approved SaaS phase;
+- introduce a scheduler, queue, daemon, microservice fleet, or Kubernetes/cloud platform
+  without evidence that the current stage requires it;
+- create a second execution engine, state machine, binding authority, or publishing
+  state machine;
+- migrate the frontend to a framework or introduce an unnecessary build system;
+- invent final commercial prices, tiers, credit exchange rates, or revenue-sharing terms;
+- claim that external video intake is already long-video repurposing;
+- claim that plan-driven TTS is already upload-to-AI-narration;
+- implement every possible future platform, workflow, or idea merely because it is
+  compatible with the long-term vision.
+
+**Status:** 🟡 FUTURE / NOT STARTED.
+
+### 4.11 PERSONAL AVM MATURITY — Phase 12 🟡
 
 **Name:** Personal Automation.
 
@@ -405,7 +794,7 @@ significant.
 
 **Status:** 🟡 FUTURE.
 
-### 4.11 PERSONAL AVM MATURITY — Phase 13 🟡
+### 4.12 PERSONAL AVM MATURITY — Phase 13 🟡
 
 **Name:** Autonomous Production Quality + Scale.
 
@@ -434,7 +823,7 @@ The conceptual distinction:
 
 **Status:** 🟡 FUTURE.
 
-### 4.12 PERSONAL AVM MATURITY — Phase 14 🟡
+### 4.13 PERSONAL AVM MATURITY — Phase 14 🟡
 
 **Name:** Multi-Provider Intelligence.
 
@@ -465,7 +854,7 @@ evidence."*
 
 **Status:** 🟡 FUTURE.
 
-### 4.13 PERSONAL AVM MATURITY — Phase 15 🟡
+### 4.14 PERSONAL AVM MATURITY — Phase 15 🟡
 
 **Name:** Recovery, Retry & Fallback.
 
@@ -494,7 +883,7 @@ when things go wrong."*
 
 **Status:** 🟡 FUTURE.
 
-### 4.14 PERSONAL AVM MATURITY — Phase 16+ 🟡
+### 4.15 PERSONAL AVM MATURITY — Phase 16+ 🟡
 
 **Name:** Full Personal AVM.
 
@@ -775,11 +1164,13 @@ on the autonomy maturity model.
 
 **The immediate next phase is:**
 
-> **PHASE 11B — COMMAND CENTER EXPERIENCE** 🟡
+> **PHASE 11C — AVM V1 PRODUCT IMPLEMENTATION & EXPANSION** 🟡
 
-Phase 11B must still receive its own frozen specification / design gate before any
-implementation begins. This roadmap does **not** constitute a Phase 11B specification
-and grants **no permission** to implement it early.
+Phase 11B remains the bounded predecessor experience phase and must be completed and
+accepted before 11C is accepted as complete. Phase 11C is the approved roadmap bridge
+from the existing Phase 1–11B architecture into the integrated AVM V1 product; it is
+not a greenfield rebuild and this roadmap entry does **not** authorize implementation
+without separately scoped implementation tasks and checkpoints.
 
 ---
 
@@ -814,8 +1205,9 @@ to the visual/production / personal-maturity track and deliberately avoids reusi
 "8A"-style collision space.
 
 Phase 11B — COMMAND CENTER EXPERIENCE is a deliberately lettered, bounded refinement
-phase inserted between Phase 11 and Phase 12 on the personal-maturity track. It is a
-roadmap insertion, not a reuse of the historical publishing-track "8A" collision
+phase inserted between Phase 11 and Phase 11C on the personal-maturity track. Phase 11C
+is the controlled V1 product implementation and expansion bridge inserted between Phase
+11B and Phase 12. Neither phase reuses the historical publishing-track "8A" collision
 space.
 
 ---
@@ -839,6 +1231,20 @@ convention: amendments require an explicit, documented update to this file.
     specification and final acceptance). No change to Phase 9/10/11 semantics.
   - No architectural authority changes and no implementation are included in this
     amendment.
+
+- **2026-09-03 — Phase 11C insertion (roadmap-only amendment).**
+  - Inserted **PHASE 11C — AVM V1 PRODUCT IMPLEMENTATION & EXPANSION** between Phase
+    11B and Phase 12.
+  - Established 11C as an additive, reuse-first bridge from the existing AVM Core into
+    the integrated V1 product; it is not a greenfield rebuild and does not invalidate
+    previous phases.
+  - Added evidence-based capability treatment, V1/V1.x/Post-V1/Decision Required
+    classification, a dependency-aware implementation sequence, SaaS/mobile readiness
+    direction, lightweight new-idea governance, validation checkpoints, exit criteria,
+    and explicit non-goals.
+  - Preserved the Phase 11B authority boundaries and retained Phase 12–15 as separate
+    future responsibilities. No application implementation, dependency, database,
+    billing, authentication, or execution changes are included in this amendment.
 
 ---
 

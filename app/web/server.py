@@ -42,7 +42,12 @@ MIME = {
     ".png": "image/png",
     ".json": "application/json",
     ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".m4v": "video/x-m4v",
 }
+
+MEDIA_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v"}
 
 # Tracks an in-flight interactive connect so repeated POSTs don't stack flows.
 _connect_running = {"platform": None}
@@ -101,6 +106,7 @@ def _publication_summary(manifest: dict) -> list:
         out.append({
             "platform": "youtube", "state": yt.get("state"),
             "post_id": yt.get("youtube_video_id"), "sample": False,
+            "updated_at": yt.get("updated_at"),
         })
     tk = manifest.get("tiktok_publication") or {}
     if tk.get("state"):
@@ -108,6 +114,7 @@ def _publication_summary(manifest: dict) -> list:
             "platform": "tiktok", "state": tk.get("state"),
             "publish_id_present": bool(tk.get("tiktok_publish_id")),
             "post_id": tk.get("tiktok_post_id"), "sample": False,
+            "updated_at": tk.get("updated_at"),
         })
     return out
 
@@ -119,60 +126,314 @@ def projects_index() -> list:
     for child in sorted(PROJECTS_DIR.iterdir(), reverse=True):
         if not child.is_dir():
             continue
+        manifest_path = child / "manifest.json"
+        if not manifest_path.is_file():
+            continue
         manifest = _load_manifest(child)
         if not manifest:
+            items.append({
+                "project_id": child.name,
+                "directory_id": child.name,
+                "topic": child.name,
+                "created_at": None,
+                "current_stage": "",
+                "stage_status": "unavailable",
+                "final_video_available": False,
+                "publications": [],
+                "error": "PROJECT_MANIFEST_UNAVAILABLE",
+                "sample": False,
+            })
             continue
         stages = manifest.get("stages") or {}
         stage_status = "running"
-        if manifest.get("completed_at"):
-            stage_status = "complete"
-        elif any(s.get("status") == "FAILED" for s in stages.values()):
+        if any(
+            isinstance(stage, dict)
+            and str(stage.get("status") or "").upper() == "FAILED"
+            for stage in stages.values()
+        ):
             stage_status = "failed"
+        elif manifest.get("completed_at"):
+            stage_status = "complete"
         final_video = manifest.get("final_video_path")
+        final_path, final_reason = _safe_project_path(child, final_video)
+        failed_stage = any(
+            str(name).lower() in {"assembly", "complete"}
+            and str((stage or {}).get("status", "")).upper() == "FAILED"
+            for name, stage in stages.items()
+            if isinstance(stage, dict)
+        )
         items.append({
             "project_id": manifest.get("project_id") or child.name,
+            "directory_id": child.name,
             "topic": manifest.get("topic") or child.name,
             "created_at": manifest.get("created_at"),
             "current_stage": str(manifest.get("current_stage", "")),
             "stage_status": stage_status,
-            "final_video_available": bool(final_video and Path(final_video).exists()),
+            "final_video_available": bool(
+                not failed_stage
+                and final_path is not None
+                and final_reason is None
+                and final_path.suffix.lower() in MEDIA_SUFFIXES
+            ),
             "publications": _publication_summary(manifest),
             "sample": False,
         })
     return items
 
 
-def project_detail(project_id: str):
-    directory = PROJECTS_DIR / project_id
-    # Path-traversal guard: resolved dir must stay inside PROJECTS_DIR.
+def _project_directory_for(project_id: str):
+    """Resolve either an execution directory ID or legacy manifest project ID."""
+    direct = PROJECTS_DIR / project_id
     try:
-        directory.resolve().relative_to(PROJECTS_DIR.resolve())
+        direct.resolve().relative_to(PROJECTS_DIR.resolve())
     except (ValueError, OSError):
+        return None
+    if direct.is_dir() and _load_manifest(direct):
+        return direct
+    if not PROJECTS_DIR.is_dir():
+        return None
+    for child in PROJECTS_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        manifest = _load_manifest(child)
+        if manifest and manifest.get("project_id") == project_id:
+            return child
+    return None
+
+
+def project_detail(project_id: str):
+    directory = _project_directory_for(project_id)
+    if directory is None:
         return None
     manifest = _load_manifest(directory)
     if not manifest:
         return None
-    wanted = manifest.get("project_id")
     for item in projects_index():
-        if item["project_id"] == wanted:
-            return item
+        if item["directory_id"] == directory.name:
+            result = dict(item)
+            result["directory_id"] = directory.name
+            binding = manifest.get("production_binding")
+            result["production_binding"] = None
+            if binding is not None:
+                fields = (
+                    "production_id", "unit_id", "production_plan_version",
+                    "unit_plan_identity", "unit_plan_version",
+                    "unit_plan_content_hash", "project_id", "bound_at",
+                )
+                valid = (
+                    isinstance(binding, dict)
+                    and all(binding.get(field) not in (None, "") for field in fields)
+                    and str(binding.get("project_id")) == directory.name
+                )
+                if valid:
+                    try:
+                        from app.production.storage import load_production
+
+                        production = load_production(
+                            str(binding["production_id"]), root=PRODUCTIONS_DIR
+                        )
+                        valid = any(
+                            unit.unit_id == binding["unit_id"]
+                            for unit in production.units
+                        )
+                    except Exception:
+                        valid = False
+                if valid:
+                    result["production_binding"] = {
+                        field: binding.get(field) for field in fields
+                    }
+                else:
+                    result["binding_error"] = "PROJECT_BINDING_INVALID"
+            return result
     return None
 
 
 def media_path_for(project_id: str):
-    detail = project_detail(project_id)
-    if not detail or not detail.get("final_video_available"):
+    directory = _project_directory_for(project_id)
+    if directory is None:
         return None
-    manifest = _load_manifest(PROJECTS_DIR / project_id) or {}
+    manifest = _load_manifest(directory) or {}
     raw = manifest.get("final_video_path")
     if not raw:
         return None
-    path = Path(raw)
     try:
-        path.resolve().relative_to(PROJECT_ROOT.resolve())
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        resolved = path.resolve(strict=False)
+        resolved.relative_to(PROJECT_ROOT.resolve())
+        resolved.relative_to(directory.resolve())
+        stages = manifest.get("stages") or {}
+        if any(
+            str(name).lower() in {"assembly", "complete"}
+            and str((stage or {}).get("status", "")).upper() == "FAILED"
+            for name, stage in stages.items()
+            if isinstance(stage, dict)
+        ):
+            return None
+        if (resolved.suffix.lower() not in MEDIA_SUFFIXES or
+                not path.is_file() or path.stat().st_size <= 0):
+            return None
     except (ValueError, OSError):
         return None
-    return path if path.exists() else None
+    return resolved
+
+
+def _safe_project_path(project_dir: Path, raw_path) -> tuple[Path | None, str | None]:
+    """Resolve an existing manifest path without permitting workspace escape."""
+    if not raw_path:
+        return None, "no path recorded"
+    try:
+        candidate = Path(str(raw_path))
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(project_dir.resolve())
+        if not candidate.exists():
+            return resolved, "recorded path is missing"
+        if not candidate.is_file():
+            return resolved, "recorded path is not a regular file"
+        if resolved.stat().st_size <= 0:
+            return resolved, "recorded file is empty"
+        return resolved, None
+    except (OSError, ValueError) as exc:
+        return None, f"unsafe artifact path: {type(exc).__name__}"
+
+
+def _artifact_state(
+    project_dir: Path,
+    *,
+    artifact_type: str,
+    raw_path=None,
+    failed: bool = False,
+    applicable: bool = True,
+    media: bool = False,
+) -> dict:
+    """Derive the frozen presentation state without persisting or mutating data."""
+    if failed:
+        state = "FAILED"
+        reason = "The authoritative producing stage reports failure."
+        safe_path = None
+    else:
+        safe_path, reason = _safe_project_path(project_dir, raw_path)
+        if raw_path and safe_path is not None and reason is None:
+            if media and safe_path.suffix.lower() not in MEDIA_SUFFIXES:
+                reason = "recorded file type is not supported for browser preview"
+            if reason is None:
+                state = "AVAILABLE"
+            else:
+                state = "RECORDED BUT MISSING"
+        elif raw_path:
+            state = "RECORDED BUT MISSING"
+        elif not applicable:
+            state = "NOT APPLICABLE"
+        else:
+            state = "NOT GENERATED"
+    return {
+        "type": artifact_type,
+        "state": state,
+        "available": state == "AVAILABLE",
+        "safe_path": _relative_display(safe_path) if state == "AVAILABLE" else None,
+        "media_url": None,
+        "reason": reason,
+    }
+
+
+def _stage_failed(manifest, *stage_names: str) -> bool:
+    wanted = {name.lower() for name in stage_names}
+    return any(
+        name.lower() in wanted
+        and str(getattr(result.status, "value", result.status)).upper() == "FAILED"
+        for name, result in manifest.stages.items()
+    )
+
+
+def _artifact_payload(manifest, project_id: str | None = None) -> dict:
+    """Browser-safe artifact summary; raw internal paths never cross this boundary."""
+    project_dir = PROJECTS_DIR / (project_id or manifest.project_id)
+    return {
+        "content_plan": _artifact_state(
+            project_dir, artifact_type="Content plan", raw_path=manifest.content_plan_path,
+            failed=_stage_failed(manifest, "content"),
+        ),
+        "voice_audio": _artifact_state(
+            project_dir, artifact_type="Voice audio", raw_path=manifest.voice_audio_path,
+            failed=_stage_failed(manifest, "voice"), media=True,
+        ),
+        "voice_timing": _artifact_state(
+            project_dir, artifact_type="Voice timing", raw_path=manifest.voice_timing_path,
+            failed=_stage_failed(manifest, "voice"),
+        ),
+        "scene_manifest": _artifact_state(
+            project_dir, artifact_type="Scene manifest", raw_path=manifest.scene_manifest_path,
+            failed=_stage_failed(manifest, "scenes"),
+        ),
+        "captions": _artifact_state(
+            project_dir, artifact_type="Captions", raw_path=manifest.captions_path,
+            failed=_stage_failed(manifest, "captions"),
+            applicable=manifest.assembly_config.get("enable_captions", True) is not False,
+        ),
+        "final_video": _artifact_state(
+            project_dir, artifact_type="Final video", raw_path=manifest.final_video_path,
+            failed=_stage_failed(manifest, "assembly", "complete"), media=True,
+        ),
+    }
+
+
+def _scene_media_path(project_id: str, scene_id: str):
+    """Return a validated scene media path from the bound manifest/checkpoint evidence."""
+    directory = _project_directory_for(project_id)
+    if directory is None:
+        return None, "PROJECT_NOT_FOUND"
+    manifest = _load_manifest(directory)
+    if not manifest:
+        return None, "PROJECT_NOT_FOUND"
+    checkpoints = manifest.get("scene_checkpoints") or {}
+    checkpoint = checkpoints.get(scene_id)
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+        scene_paths = manifest.get("scene_video_paths") or []
+        match = re.search(r"(?:^|[_-])(\d+)$", str(scene_id))
+        if not match or not (0 <= int(match.group(1)) - 1 < len(scene_paths)):
+            return None, "SCENE_NOT_FOUND"
+    if str(checkpoint.get("status") or "").upper() == "FAILED":
+        return None, "SCENE_MEDIA_FAILED"
+    stages = manifest.get("stages") or {}
+    scenes_stage = stages.get("scenes") or {}
+    if str(scenes_stage.get("status") or "").upper() == "FAILED":
+        return None, "SCENE_MEDIA_FAILED"
+    raw = checkpoint.get("video_path") or checkpoint.get("file_path")
+    evidence = checkpoint.get("checkpoint_evidence") or {}
+    raw = raw or evidence.get("video_path") or evidence.get("file_path")
+    if not raw:
+        scene_paths = manifest.get("scene_video_paths") or []
+        match = re.search(r"(?:^|[_-])(\d+)$", str(scene_id))
+        if match:
+            index = int(match.group(1)) - 1
+            if 0 <= index < len(scene_paths):
+                raw = scene_paths[index]
+    if not raw:
+        return None, "SCENE_MEDIA_NOT_GENERATED"
+    return _validated_scene_file(directory, raw)
+
+
+def _validated_scene_file(directory: Path, raw_path):
+    """Validate one authoritative scene path beneath its project directory."""
+    try:
+        candidate = Path(str(raw_path))
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        safe = candidate.resolve(strict=False)
+        safe.relative_to(directory.resolve())
+        if not candidate.exists():
+            return None, "SCENE_MEDIA_MISSING"
+        if not candidate.is_file() or safe.stat().st_size <= 0:
+            return None, "SCENE_MEDIA_UNAVAILABLE"
+        if safe.suffix.lower() not in MEDIA_SUFFIXES:
+            return None, "SCENE_MEDIA_TYPE_UNSUPPORTED"
+        return safe, None
+    except (OSError, ValueError):
+        return None, "SCENE_MEDIA_UNAVAILABLE"
 
 
 def _start_connect(platform: str):
@@ -493,6 +754,27 @@ def _redact_secrets(value):
     return value
 
 
+_REMOTE_URL_IN_TEXT = re.compile(r"(?:https?|wss?|ftp|file)://[^\s\"'<>]+", re.IGNORECASE)
+_WINDOWS_PATH_IN_TEXT = re.compile(r"[a-zA-Z]:[\\/][^\s;,\"'<>]+")
+_UNC_PATH_IN_TEXT = re.compile(r"\\\\[^\s;,\"'<>]+")
+_UNIX_PATH_IN_TEXT = re.compile(
+    r"(?<![\w:])/(?:Users|home|var|tmp|private|etc|opt|srv|mnt|media|root)/[^\s;,\"'<>]+"
+)
+_SECRET_VALUE_IN_TEXT = re.compile(r"(?:Bearer\s+|sk-)[A-Za-z0-9._~-]+", re.IGNORECASE)
+
+
+def _browser_safe_diagnostic(value) -> str | None:
+    """Preserve useful error context without returning paths, URLs, or tokens."""
+    if value is None:
+        return None
+    text = str(value)
+    text = _REMOTE_URL_IN_TEXT.sub("<remote-url-omitted>", text)
+    text = _WINDOWS_PATH_IN_TEXT.sub("<absolute-path-omitted>", text)
+    text = _UNC_PATH_IN_TEXT.sub("<absolute-path-omitted>", text)
+    text = _UNIX_PATH_IN_TEXT.sub("<absolute-path-omitted>", text)
+    return _SECRET_VALUE_IN_TEXT.sub("<secret-omitted>", text)
+
+
 def _relative_display(path: Path) -> str:
     """Forward-slash display path relative to the project root (never absolute)."""
     try:
@@ -508,7 +790,7 @@ def _intent_malformed(production_id: str, exc: Exception) -> dict:
         "production_id": production_id,
         "message": (
             f"Production intent for {production_id} could not be loaded: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {_browser_safe_diagnostic(exc)}"
         ),
         "guidance": (
             "The on-disk production.json is corrupt or no longer matches "
@@ -558,7 +840,7 @@ def _executor_error(exc: Exception) -> dict:
     logger.exception("ProductionExecutor failed truthfully")
     return {
         "error": "EXECUTOR_ERROR",
-        "message": f"ProductionExecutor raised {type(exc).__name__}: {exc}. "
+        "message": f"ProductionExecutor raised {type(exc).__name__}: {_browser_safe_diagnostic(exc)}. "
                    "Check logs for the full trace; durable artifacts on disk "
                    "are the source of truth.",
     }
@@ -642,13 +924,23 @@ def _plan_evidence(production_id: str, unit_id: str) -> dict:
     }
     if meta_path.is_file():
         try:
-            evidence["meta"] = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+            raw_meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+            evidence["meta"] = {
+                key: raw_meta.get(key)
+                for key in (
+                    "production_plan_version", "unit_plan_version",
+                    "plan_identity", "content_hash",
+                )
+                if key in raw_meta
+            }
         except Exception as exc:
-            evidence["meta_error"] = f"malformed plan metadata: {exc}"
+            evidence["meta_error"] = (
+                "malformed plan metadata: " + _browser_safe_diagnostic(exc)
+            )
     return evidence
 
 
-def _manifest_payload(manifest) -> dict:
+def _manifest_payload(manifest, project_id: str | None = None) -> dict:
     """Read-only, secret-free snapshot of a bound project manifest."""
     data = manifest.model_dump()
     stages = {}
@@ -656,15 +948,20 @@ def _manifest_payload(manifest) -> dict:
         status = getattr(result.status, "value", str(result.status))
         stages[name.upper()] = {
             "status": str(status).upper(),
-            "error": result.error,
+            "error": _browser_safe_diagnostic(result.error),
             "started_at": result.started_at,
             "completed_at": result.completed_at,
             "duration_seconds": result.duration_seconds,
         }
     # Config snapshots and the Flow project URL are deliberately omitted:
     # they are runtime transport detail, never operator inspection surface.
+    safe_project_id = project_id or manifest.project_id
+    artifact_payload = _artifact_payload(manifest, safe_project_id)
+    for artifact in artifact_payload.values():
+        if artifact["available"] and artifact["type"] == "Final video":
+            artifact["media_url"] = f"/api/projects/{safe_project_id}/media"
     return {
-        "project_id": manifest.project_id,
+        "project_id": safe_project_id,
         "topic": manifest.topic,
         "created_at": manifest.created_at,
         "updated_at": manifest.updated_at,
@@ -673,19 +970,63 @@ def _manifest_payload(manifest) -> dict:
         "dry_run": manifest.dry_run,
         "mock_mode": manifest.mock_mode,
         "stages": stages,
-        "scene_checkpoints": data.get("scene_checkpoints") or {},
+        "scene_checkpoints": {
+            str(scene_id): _redact_secrets(_safe_checkpoint_payload(checkpoint))
+            for scene_id, checkpoint in (data.get("scene_checkpoints") or {}).items()
+            if isinstance(checkpoint, dict)
+        },
+        "scene_checkpoint_rows": _scene_checkpoint_rows(
+            data.get("scene_checkpoints") or {},
+            safe_project_id,
+            manifest.scene_video_paths,
+        ),
         "production_binding": data.get("production_binding"),
         "publications": _publication_summary(data),
-        "artifacts": {
-            "content_plan_path": manifest.content_plan_path,
-            "voice_audio_path": manifest.voice_audio_path,
-            "voice_timing_path": manifest.voice_timing_path,
-            "scene_manifest_path": manifest.scene_manifest_path,
-            "scene_video_paths": list(manifest.scene_video_paths or []),
-            "captions_path": manifest.captions_path,
-            "final_video_path": manifest.final_video_path,
-        },
+        "artifacts": artifact_payload,
     }
+
+
+_CHECKPOINT_TRANSPORT_KEY_PATTERN = re.compile(
+    r"(url|uri|path|file|asset|source|endpoint|header|cookie|request|input|response)",
+    re.IGNORECASE,
+)
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"^[a-zA-Z]:[\\/]")
+
+
+def _unsafe_checkpoint_string(value: str) -> bool:
+    """Return true for remote URLs or absolute filesystem paths."""
+    text = value.strip()
+    return bool(
+        re.match(r"^(?:https?|wss?|ftp|file)://", text, re.IGNORECASE)
+        or _WINDOWS_ABSOLUTE_PATH.match(text)
+        or text.startswith(("/", "\\\\"))
+    )
+
+
+def _safe_checkpoint_payload(checkpoint: dict) -> dict:
+    """Keep diagnostic checkpoint evidence while removing transport/path data."""
+    if not isinstance(checkpoint, dict):
+        return {}
+    safe = {}
+    for key, value in checkpoint.items():
+        if _CHECKPOINT_TRANSPORT_KEY_PATTERN.search(str(key)):
+            continue
+        if isinstance(value, dict):
+            safe[key] = _safe_checkpoint_payload(value)
+        elif isinstance(value, list):
+            safe[key] = [
+                cleaned
+                for item in value
+                if not (isinstance(item, str) and _unsafe_checkpoint_string(item))
+                for cleaned in [
+                    _safe_checkpoint_payload(item) if isinstance(item, dict) else item
+                ]
+            ]
+        elif isinstance(value, str) and _unsafe_checkpoint_string(value):
+            continue
+        else:
+            safe[key] = value
+    return safe
 
 
 def _failure_details(manifest) -> list:
@@ -696,27 +1037,77 @@ def _failure_details(manifest) -> list:
         if str(status).upper() == "FAILED":
             failing.append({
                 "stage": name.upper(),
-                "error": result.error,
+                "error": _browser_safe_diagnostic(result.error),
                 "completed_at": result.completed_at,
             })
     return failing
 
 
-def _scene_checkpoint_rows(scene_checkpoints: dict) -> list:
-    """Table-friendly rows; the raw checkpoint dict stays available untouched."""
+def _scene_checkpoint_rows(
+    scene_checkpoints: dict,
+    project_id: str | None = None,
+    scene_video_paths=None,
+) -> list:
+    """Browser-safe scene evidence rows; transport URLs and raw paths stay server-side."""
     rows = []
-    for scene_id, checkpoint in sorted(scene_checkpoints.items()):
+
+    def scene_order(item):
+        """Preserve recorded scene order instead of lexicographic ID order."""
+        scene_id, checkpoint = item
+        if isinstance(checkpoint, dict):
+            for value in (
+                checkpoint.get("sequence"),
+                (checkpoint.get("checkpoint_evidence") or {}).get("sequence"),
+            ):
+                if isinstance(value, int) and value >= 1:
+                    return (0, value, str(scene_id))
+        match = re.search(r"(?:^|[_-])(\d+)$", str(scene_id))
+        if match:
+            return (0, int(match.group(1)), str(scene_id))
+        return (1, 0, str(scene_id))
+
+    for scene_id, checkpoint in sorted(scene_checkpoints.items(), key=scene_order):
         if not isinstance(checkpoint, dict):
             continue
         evidence = checkpoint.get("checkpoint_evidence") or {}
+        raw_path = (
+            checkpoint.get("video_path")
+            or checkpoint.get("file_path")
+            or evidence.get("video_path")
+            or evidence.get("file_path")
+        )
+        if not raw_path and scene_video_paths:
+            match = re.search(r"(?:^|[_-])(\d+)$", str(scene_id))
+            if match:
+                index = int(match.group(1)) - 1
+                if 0 <= index < len(scene_video_paths):
+                    raw_path = scene_video_paths[index]
+        status = str(checkpoint.get("status") or "").upper()
+        media_path, media_error = (None, "project context unavailable")
+        if project_id and raw_path:
+            media_path, media_error = _validated_scene_file(
+                PROJECTS_DIR / project_id, raw_path
+            )
+        if status == "FAILED":
+            artifact_state = "FAILED"
+        elif raw_path and media_path is not None and media_error is None:
+            artifact_state = "AVAILABLE"
+        elif raw_path:
+            artifact_state = "RECORDED BUT MISSING"
+        else:
+            artifact_state = "NOT GENERATED"
         rows.append({
             "scene_id": scene_id,
             "status": checkpoint.get("status"),
+            "artifact_state": artifact_state,
             "provider": checkpoint.get("provider") or evidence.get("provider"),
-            "job_id": checkpoint.get("job_id"),
-            "polling_url": checkpoint.get("polling_url"),
+            "job_id_present": bool(checkpoint.get("job_id") or evidence.get("job_id")),
             "generation_cost": checkpoint.get("generation_cost"),
-            "video_path": checkpoint.get("video_path") or evidence.get("video_path"),
+            "video_available": artifact_state == "AVAILABLE",
+            "media_url": (
+                f"/api/projects/{project_id}/scenes/{scene_id}/media"
+                if artifact_state == "AVAILABLE" and project_id else None
+            ),
             "updated_at": checkpoint.get("updated_at") or checkpoint.get("timestamp"),
         })
     return rows
@@ -754,6 +1145,7 @@ def productions_index_payload():
             "plan_version": production.plan_version,
             "created_at": production.created_at,
             "revised_at": production.revised_at,
+            "run": dict(_production_runs.get(production.production_id) or {"running": False}),
             "sample": False,
         }
         try:
@@ -765,7 +1157,10 @@ def productions_index_payload():
                 "progress derivation failed truthfully for %s: %s", production_id, exc
             )
             item["counts"] = None
-            item["error"] = f"progress derivation failed: {type(exc).__name__}: {exc}"
+            item["error"] = (
+                "progress derivation failed: "
+                f"{type(exc).__name__}: {_browser_safe_diagnostic(exc)}"
+            )
         items.append(item)
     return 200, _redact_secrets(items)
 
@@ -873,19 +1268,22 @@ def unit_detail_payload(production_id: str, unit_id: str):
         item.unit_id: _unit_progress_dict(item) for item in report.units
     }
     bound = bindings.get(unit_id)
-    manifest_payload = _manifest_payload(bound.manifest) if bound else None
+    manifest_payload = _manifest_payload(bound.manifest, bound.directory_id) if bound else None
     payload = {
         "production_id": production_id,
         "production_title": production.title,
         "plan_version": production.plan_version,
         "unit_intent": _unit_intent(unit),
         "execution": progress_by_id.get(unit_id),
+        "run": dict(_production_runs.get(production_id) or {"running": False}),
         "blocking_units": _blocking_units(unit, progress_by_id),
         "plan_evidence": _plan_evidence(production_id, unit_id),
         "bound_project": manifest_payload,
         "scene_checkpoint_rows": (
-            _scene_checkpoint_rows(manifest_payload["scene_checkpoints"])
-            if manifest_payload else []
+            _scene_checkpoint_rows(
+                bound.manifest.scene_checkpoints, bound.directory_id
+            )
+            if bound else []
         ),
         "failure_details": _failure_details(bound.manifest) if bound else [],
         "sample": False,
@@ -934,11 +1332,33 @@ def unit_reconciliation_payload(production_id: str, unit_id: str):
         "production_id": production_id,
         "unit_id": unit_id,
         "project_id": bound.directory_id,
-        "reconciliation": report.to_dict(),
+        "reconciliation": _reconciliation_summary(report),
         "persisted": False,
         "sample": False,
     }
     return 200, _redact_secrets(payload)
+
+
+def _reconciliation_summary(report) -> dict:
+    """Return only path-free reconciliation evidence consumed by Unit Detail."""
+    data = report.to_dict()
+
+    def status_for(name):
+        evidence = data.get(name) or {}
+        return {"status": evidence.get("status")} if isinstance(evidence, dict) else {}
+
+    return {
+        "verdict": data.get("verdict"),
+        "reasons": [
+            _browser_safe_diagnostic(reason) for reason in (data.get("reasons") or [])
+        ],
+        "content": status_for("content"),
+        "voice": status_for("voice"),
+        "scenes": status_for("scenes"),
+        "captions": status_for("captions"),
+        "assembly": status_for("assembly"),
+        "persisted": False,
+    }
 
 
 def production_command_payload(
@@ -1072,7 +1492,7 @@ def production_command_payload(
                 _production_runs[production_id].update({
                     "running": False,
                     "finished_at": datetime.now().isoformat(),
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": f"{type(exc).__name__}: {_browser_safe_diagnostic(exc)}",
                 })
 
     threading.Thread(target=worker, daemon=True).start()
@@ -1276,9 +1696,21 @@ class AVMHandler(BaseHTTPRequestHandler):
             match = re.match(r"^/api/projects/([^/]+)/media$", path)
             if match:
                 return self._serve_media(match.group(1))
+            match = re.match(r"^/api/projects/([^/]+)/scenes/([^/]+)/media$", path)
+            if match:
+                return self._serve_scene_media(match.group(1), match.group(2))
             match = re.match(r"^/api/projects/([^/]+)/?$", path)
             if match:
                 detail = project_detail(match.group(1))
+                if detail and detail.get("binding_error") == "PROJECT_BINDING_INVALID":
+                    return self._json(400, {
+                        "error": "PROJECT_BINDING_INVALID",
+                        "message": (
+                            "Project binding evidence is malformed or does not "
+                            "match the requested project identity. No relationship "
+                            "was inferred."
+                        ),
+                    })
                 if detail:
                     return self._json(200, detail)
                 return self._json(404, {"detail": "not found"})
@@ -1292,6 +1724,11 @@ class AVMHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
+            if re.match(r"^/api/projects/[^/]+/scenes/[^/]+/media$", path):
+                return self._json(405, {
+                    "error": "METHOD_NOT_ALLOWED",
+                    "message": "Scene media delivery is GET-only.",
+                })
             match = re.match(r"^/api/platforms/(youtube|tiktok)/connect$", path)
             if match:
                 status, payload = _start_connect(match.group(1))
@@ -1322,7 +1759,10 @@ class AVMHandler(BaseHTTPRequestHandler):
             logger.exception("POST %s failed", path)
             return self._json(500, {
                 "error": "INTERNAL_ERROR",
-                "message": f"unexpected server error: {type(exc).__name__}: {exc}",
+                "message": (
+                    "unexpected server error: "
+                    f"{type(exc).__name__}: {_browser_safe_diagnostic(exc)}"
+                ),
                 "guidance": (
                     "The command was not retried. Check the engine log for "
                     "the full traceback before retrying manually."
@@ -1354,6 +1794,64 @@ class AVMHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
         with open(media, "rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 256, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+    def _serve_scene_media(self, project_id: str, scene_id: str):
+        """Serve only the authoritative, root-confined media for one scene."""
+        media, error = _scene_media_path(project_id, scene_id)
+        if media is None:
+            status = 404 if error in {
+                "PROJECT_NOT_FOUND", "SCENE_NOT_FOUND", "SCENE_MEDIA_NOT_GENERATED",
+                "SCENE_MEDIA_MISSING"
+            } else 400
+            return self._json(status, {
+                "error": error or "SCENE_MEDIA_UNAVAILABLE",
+                "message": "Scene media is unavailable; no file was served.",
+            })
+        size = media.stat().st_size
+        range_header = self.headers.get("Range", "")
+        start, end = 0, size - 1
+        if range_header:
+            if not range_header.startswith("bytes="):
+                return self._json(416, {"error": "INVALID_RANGE", "message": "Unsupported byte range."})
+            value = range_header[6:].split(",", 1)[0].strip()
+            parts = value.split("-", 1)
+            try:
+                if len(parts) != 2 or (not parts[0] and not parts[1]):
+                    raise ValueError
+                if parts[0]:
+                    start = int(parts[0])
+                    end = int(parts[1]) if parts[1] else size - 1
+                else:
+                    suffix_length = int(parts[1])
+                    if suffix_length <= 0:
+                        raise ValueError
+                    start = max(0, size - suffix_length)
+                    end = size - 1
+                if start < 0 or start >= size or end < start:
+                    raise ValueError
+                end = min(end, size - 1)
+            except (TypeError, ValueError):
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+        length = end - start + 1
+        self.send_response(206 if range_header else 200)
+        self.send_header("Content-Type", MIME[media.suffix.lower()])
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if range_header:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with media.open("rb") as handle:
             handle.seek(start)
             remaining = length
             while remaining > 0:

@@ -37,9 +37,11 @@ window.App = (function () {
 
   function buildNav(activeView) {
     const nav = document.getElementById("nav");
+    const navView = activeView === "production" || activeView === "unit"
+      ? "productions" : activeView === "project" ? "projects" : activeView;
     nav.innerHTML = NAV.map(function (item) {
       if (item.section) return '<div class="nav-section">' + item.section + "</div>";
-      const cls = item.view === activeView ? " active" : "";
+      const cls = item.view === navView ? " active" : "";
       return '<a class="nav-item' + cls + '" href="' + item.route + '">' +
              ICONS[item.icon] + "<span>" + item.label + "</span></a>";
     }).join("");
@@ -64,8 +66,9 @@ window.App = (function () {
     setEnvChip();
 
     const viewEl = document.getElementById("view");
+    viewEl.setAttribute("aria-busy", "true");
     try {
-      viewEl.innerHTML = '<div class="empty"><span class="hint">Loading…</span></div>';
+      viewEl.innerHTML = '<div class="empty" role="status" aria-live="polite"><span class="hint">Loading…</span></div>';
       const html = await route.view().render(params);
       viewEl.innerHTML = html;
       document.title = route.view().title + " — Auto Video Maker";
@@ -74,6 +77,7 @@ window.App = (function () {
       viewEl.innerHTML = '<div class="card">' + C.emptyState("alert",
         "Something went wrong", String(err.message || err)) + "</div>";
     }
+    viewEl.setAttribute("aria-busy", "false");
     document.getElementById("sidebar").classList.remove("open");
   }
 
