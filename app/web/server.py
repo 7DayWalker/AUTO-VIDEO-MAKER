@@ -163,7 +163,10 @@ def projects_index() -> list:
             if isinstance(stage, dict)
         )
         items.append({
-            "project_id": manifest.get("project_id") or child.name,
+            # The execution directory ID is the unique routing identity (it is
+            # also ProjectManifest.production_binding.project_id).  The plan's
+            # project_id is evidence only and is not unique across projects.
+            "project_id": child.name,
             "directory_id": child.name,
             "topic": manifest.get("topic") or child.name,
             "created_at": manifest.get("created_at"),
@@ -805,12 +808,168 @@ def _intent_malformed(production_id: str, exc: Exception) -> dict:
 def _production_executor(production_id: str):
     """Build the Phase 10 ProductionExecutor — the ONLY execution engine."""
     from app.orchestrator.production_execution import ProductionExecutor
+    from app.orchestrator.models import OrchestratorConfig
+    from app.content.planner import ScenePlanner
 
-    return ProductionExecutor(
-        production_id,
-        productions_root=PRODUCTIONS_DIR,
-        projects_root=PROJECTS_DIR,
-    )
+    # Batch 1 local productions explicitly opt into the existing zero-cost
+    # scene path.  The legacy executor default is intentionally mock-enabled;
+    # passing a runtime config here prevents a product-created local
+    # production from silently becoming a placeholder run.  Content planning
+    # remains deterministic and offline through the existing mock planner; the
+    # visual stage is still real local ImageMotion/FFmpeg execution.
+    from app.production.storage import load_production
+
+    production = load_production(production_id, root=PRODUCTIONS_DIR)
+    local_units = [
+        unit for unit in production.units
+        if unit.provider_intent in {"image_motion", "local_asset"}
+    ]
+    base_config = None
+    planner_factory = None
+    if local_units and len(local_units) == len(production.units):
+        base_config = OrchestratorConfig(
+            topic=production.title,
+            mock_mode=False,
+            visual_mode="local",
+            visual_default_provider="image_motion",
+            image_source="fixture",
+            voice_provider="mock",
+        )
+        planner_factory = lambda: ScenePlanner(mock_mode=True)
+
+    kwargs = {
+        "productions_root": PRODUCTIONS_DIR,
+        "projects_root": PROJECTS_DIR,
+    }
+    if base_config is not None:
+        kwargs["base_config"] = base_config
+        kwargs["planner_factory"] = planner_factory
+    return ProductionExecutor(production_id, **kwargs)
+
+
+def create_production_payload(body: dict):
+    """Create one durable, local-first Single Video production intent.
+
+    This is deliberately an intent-only boundary.  It allocates and persists
+    ``Production``/``ProductionUnit`` through the Phase 9 storage mechanism;
+    project creation and execution remain owned by Phase 10's executor and
+    are never triggered as a side effect of creation.
+    """
+    from app.production.identity import generate_production_id
+    from app.production.models import Production, ProductionCommand, ProductionUnit
+    from app.production.storage import save_new_production
+
+    if not isinstance(body, dict):
+        return 400, {
+            "error": "INVALID_REQUEST",
+            "message": "Creation request must be a JSON object.",
+        }
+
+    def text(name: str, *, required: bool = False, maximum: int = 500) -> str:
+        value = body.get(name, "")
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be text")
+        value = value.strip()
+        if required and not value:
+            raise ValueError(f"{name} is required")
+        if len(value) > maximum:
+            raise ValueError(f"{name} must be {maximum} characters or fewer")
+        if "\x00" in value:
+            raise ValueError(f"{name} contains an invalid character")
+        return value
+
+    try:
+        mode = text("mode", required=True, maximum=32).lower()
+        creation_method = text("creation_method", required=True, maximum=32).lower()
+        if mode != "single_video":
+            raise ValueError("Batch 1 supports only mode='single_video'")
+        if creation_method != "local":
+            raise ValueError("Batch 1 supports only creation_method='local'")
+
+        title = text("title", maximum=200)
+        brief = text("brief", maximum=500)
+        title = title or brief
+        if len(title) < 3:
+            raise ValueError("title or brief must contain at least 3 characters")
+        if not brief:
+            brief = title
+
+        output_intent = text("output_intent", required=True, maximum=32).lower()
+        if output_intent not in {"youtube_shorts", "tiktok"}:
+            raise ValueError("output_intent must be youtube_shorts or tiktok")
+
+        duration = body.get("target_duration", 30)
+        scenes = body.get("scene_count", 6)
+        if isinstance(duration, bool) or not isinstance(duration, int) or not 10 <= duration <= 180:
+            raise ValueError("target_duration must be an integer from 10 to 180 seconds")
+        if isinstance(scenes, bool) or not isinstance(scenes, int) or not 2 <= scenes <= 20:
+            raise ValueError("scene_count must be an integer from 2 to 20")
+
+        tone = text("tone", maximum=120) or "curious and cinematic"
+        unit_id = "unit-001"
+        issued_at = datetime.now().isoformat()
+        production_id = generate_production_id(title, productions_dir=PRODUCTIONS_DIR)
+        production = Production(
+            production_id=production_id,
+            title=title,
+            command=ProductionCommand(
+                text=brief,
+                workload_shape="single_video",
+                intended_unit_count=1,
+                explicit_constraints={
+                    "mode": "single_video",
+                    "output_intent": output_intent,
+                    "target_duration": duration,
+                    "scene_count": scenes,
+                    "creation_method": "local",
+                    "cost_class": "local_free",
+                },
+                creation_context={"source": "web_create_video"},
+                issued_at=issued_at,
+            ),
+            units=[
+                ProductionUnit(
+                    unit_id=unit_id,
+                    ordinal=1,
+                    unit_type="standalone_video",
+                    title=title,
+                    description=brief,
+                    premise=brief,
+                    provider_intent="image_motion",
+                    content_intent={
+                        "topic_override": brief,
+                        "target_duration": duration,
+                        "platform": output_intent,
+                        "tone": tone,
+                        "style": "curious and cinematic",
+                        "number_of_scenes": scenes,
+                    },
+                )
+            ],
+            created_at=issued_at,
+        )
+        save_new_production(production, root=PRODUCTIONS_DIR)
+    except ValueError as exc:
+        return 400, {
+            "error": "INVALID_CREATION_REQUEST",
+            "message": str(exc),
+        }
+    except Exception as exc:
+        logger.exception("Durable production creation failed")
+        return 500, {
+            "error": "PRODUCTION_CREATION_FAILED",
+            "message": f"Could not persist production intent: {type(exc).__name__}.",
+        }
+
+    return 201, _redact_secrets({
+        "status": "created",
+        "production_id": production.production_id,
+        "title": production.title,
+        "unit_count": len(production.units),
+        "creation_method": "local",
+        "cost_class": "local_free",
+        "message": "Production intent created. Execute it explicitly from Production Detail.",
+    })
 
 
 def _production_or_none(production_id: str):
@@ -1616,9 +1775,17 @@ class AVMHandler(BaseHTTPRequestHandler):
         logger.debug("%s %s", self.address_string(), fmt % args)
 
     def _request_json_body(self) -> dict:
-        """Best-effort JSON object body ({} when absent or malformed)."""
+        """Best-effort JSON object body ({} when absent or malformed).
+
+        Batch 1 hardening: refuse unbounded reads.  Creation and publish
+        payloads are tiny; anything beyond 1 MB is rejected rather than
+        read into memory.
+        """
+        max_body_bytes = 1_000_000
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length > max_body_bytes:
+                return {}
             raw = self.rfile.read(length) if length > 0 else b""
             if not raw:
                 return {}
@@ -1662,6 +1829,8 @@ class AVMHandler(BaseHTTPRequestHandler):
         return self._json(404, {"detail": "not found"})
 
     def _productions_post(self, path: str):
+        if re.match(r"^/api/productions/?$", path):
+            return self._creation_post()
         match = re.match(r"^/api/productions/([^/]+)/(execute|resume)/?$", path)
         if match:
             status, payload = production_command_payload(
@@ -1678,6 +1847,10 @@ class AVMHandler(BaseHTTPRequestHandler):
             )
             return self._json(status, payload)
         return self._json(404, {"detail": "not found"})
+
+    def _creation_post(self):
+        status, payload = create_production_payload(self._request_json_body())
+        return self._json(status, payload)
 
     # -- routing ----------------------------------------------------------
     def do_GET(self):

@@ -1,103 +1,100 @@
-/* AUTO VIDEO MAKER — Create Video wizard
-   Options mirror REAL engine capabilities (produce.py / OrchestratorConfig):
-   topic, duration 10–180s, scene count, voice, target format.
-   Generation itself is executed by the local production engine — the UI
-   prepares a precise command and never fabricates a "generated" result. */
+/* AUTO VIDEO MAKER — V1 durable creation entry point.
+   Creation writes Production intent only. Execution remains an explicit,
+   confirmed Command Center action delegated to ProductionExecutor. */
 window.VIEWS = window.VIEWS || {};
 
 VIEWS.create = {
   title: "Create Video",
   step: 1,
-  data: { topic: "", notes: "", duration: 30, scenes: 6, voice: "en-US-GuyNeural", format: "youtube_shorts" },
+  data: {
+    title: "", brief: "", outputIntent: "youtube_shorts",
+    duration: 30, scenes: 6, tone: "curious and cinematic",
+    created: null, error: ""
+  },
 
   render: function () {
-    const d = VIEWS.create.data;
-    const tabs = [1, 2, 3].map(function (n) {
-      const names = ["Content", "Video settings", "Generate"];
-      const cls = VIEWS.create.step === n ? " active" : VIEWS.create.step > n ? " done" : "";
+    var d = VIEWS.create.data;
+    if (d.created) return VIEWS.create.renderSuccess();
+    var tabs = [1, 2].map(function (n) {
+      var labels = ["Describe", "Review & create"];
+      var cls = VIEWS.create.step === n ? " active" : VIEWS.create.step > n ? " done" : "";
       return '<span class="step-tab' + cls + '"><span class="n">' +
-             (VIEWS.create.step > n ? "✓" : n) + "</span>" + names[n - 1] + "</span>";
+        (VIEWS.create.step > n ? "✓" : n) + "</span>" + labels[n - 1] + "</span>";
     });
-    let body;
-    if (VIEWS.create.step === 1) {
-      body =
-        '<div class="field"><label>Topic</label>' +
-          '<input class="input" id="f-topic" placeholder="e.g. 5 strange facts about the ocean" value="' + COMPONENTS.esc(d.topic) + '">' +
-          '<span class="hint">The AI script planner turns this into scenes and narration.</span></div>' +
-        '<div class="field"><label>Optional instructions</label>' +
-          '<textarea class="input" id="f-notes" placeholder="Tone, audience, must-include points…">' + COMPONENTS.esc(d.notes) + "</textarea></div>";
-    } else if (VIEWS.create.step === 2) {
-      body =
-        '<div class="field"><label>Target duration</label><div class="choice-grid" id="f-duration">' +
-          [15, 30, 45, 60].map(function (v) {
-            return '<button type="button" class="choice' + (d.duration === v ? " selected" : "") + '" data-v="' + v + '">' +
-                   '<div class="c-title">' + v + " seconds</div><div class=\"c-sub\">Narration-paced</div></button>";
-          }).join("") + "</div></div>" +
-        '<div class="field"><label>Scenes</label><div class="choice-grid" id="f-scenes">' +
-          [4, 6, 8].map(function (v) {
-            return '<button type="button" class="choice' + (d.scenes === v ? " selected" : "") + '" data-v="' + v + '">' +
-                   '<div class="c-title">' + v + " scenes</div><div class=\"c-sub\">Visual beats</div></button>";
-          }).join("") + "</div></div>" +
-        '<div class="field"><label>Voice</label><div class="choice-grid" id="f-voice">' +
-          [["en-US-GuyNeural", "Guy · US English"], ["en-US-JennyNeural", "Jenny · US English"],
-           ["en-GB-RyanNeural", "Ryan · UK English"]].map(function (v) {
-            return '<button type="button" class="choice' + (d.voice === v[0] ? " selected" : "") + '" data-v="' + v[0] + '">' +
-                   '<div class="c-title">' + ICONS.mic + " " + COMPONENTS.esc(v[1]) + "</div></button>";
-          }).join("") + "</div></div>" +
-        '<div class="field"><label>Format</label><div class="choice-grid" id="f-format">' +
-          [["youtube_shorts", "youtube", "YouTube Shorts", "9:16 vertical"],
-           ["tiktok", "tiktok", "TikTok", "9:16 vertical"],
-           ["instagram_reels", "instagram", "Instagram Reels", "Planned"]].map(function (v) {
-            return '<button type="button" class="choice' + (d.format === v[0] ? " selected" : "") +
-                   '" data-v="' + v[0] + '"' + (v[0] === "instagram_reels" ? " disabled" : "") + ">" +
-                   '<div class="c-title">' + ICONS[v[1]] + " " + v[2] + "</div>" +
-                   '<div class="c-sub">' + v[3] + "</div></button>";
-          }).join("") + "</div></div>";
-    } else {
-      return VIEWS.create.renderStep3(tabs);
-    }
+    var body = VIEWS.create.step === 1 ? VIEWS.create.renderDescribe() : VIEWS.create.renderReview();
     return VIEWS.create.frame(tabs, body);
   },
 
   frame: function (tabs, body) {
-    return (
-      '<div class="page-head"><div><h1 class="page-title">Create Video</h1>' +
-      '<p class="page-sub">From idea to publish-ready short-form video.</p></div></div>' +
-      '<div class="steps">' + tabs.join('<span class="step-sep"></span>') + "</div>" +
-      '<div class="card card-pad" style="max-width:760px">' + body + "</div>"
-    );
+    return '<div class="page-head"><div><p class="eyebrow">Local-first studio</p><h1 class="page-title">Create Video</h1>' +
+      '<p class="page-sub">Turn one idea into a durable production. Start with a single video and keep execution under your control.</p></div></div>' +
+      '<div class="steps">' + tabs.join('<span class="step-sep"></span>') + '</div>' +
+      '<div class="card card-pad creation-card">' + body + '</div>';
   },
 
-  renderStep3: function (tabs) {
-    const d = VIEWS.create.data;
-    const cmd = 'python produce.py --topic "' + d.topic.replace(/"/g, "") + '"' +
-                " --duration " + d.duration + " --scenes " + d.scenes +
-                " --voice " + d.voice + " --platform " + d.format +
-                " --flow-project-url <your-flow-project-url>";
-    const body =
-      '<p style="margin-bottom:12px;color:var(--text-muted)">Review your project, then generate it with the local production engine. ' +
-      "Generation runs on this machine using your configured AI providers and video-creation credits.</p>" +
-      '<div class="meta-list card card-pad" style="margin-bottom:16px">' +
-        "<div class=\"meta-row\"><div class='meta-key'>Topic</div><div>" + COMPONENTS.esc(d.topic || "—") + "</div></div>" +
-        "<div class=\"meta-row\"><div class='meta-key'>Length</div><div>" + d.duration + "s · " + d.scenes + " scenes</div></div>" +
-        "<div class=\"meta-row\"><div class='meta-key'>Voice</div><div>" + COMPONENTS.esc(d.voice) + "</div></div>" +
-        "<div class=\"meta-row\"><div class='meta-key'>Format</div><div>" + COMPONENTS.esc(d.format) + "</div></div>" +
-      "</div>" +
-      '<div class="field"><label>Engine command</label><div class="code-line" id="engine-cmd">' +
-        COMPONENTS.esc(cmd) + "</div>" +
-      '<span class="hint">Copy this into a terminal to run the real pipeline. Completed projects appear under Projects.</span></div>';
-    return (
-      '<div class="page-head"><div><h1 class="page-title">Create Video</h1>' +
-      '<p class="page-sub">From idea to publish-ready short-form video.</p></div></div>' +
-      '<div class="steps">' + tabs.join('<span class="step-sep"></span>') + "</div>" +
-      '<div class="card card-pad" style="max-width:760px">' + body +
-        '<div style="display:flex;justify-content:space-between;margin-top:22px">' +
-          '<button class="btn" data-step="back">Back</button>' +
-          '<button class="btn btn-primary" data-step="copy">' + ICONS.copy + " Copy command</button>" +
-        "</div>" +
-      "</div>"
-    );
+  renderDescribe: function () {
+    var d = VIEWS.create.data;
+    return '<div class="creation-intro"><span class="creation-icon">' + ICONS.create + '</span><div><h2>Single Video</h2><p class="hint">One Production · one production unit · one final video.</p></div></div>' +
+      '<div class="field"><label for="f-title">Working title</label><input class="input" id="f-title" maxlength="200" placeholder="e.g. The hidden life of city trees" value="' + COMPONENTS.esc(d.title) + '"><span class="hint">This becomes the name of your durable Production.</span></div>' +
+      '<div class="field"><label for="f-brief">Creative brief</label><textarea class="input" id="f-brief" maxlength="500" rows="4" placeholder="What should this video explain, show, or make people feel?">' + COMPONENTS.esc(d.brief) + '</textarea><span class="hint">Your brief is saved durably with the Production. Batch 1 local execution plans content offline with the deterministic planner; brief-driven AI planning arrives in a later batch.</span></div>' +
+      '<div class="field"><label>Output intent</label><div class="choice-grid compact" id="f-output">' +
+        [['youtube_shorts', 'YouTube Shorts', '9:16 vertical'], ['tiktok', 'TikTok', '9:16 vertical']].map(function (item) {
+          return '<button type="button" class="choice' + (d.outputIntent === item[0] ? ' selected' : '') + '" data-output="' + item[0] + '"><div class="c-title">' + COMPONENTS.esc(item[1]) + '</div><div class="c-sub">' + COMPONENTS.esc(item[2]) + '</div></button>';
+        }).join('') + '</div></div>' +
+      '<div class="creation-inline-fields"><div class="field"><label for="f-duration">Target duration</label><select class="input" id="f-duration"><option value="15"' + (d.duration === 15 ? ' selected' : '') + '>15 seconds</option><option value="30"' + (d.duration === 30 ? ' selected' : '') + '>30 seconds</option><option value="45"' + (d.duration === 45 ? ' selected' : '') + '>45 seconds</option><option value="60"' + (d.duration === 60 ? ' selected' : '') + '>60 seconds</option></select></div><div class="field"><label for="f-scenes">Scene count</label><select class="input" id="f-scenes"><option value="4"' + (d.scenes === 4 ? ' selected' : '') + '>4 visual beats</option><option value="6"' + (d.scenes === 6 ? ' selected' : '') + '>6 visual beats</option><option value="8"' + (d.scenes === 8 ? ' selected' : '') + '>8 visual beats</option></select></div></div>' +
+      '<div class="creation-actions"><span class="hint">You can adjust details before creating the Production.</span><button class="btn btn-primary" data-create-step="next">Continue</button></div>';
+  },
+
+  renderReview: function () {
+    var d = VIEWS.create.data;
+    var title = d.title.trim() || d.brief.trim();
+    return '<div class="creation-intro"><span class="creation-icon">' + ICONS.sparkle + '</span><div><h2>Ready to create</h2><p class="hint">Review the intent that will be saved. Nothing executes until you explicitly choose Execute.</p></div></div>' +
+      '<div class="local-choice"><div><strong>Local creation</strong><p>Lowest-cost path. Uses local assets, ImageMotion, and FFmpeg on this machine.</p></div><span class="badge ok">Local · free</span></div>' +
+      '<dl class="detail-list creation-review"><div><dt>Title</dt><dd>' + COMPONENTS.esc(title || '—') + '</dd></div><div><dt>Output</dt><dd>' + COMPONENTS.esc(d.outputIntent === 'tiktok' ? 'TikTok' : 'YouTube Shorts') + '</dd></div><div><dt>Target duration</dt><dd>' + d.duration + ' seconds</dd></div><div><dt>Scenes</dt><dd>' + d.scenes + ' visual beats</dd></div><div><dt>Brief</dt><dd>' + COMPONENTS.esc(d.brief.trim() || title || '—') + '</dd></div></dl>' +
+      '<p class="truth-note">Creation saves durable intent only. The resulting Production will appear in the Command Center with an explicit Execute action.</p>' +
+      (d.error ? '<p class="inline-error" role="alert">' + COMPONENTS.esc(d.error) + '</p>' : '') +
+      '<div class="creation-actions"><button class="btn" data-create-step="back">Back</button><button class="btn btn-primary" data-create-submit>' + ICONS.create + ' Create Production</button></div>';
+  },
+
+  renderSuccess: function () {
+    var created = VIEWS.create.data.created;
+    return '<div class="creation-success"><div class="success-mark">' + ICONS.check + '</div><p class="eyebrow">Production intent saved</p><h2>' + COMPONENTS.esc(created.title) + '</h2><p class="page-sub">Your Single Video Production is durable and ready for an explicit local execution command.</p><div class="local-choice"><div><strong>Local creation selected</strong><p>No paid provider was called. Execution will use the existing local production path.</p></div><span class="badge ok">Local · free</span></div><div class="creation-actions"><a class="btn btn-primary" href="#/productions/' + encodeURIComponent(created.production_id) + '">Open Production</a><a class="btn" href="#/productions">Command Center</a></div></div>';
+  },
+
+  mount: function () {
+    var d = VIEWS.create.data;
+    if (d.created) return;
+    var title = document.getElementById('f-title');
+    var brief = document.getElementById('f-brief');
+    var duration = document.getElementById('f-duration');
+    var scenes = document.getElementById('f-scenes');
+    if (title) title.addEventListener('input', function () { d.title = title.value; });
+    if (brief) brief.addEventListener('input', function () { d.brief = brief.value; });
+    if (duration) duration.addEventListener('change', function () { d.duration = Number(duration.value); });
+    if (scenes) scenes.addEventListener('change', function () { d.scenes = Number(scenes.value); });
+    document.querySelectorAll('[data-output]').forEach(function (button) {
+      button.addEventListener('click', function () { d.outputIntent = button.getAttribute('data-output'); App.refresh(); });
+    });
+    document.querySelectorAll('[data-create-step]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        if (button.getAttribute('data-create-step') === 'back') { d.error = ''; VIEWS.create.step = 1; App.refresh(); return; }
+        if (!d.title.trim() && !d.brief.trim()) { d.error = 'Add a working title or creative brief to continue.'; App.refresh(); return; }
+        d.error = ''; VIEWS.create.step = 2; App.refresh();
+      });
+    });
+    var submit = document.querySelector('[data-create-submit]');
+    if (submit) submit.addEventListener('click', function () {
+      if (!API.live) { d.error = 'The local engine is offline. Start it with: python -m app.web.server, then try again.'; App.refresh(); return; }
+      submit.disabled = true;
+      API.createProduction({
+        mode: 'single_video', creation_method: 'local', title: d.title.trim(),
+        brief: d.brief.trim(), output_intent: d.outputIntent,
+        target_duration: d.duration, scene_count: d.scenes, tone: d.tone
+      }).then(function (created) {
+        d.created = created; VIEWS.create.step = 1; App.refresh();
+      }).catch(function (error) {
+        d.error = error.message || String(error); App.refresh();
+      });
+    });
   }
 };
-
-

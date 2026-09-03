@@ -13,7 +13,9 @@ Features:
 
 import json
 import logging
+import os
 import shutil
+import math
 import hashlib
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +35,7 @@ from app.assembly.audio_contract import (
     DEFAULT_AUDIO_POLICY,
     normalize_audio_policy,
 )
+from app.assembly.ffmpeg import probe_media
 from app.orchestrator.captions import generate_srt_from_timing, validate_srt_file
 from app.voice.validator import validate_audio_file
 from app.orchestrator.exceptions import (
@@ -393,8 +396,15 @@ class ProductionOrchestrator:
     def _save_manifest(self) -> None:
         """Save manifest to disk."""
         manifest_path = self.project_dir / "manifest.json"
-        with open(manifest_path, "w", encoding="utf-8") as f:
+        # Atomic write (temp file + os.replace): concurrent read-only
+        # inspectors (Command Center polling, ProductionExecutor binding
+        # discovery) must never observe a torn or empty manifest.  This is
+        # the repository's proven pattern (app/production/storage.py,
+        # app/orchestrator/assets.py).
+        temporary = manifest_path.with_suffix(".json.tmp")
+        with open(temporary, "w", encoding="utf-8") as f:
             json.dump(self.manifest.to_dict(), f, indent=2, ensure_ascii=False)
+        os.replace(temporary, manifest_path)
         logger.debug(f"Saved manifest: {manifest_path}")
     
     def _execute_content_stage(self) -> None:
@@ -575,7 +585,7 @@ class ProductionOrchestrator:
             logger.info(f"Scenes: {len(plan.scenes)}")
             
             # Select provider
-            if self.config.mock_mode:
+            if self.config.mock_mode or self.config.voice_provider == "mock":
                 provider = MockVoiceProvider()
                 logger.info("Provider: MOCK")
             else:
@@ -1740,6 +1750,26 @@ class ProductionOrchestrator:
         )
 
         scene_paths: list = []
+        # Local still-image motion has no provider-native timing to negotiate.
+        # Keep the immutable plan untouched, but extend generated local scene
+        # clips proportionally when validated narration would otherwise be
+        # truncated by assembly's existing audio-duration guard.
+        local_duration_scale = 1.0
+        if self.manifest.voice_audio_path and Path(self.manifest.voice_audio_path).is_file():
+            try:
+                voice_duration = probe_media(Path(self.manifest.voice_audio_path)).duration
+                planned_duration = sum(float(scene.estimated_duration) for scene in plan.scenes)
+                if planned_duration > 0 and voice_duration > planned_duration:
+                    local_duration_scale = voice_duration / planned_duration
+                    logger.info(
+                        "Extending local motion timeline %.2fx to cover narration "
+                        "(%.2fs over %.2fs); plan intent remains unchanged",
+                        local_duration_scale,
+                        voice_duration,
+                        planned_duration,
+                    )
+            except Exception as exc:  # noqa: BLE001 - normal validation reports later
+                logger.warning("Could not inspect narration for local timing: %s", exc)
 
         for scene in sorted(plan.scenes, key=lambda s: s.sequence):
             if only_scenes is not None and scene.id not in only_scenes:
@@ -1780,6 +1810,18 @@ class ProductionOrchestrator:
                 scene_config=self.config.to_scene_config_dict(),
                 aspect_ratio=self.config.scene_aspect_ratio,
             )
+            # Batch 1: proportional extension is a LOCAL still-image motion
+            # behavior only.  Remote/billable providers that share this
+            # boundary pass (gemini_omni, external_video) must never receive
+            # a runtime duration override; their generation length stays
+            # plan-backed exactly as the operator configured it.
+            if (
+                local_duration_scale > 1.0
+                and chosen_provider in {"image_motion", "local_asset"}
+            ):
+                request.config.duration = max(
+                    1, math.ceil(float(scene.estimated_duration) * local_duration_scale)
+                )
 
             def persist_local_checkpoint(update: Dict[str, Any]) -> None:
                 update = {**update, "provider": chosen_provider}

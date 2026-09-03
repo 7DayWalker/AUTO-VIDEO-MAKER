@@ -110,6 +110,15 @@ window.API = (function () {
       return jsonFetch("/api/productions/" + encodeURIComponent(id) + "/progress");
     },
 
+    /** Create durable Production intent; execution remains an explicit command. */
+    createProduction(payload) {
+      return jsonFetch("/api/productions", {
+        method: "POST",
+        headers: { "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    },
+
     getUnit(productionId, unitId) {
       return jsonFetch(
         "/api/productions/" + encodeURIComponent(productionId) +

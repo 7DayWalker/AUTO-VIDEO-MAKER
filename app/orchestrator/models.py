@@ -370,6 +370,10 @@ class OrchestratorConfig(BaseModel):
     voice_rate: str = Field(default="+0%")
     voice_pitch: str = Field(default="+0Hz")
     voice_volume: str = Field(default="+0%")
+    # Local-first product runs may use the existing synthetic voice provider so
+    # validation never requires an external TTS network call.  Edge TTS remains
+    # the legacy default for explicitly configured non-local runs.
+    voice_provider: str = Field(default="edge_tts")
     
     # Scene settings
     scene_model: str = Field(default="Veo 3.1 - Lite")
