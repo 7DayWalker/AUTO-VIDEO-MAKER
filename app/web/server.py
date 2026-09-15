@@ -982,6 +982,7 @@ def create_production_payload(body: dict):
         # rerouted, never defaulted silently).
         from app.production.routes import (
             PRODUCTION_ROUTES,
+            creation_cost_class,
             route_id_for_legacy_strategy,
         )
 
@@ -1019,7 +1020,13 @@ def create_production_payload(body: dict):
                     "target_duration": duration,
                     "scene_count": scenes,
                     "creation_method": "local",
-                    "cost_class": "local_free",
+                    # Track 1 hardening (defect D3): truthful creation-time
+                    # cost CLASSIFICATION of the selected path — never a
+                    # monetary amount, never accounting (that truth already
+                    # lives in the execution provenance/accounting records).
+                    "cost_class": creation_cost_class(
+                        route=route, generation_strategy=generation_strategy
+                    ),
                 },
                 creation_context={"source": "web_create_video"},
                 issued_at=issued_at,
@@ -1075,7 +1082,12 @@ def create_production_payload(body: dict):
         "creation_method": "local",
         "generation_strategy": production.generation_strategy,
         "route": production.route,
-        "cost_class": "local_free",
+        # Track 1 hardening (defect D3): the response must never claim
+        # "local_free" for a billable production path.
+        "cost_class": creation_cost_class(
+            route=production.route,
+            generation_strategy=production.generation_strategy,
+        ),
         "message": "Production intent created. Execute it explicitly from Production Detail.",
     })
 

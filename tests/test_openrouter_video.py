@@ -210,12 +210,17 @@ def test_provider_registration_and_factory_are_generic():
 
 
 def test_provider_is_unavailable_without_api_key(monkeypatch, tmp_path):
+    # Track 1 hardening (defect D2): "no credential" means NEITHER env name is
+    # configured — the shared OPENROUTER_API_KEY (the LLM gateway's key) is a
+    # legitimate video-gateway credential now, so the test must isolate both.
     monkeypatch.delenv("AVM_OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     instance = OpenRouterVideoVisualProvider(tmp_path / "scenes")
     assert instance.is_available() is False
     result = instance.generate_scene(make_request())
     assert result.success is False
     assert "AVM_OPENROUTER_API_KEY" in result.error
+    assert "OPENROUTER_API_KEY" in result.error
 
 
 def test_catalog_parsing_preserves_capabilities_and_filters_non_video_entries():

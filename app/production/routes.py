@@ -334,6 +334,61 @@ def resolve_effective_route(
     )
 
 
+# ---------------------------------------------------------------------------
+# Creation-time cost CLASSIFICATION (truthful class, never accounting)
+# ---------------------------------------------------------------------------
+
+#: Creation-time cost classes for the SELECTED production path. This is a
+#: product-level classification of the path the user selected — never a
+#: monetary amount, never a billing record, and never provider accounting
+#: (actual execution cost truth lives in the Batch 1F/1H provenance and
+#: accounting records).
+COST_CLASS_LOCAL_FREE = "local_free"
+COST_CLASS_BILLABLE = "billable"
+
+#: The only generation strategy whose path is inherently free of billable AI
+#: generation. Everything else routes billable Alibaba/OpenRouter generation
+#: beneath the route (see ``LEGACY_GENERATION_STRATEGY_ROUTES`` overlays).
+_FREE_GENERATION_STRATEGIES = frozenset({"local"})
+
+
+def creation_cost_class(
+    *,
+    route: Optional[str] = None,
+    generation_strategy: Optional[str] = None,
+) -> str:
+    """Truthfully classify the selected production path's cost class.
+
+    Creation-time classification only (defect D3 hardening) — never a
+    monetary calculation and never a cost ledger:
+
+    - ``full_ai_video`` generates native AI motion video for every scene
+      (billable, regardless of the legacy strategy recorded beside it);
+    - any legacy strategy other than ``local`` routes billable AI generation
+      beneath the route (Alibaba images / Alibaba video via the exact
+      ``execution_overlays`` of the compatibility bridge);
+    - the plain ``local`` strategy is the local/free production path
+      (ImageMotion + FFmpeg + Edge TTS primitives).
+
+    Unrecognized inputs classify as BILLABLE (conservative: the creation
+    response must never claim ``local_free`` for a path it cannot identify).
+    The function stays total so response classification can never raise.
+    """
+    strategy = (generation_strategy or "").strip() or "local"
+    if route:
+        full_ai_video = route == ROUTE_FULL_AI_VIDEO
+    else:
+        try:
+            full_ai_video = (
+                route_id_for_legacy_strategy(strategy) == ROUTE_FULL_AI_VIDEO
+            )
+        except ValueError:
+            full_ai_video = False
+    if full_ai_video or strategy not in _FREE_GENERATION_STRATEGIES:
+        return COST_CLASS_BILLABLE
+    return COST_CLASS_LOCAL_FREE
+
+
 __all__ = [
     "ROUTE_LOCAL_AI_ASSISTED",
     "ROUTE_FULL_AI_VIDEO",
@@ -355,4 +410,7 @@ __all__ = [
     "ROUTE_SOURCE_LEGACY",
     "EffectiveRoute",
     "resolve_effective_route",
+    "COST_CLASS_LOCAL_FREE",
+    "COST_CLASS_BILLABLE",
+    "creation_cost_class",
 ]

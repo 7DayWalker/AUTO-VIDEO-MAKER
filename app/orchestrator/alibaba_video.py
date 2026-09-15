@@ -839,6 +839,9 @@ class FallbackVideoVisualProvider:
             if fallback_enabled is None
             else bool(fallback_enabled)
         )
+        # Track 1 hardening (defect D2): the enabled-but-unusable fallback
+        # warning is logged exactly once per wrapper instance.
+        self._fallback_warning_logged = False
 
     def _get_fallback(self) -> Optional[Any]:
         """Resolve the OpenRouter fallback provider lazily and safely.
@@ -854,13 +857,38 @@ class FallbackVideoVisualProvider:
             return self._fallback
         try:
             from app.orchestrator.openrouter_video import (
+                OPENROUTER_API_KEY_ENV,
+                OPENROUTER_SHARED_API_KEY_ENV,
                 OpenRouterVideoVisualProvider,
             )
 
             self._fallback = OpenRouterVideoVisualProvider(self.output_dir)
+            # Track 1 hardening (defect D2): a fallback that is configured as
+            # ENABLED but is not actually usable (e.g. no resolvable
+            # OpenRouter credential) is a deployment misconfiguration the
+            # operator must see. ONE warning per wrapper instance; env-var
+            # NAMES only — credential values are never logged.
+            if not self._fallback.is_available():
+                self._warn_unavailable_fallback(
+                    f"set {OPENROUTER_API_KEY_ENV} "
+                    f"(or {OPENROUTER_SHARED_API_KEY_ENV})"
+                )
         except Exception:  # noqa: BLE001 - a fallback must never break primary
             self._fallback = None
+            self._warn_unavailable_fallback("fallback construction failed")
         return self._fallback
+
+    def _warn_unavailable_fallback(self, hint: str) -> None:
+        """Log ONE truthful warning for an enabled-but-unusable fallback."""
+        if self._fallback_warning_logged:
+            return
+        self._fallback_warning_logged = True
+        logger.warning(
+            "video_fallback_unavailable provider=%s fallback=openrouter_video "
+            "enabled=true available=false hint=%s",
+            ALIBABA_VIDEO_PROVIDER,
+            hint,
+        )
 
     def resolve_asset(self, request: SceneGenerationRequest) -> Optional[Path]:
         return self._primary.resolve_asset(request)

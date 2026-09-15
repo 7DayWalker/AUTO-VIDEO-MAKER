@@ -39,6 +39,14 @@ OPENROUTER_VIDEO_PROVIDER = "openrouter_video"
 OPENROUTER_API_KEY_ENV = "AVM_OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL_ENV = "AVM_OPENROUTER_BASE_URL"
 OPENROUTER_MODEL_ENV = "AVM_OPENROUTER_MODEL"
+# Track 1 hardening (defect D2): the video gateway accepts the SHARED
+# OpenRouter gateway credential (the LLM router's ``OPENROUTER_API_KEY``, see
+# ``app/content/config.py``) as a deterministic compatibility fallback so one
+# deployed OpenRouter credential can serve both seams. ``OPENROUTER_MODEL``
+# is deliberately NOT shared: the LLM router's model is not a video model
+# (different semantics), so no model fallback exists.
+OPENROUTER_SHARED_API_KEY_ENV = "OPENROUTER_API_KEY"
+OPENROUTER_SHARED_BASE_URL_ENV = "OPENROUTER_BASE_URL"
 OPENROUTER_ALLOW_PAID_ENV = "AVM_OPENROUTER_ALLOW_PAID"
 OPENROUTER_ALLOW_PAID_FALLBACK_ENV = "AVM_OPENROUTER_ALLOW_PAID_FALLBACK"
 OPENROUTER_CACHE_PATH_ENV = "AVM_OPENROUTER_MODEL_CACHE"
@@ -116,6 +124,44 @@ def _truthy_env(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_openrouter_video_api_key() -> str:
+    """Resolve the video-gateway credential with deterministic precedence.
+
+    Track 1 hardening (defect D2): the gateway previously read ONLY
+    ``AVM_OPENROUTER_API_KEY`` while the OpenRouter LLM gateway reads
+    ``OPENROUTER_API_KEY`` — a deployment that configured only the shared
+    key silently and permanently lost the authorized
+    Alibaba -> OpenRouter video fallback.
+
+    Precedence (first configured wins):
+      1. ``AVM_OPENROUTER_API_KEY`` — video-gateway-specific credential;
+      2. ``OPENROUTER_API_KEY``    — shared OpenRouter gateway credential
+         (same vendor; the LLM router's key).
+
+    No configured key resolves to ``""``: truthfully unavailable. The value
+    is never logged, never printed, and never persisted.
+    """
+    for name in (OPENROUTER_API_KEY_ENV, OPENROUTER_SHARED_API_KEY_ENV):
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_openrouter_video_base_url() -> str:
+    """Resolve the video-gateway base URL (AVM_* > shared > default).
+
+    Both names point at the same vendor's API, so the shared
+    ``OPENROUTER_BASE_URL`` is a safe compatibility fallback; the module
+    default applies when neither is configured.
+    """
+    for name in (OPENROUTER_BASE_URL_ENV, OPENROUTER_SHARED_BASE_URL_ENV):
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return OPENROUTER_DEFAULT_BASE_URL
 
 
 def classify_access(pricing_skus: Optional[Mapping[str, Any]], model_id: str = "") -> str:
@@ -666,8 +712,13 @@ class OpenRouterVideoVisualProvider:
     ):
         self.output_dir = Path(output_dir)
         self.model = model or os.getenv(OPENROUTER_MODEL_ENV) or None
-        self._api_key = api_key if api_key is not None else os.getenv(OPENROUTER_API_KEY_ENV, "")
-        self.base_url = base_url or os.getenv(OPENROUTER_BASE_URL_ENV, OPENROUTER_DEFAULT_BASE_URL)
+        # Track 1 hardening (defect D2): deterministic credential/URL
+        # precedence — the video-specific AVM_* names win, the shared
+        # OpenRouter gateway names are accepted; values are never logged.
+        self._api_key = (
+            api_key if api_key is not None else resolve_openrouter_video_api_key()
+        )
+        self.base_url = base_url or resolve_openrouter_video_base_url()
         self.allow_paid = _truthy_env(OPENROUTER_ALLOW_PAID_ENV) if allow_paid is None else bool(allow_paid)
         self.allow_paid_fallback = _truthy_env(OPENROUTER_ALLOW_PAID_FALLBACK_ENV) if allow_paid_fallback is None else bool(allow_paid_fallback)
         self.resolution = resolution
@@ -684,7 +735,8 @@ class OpenRouterVideoVisualProvider:
     def _get_client(self) -> OpenRouterHTTPClient:
         if not self._api_key:
             raise OpenRouterVideoConfigurationError(
-                f"OpenRouter video provider is not configured; set {OPENROUTER_API_KEY_ENV}"
+                "OpenRouter video provider is not configured; set "
+                f"{OPENROUTER_API_KEY_ENV} (or {OPENROUTER_SHARED_API_KEY_ENV})"
             )
         if self._client is None:
             self._client = OpenRouterHTTPClient(api_key=self._api_key, base_url=self.base_url)
@@ -1048,7 +1100,11 @@ class OpenRouterVideoVisualProvider:
     ) -> SceneGenerationResult:
         del require_confirmation
         if not self._api_key:
-            return self._fail(request, f"OpenRouter video provider is not configured; set {OPENROUTER_API_KEY_ENV}")
+            return self._fail(
+                request,
+                "OpenRouter video provider is not configured; set "
+                f"{OPENROUTER_API_KEY_ENV} (or {OPENROUTER_SHARED_API_KEY_ENV})",
+            )
         output_path = self.output_dir / f"{request.scene_id}.mp4"
         if output_path.is_file():
             existing_validation = validate_video_file(output_path, request.config.aspect_ratio)
@@ -1196,7 +1252,7 @@ def openrouter_video_planning_facts() -> Optional[ModelCapabilityFacts]:
     """
     from app.orchestrator.planning_constraints import ModelCapabilityFacts
 
-    if not os.getenv(OPENROUTER_API_KEY_ENV, ""):
+    if not resolve_openrouter_video_api_key():
         return None
     model_id = (os.getenv(OPENROUTER_MODEL_ENV, "") or "").strip()
     if not model_id:

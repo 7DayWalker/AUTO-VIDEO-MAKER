@@ -376,7 +376,15 @@ class OrchestratorConfig(BaseModel):
     voice_provider: str = Field(default="edge_tts")
     
     # Scene settings
-    scene_model: str = Field(default="Veo 3.1 - Lite")
+    # ``scene_model`` is the Flow-engine scene model (the Flow CLI supplies
+    # it explicitly via produce.py --scene-model, defaulting to the Flow
+    # module's own FLOW_SCENE_MODEL).  It is deliberately NOT defaulted to
+    # the Flow-era identity here: non-Flow executions must never persist a
+    # fake "Veo 3.1 - Lite" model label (Phase 11C Track 1 hardening,
+    # defect D7).  A non-Flow scene_config records model=None; the ACTUAL
+    # provider/model truth of executed scenes lives in execution provenance
+    # (Batch 1F) and accounting (Batch 1H).
+    scene_model: Optional[str] = Field(default=None)
     scene_aspect_ratio: str = Field(default="9:16")
     scene_duration: int = Field(default=4, ge=1, le=60)
     max_scenes_per_run: int = Field(default=10, ge=1)

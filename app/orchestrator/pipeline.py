@@ -57,6 +57,25 @@ ORCHESTRATOR_OUTPUT_DIR = PROJECT_ROOT / "output" / "projects"
 ORCHESTRATOR_LOGS_DIR = PROJECT_ROOT / "logs" / "orchestrator"
 
 
+def flow_scene_model_from_config(
+    scene_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Resolve the Flow-engine scene model at the Flow execution boundary.
+
+    Track 1 hardening (defect D7): ``OrchestratorConfig.scene_model`` no
+    longer defaults to the Flow-era identity, so a Flow execution started
+    without an explicit model (e.g. through the production executor) resolves
+    the Flow module's own default here. Non-Flow executions never reach this
+    boundary and therefore never inherit a Flow model identity; the ACTUAL
+    provider/model truth of executed scenes lives in execution provenance
+    (Batch 1F).
+    """
+    from app.flow.scene_models import FLOW_SCENE_MODEL
+
+    value = (scene_config or {}).get("model")
+    return value or FLOW_SCENE_MODEL
+
+
 def ensure_orchestrator_directories() -> None:
     """Create required directories."""
     for directory in [ORCHESTRATOR_OUTPUT_DIR, ORCHESTRATOR_LOGS_DIR]:
@@ -1024,7 +1043,7 @@ class ProductionOrchestrator:
 
             scene_config = self.config.to_scene_config_dict()
             config = FlowGenerationConfig(
-                model=scene_config.get("model"),
+                model=flow_scene_model_from_config(scene_config),
                 aspect_ratio=scene_config.get("aspect_ratio"),
                 duration=scene_config.get("duration"),
                 count=1,
@@ -1068,7 +1087,7 @@ class ProductionOrchestrator:
                         sequence=first_scene.sequence,
                         visual_prompt=first_scene.visual_prompt,
                         config=FlowGenerationConfig(
-                            model=scene_config.get("model"),
+                            model=flow_scene_model_from_config(scene_config),
                             aspect_ratio=scene_config.get("aspect_ratio"),
                             duration=scene_config.get("duration"),
                             count=1,
