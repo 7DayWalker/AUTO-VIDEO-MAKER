@@ -1,0 +1,23 @@
+﻿{
+    "project_id":  "20260914_freshserver_verification_test_751",
+    "directory_id":  "20260914_freshserver_verification_test_751",
+    "topic":  "Fresh-server verification Test A: prove the existing local/hybrid pipeline end to end.",
+    "created_at":  "2026-09-14T15:47:52.402275",
+    "current_stage":  "complete",
+    "stage_status":  "complete",
+    "final_video_available":  true,
+    "publications":  [
+
+                     ],
+    "sample":  false,
+    "production_binding":  {
+                               "production_id":  "prd_20260914_freshserver_test_a_local_hybrid_200",
+                               "unit_id":  "unit-001",
+                               "production_plan_version":  1,
+                               "unit_plan_identity":  "20241205_fresh_server_verification_test_a_001",
+                               "unit_plan_version":  1,
+                               "unit_plan_content_hash":  "4b72265ae567b64a861df1f03da96eb81225541f7f3808eb1ece2879a775c7c4",
+                               "project_id":  "20260914_freshserver_verification_test_751",
+                               "bound_at":  "2026-09-14T15:47:52.402275"
+                           }
+}

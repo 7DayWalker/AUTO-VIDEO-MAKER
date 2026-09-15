@@ -19,6 +19,10 @@ class LLMResponse(BaseModel):
     model: str
     usage: Optional[Dict[str, int]] = None
     raw_response: Optional[Dict[str, Any]] = None
+    # Batch 1C: optional provider-provenance metadata (primary/final provider,
+    # fallback_used, fallback_reason, latency). Additive only — existing
+    # providers leave it unset and every existing consumer is unaffected.
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class BaseLLMProvider(ABC):

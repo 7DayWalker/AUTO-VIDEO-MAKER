@@ -1,0 +1,10 @@
+﻿{
+    "status":  "created",
+    "production_id":  "prd_20260914_freshserver_test_c2_alibaba_full_ai_vide_297",
+    "title":  "FreshServer Test C2 Alibaba Full AI Video",
+    "unit_count":  1,
+    "creation_method":  "local",
+    "generation_strategy":  "alibaba_video",
+    "cost_class":  "local_free",
+    "message":  "Production intent created. Execute it explicitly from Production Detail."
+}

@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from typing import List
 
+from app.assembly.ffmpeg import resolve_ffmpeg
 from app.voice.providers.base import BaseVoiceProvider, VoiceInfo
 from app.voice.exceptions import VoiceProviderError
 
@@ -46,7 +47,12 @@ class MockVoiceProvider(BaseVoiceProvider):
         pitch: str = "+0Hz",
         volume: str = "+0%",
     ) -> None:
-        """Generate synthetic audio using FFmpeg."""
+        """Generate synthetic audio using FFmpeg.
+
+        Fails truthfully when FFmpeg is unavailable: a missing media
+        toolchain must surface as a failed voice stage, never as a
+        fabricated "valid" audio artifact.
+        """
         self._call_count += 1
         logger.info(f"Mock provider generating audio (call #{self._call_count})")
         
@@ -54,18 +60,24 @@ class MockVoiceProvider(BaseVoiceProvider):
         word_count = len(text.split())
         duration = max(1.0, word_count / 2.5)
         
+        ffmpeg = resolve_ffmpeg()
+        if not ffmpeg:
+            raise VoiceProviderError(
+                self.name,
+                "FFmpeg executable not found; synthetic voice generation is "
+                "unavailable. Install FFmpeg and add it to PATH, or set "
+                "FFMPEG_PATH.",
+            )
+
         # Create output directory
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Try to generate using FFmpeg
-        try:
-            await self._generate_with_ffmpeg(output_path, duration)
-            logger.info(f"Generated mock audio: {output_path} ({duration:.1f}s)")
-        except Exception as e:
-            logger.warning(f"FFmpeg generation failed: {e}, creating minimal file")
-            await self._generate_minimal_file(output_path)
+        await self._generate_with_ffmpeg(ffmpeg, output_path, duration)
+        logger.info(f"Generated mock audio: {output_path} ({duration:.1f}s)")
     
-    async def _generate_with_ffmpeg(self, output_path: Path, duration: float) -> None:
+    async def _generate_with_ffmpeg(
+        self, ffmpeg: str, output_path: Path, duration: float
+    ) -> None:
         """Generate audio using FFmpeg sine wave."""
         ext = output_path.suffix.lower()
         
@@ -77,7 +89,7 @@ class MockVoiceProvider(BaseVoiceProvider):
             codec = "libmp3lame"
         
         args = [
-            "ffmpeg",
+            ffmpeg,
             "-y",
             "-f", "lavfi",
             "-i", f"sine=frequency=200:duration={duration}",
@@ -95,21 +107,6 @@ class MockVoiceProvider(BaseVoiceProvider):
         
         if result.returncode != 0:
             raise VoiceProviderError(self.name, f"FFmpeg failed: {result.stderr[:200]}")
-    
-    async def _generate_minimal_file(self, output_path: Path) -> None:
-        """Generate a minimal valid audio file as fallback."""
-        # Create a minimal MP3 file (silent frame)
-        # This is a valid MP3 frame header + minimal data
-        minimal_mp3 = bytes([
-            0xFF, 0xFB, 0x90, 0x00,  # MP3 frame header
-            0x00, 0x00, 0x00, 0x00,  # Padding
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-        ] * 100)  # Repeat for minimal duration
-        
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(minimal_mp3)
-        logger.info(f"Created minimal mock audio: {output_path}")
     
     async def list_voices(self, locale: str = None) -> List[VoiceInfo]:
         """Return mock voices."""

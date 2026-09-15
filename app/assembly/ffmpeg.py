@@ -5,6 +5,7 @@ Clean abstraction around FFmpeg for video/audio processing.
 """
 
 import json
+import os
 import subprocess
 import shutil
 from pathlib import Path
@@ -24,6 +25,63 @@ from app.assembly.models import MediaInfo
 from app.assembly.audio_contract import AudioMediaFacts
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Authoritative media-executable resolution (single source of truth)
+#
+# Every runtime ffmpeg/ffprobe invocation MUST resolve its executable through
+# resolve_ffmpeg()/resolve_ffprobe() instead of assuming a bare command name.
+# Resolution order:
+#   1. FFMPEG_PATH / FFPROBE_PATH (exact executable file, or a directory
+#      containing <name>.exe on Windows / <name> elsewhere);
+#   2. for ffprobe: the sibling executable in the resolved ffmpeg's directory
+#      (Windows FFmpeg builds ship ffmpeg.exe and ffprobe.exe together);
+#   3. normal PATH lookup.
+# Candidates are existence-verified; when nothing resolves, the caller must
+# fail truthfully rather than fabricate a media artifact.
+# ---------------------------------------------------------------------------
+
+_EXE_SUFFIX = ".exe" if os.name == "nt" else ""
+
+
+def _resolve_candidate(candidate: str, name: str) -> Optional[str]:
+    """Resolve one configured candidate: a file, a tool directory, or a name."""
+    if not candidate:
+        return None
+    path = Path(candidate)
+    if path.is_file():
+        return str(path)
+    if path.is_dir():
+        inside = path / f"{name}{_EXE_SUFFIX}"
+        if inside.is_file():
+            return str(inside)
+    return None
+
+
+def _resolve_tool(name: str) -> Optional[str]:
+    configured = FFMPEG_PATH if name == "ffmpeg" else FFPROBE_PATH
+    resolved = _resolve_candidate(configured, name)
+    if resolved:
+        return resolved
+    if name == "ffprobe":
+        # Derive the sibling ffprobe from the resolved ffmpeg directory.
+        ffmpeg_resolved = _resolve_tool("ffmpeg")
+        if ffmpeg_resolved:
+            sibling = Path(ffmpeg_resolved).parent / f"ffprobe{_EXE_SUFFIX}"
+            if sibling.is_file():
+                return str(sibling)
+    return shutil.which(name)
+
+
+def resolve_ffmpeg() -> Optional[str]:
+    """Resolve the ffmpeg executable path, or None when unavailable."""
+    return _resolve_tool("ffmpeg")
+
+
+def resolve_ffprobe() -> Optional[str]:
+    """Resolve the ffprobe executable path, or None when unavailable."""
+    return _resolve_tool("ffprobe")
 
 
 class FFmpegRunner:
@@ -50,8 +108,10 @@ class FFmpegRunner:
         if self._ffmpeg_available is not None:
             return self._ffmpeg_available
         
-        # Try configured path first
-        if self._check_executable(self.ffmpeg_path):
+        # Try configured path (exact executable or a tool directory)
+        resolved = _resolve_candidate(self.ffmpeg_path, "ffmpeg")
+        if resolved and self._check_executable(resolved):
+            self.ffmpeg_path = resolved
             self._ffmpeg_available = True
             return True
         
@@ -70,10 +130,21 @@ class FFmpegRunner:
         if self._ffprobe_available is not None:
             return self._ffprobe_available
         
-        # Try configured path first
-        if self._check_executable(self.ffprobe_path):
+        # Try configured path (exact executable or a tool directory)
+        resolved = _resolve_candidate(self.ffprobe_path, "ffprobe")
+        if resolved and self._check_executable(resolved):
+            self.ffprobe_path = resolved
             self._ffprobe_available = True
             return True
+
+        # Derive the sibling ffprobe from the resolved ffmpeg directory
+        # (Windows FFmpeg builds ship ffmpeg.exe and ffprobe.exe together).
+        if self.check_ffmpeg():
+            sibling = Path(self.ffmpeg_path).parent / f"ffprobe{_EXE_SUFFIX}"
+            if sibling.is_file() and self._check_executable(str(sibling)):
+                self.ffprobe_path = str(sibling)
+                self._ffprobe_available = True
+                return True
         
         # Try finding in PATH
         found = shutil.which("ffprobe")

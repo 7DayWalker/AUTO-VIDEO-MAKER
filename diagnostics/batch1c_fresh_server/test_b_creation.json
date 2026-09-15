@@ -1,0 +1,10 @@
+﻿{
+    "status":  "created",
+    "production_id":  "prd_20260914_freshserver_test_b_alibaba_image_local_v_914",
+    "title":  "FreshServer Test B Alibaba Image Local Video",
+    "unit_count":  1,
+    "creation_method":  "local",
+    "generation_strategy":  "alibaba_image_local_video",
+    "cost_class":  "local_free",
+    "message":  "Production intent created. Execute it explicitly from Production Detail."
+}

@@ -1,0 +1,23 @@
+﻿{
+    "project_id":  "20260914_freshserver_verification_test_881",
+    "directory_id":  "20260914_freshserver_verification_test_881",
+    "topic":  "Fresh-server verification Test C attempt 2: prove the Alibaba Wan text-to-video route end to end with evenly paced scenes.",
+    "created_at":  "2026-09-14T15:57:08.419086",
+    "current_stage":  "complete",
+    "stage_status":  "complete",
+    "final_video_available":  true,
+    "publications":  [
+
+                     ],
+    "sample":  false,
+    "production_binding":  {
+                               "production_id":  "prd_20260914_freshserver_test_c2_alibaba_full_ai_vide_297",
+                               "unit_id":  "unit-001",
+                               "production_plan_version":  1,
+                               "unit_plan_identity":  "20241219_fresh_server_verification_test_c2_001",
+                               "unit_plan_version":  1,
+                               "unit_plan_content_hash":  "675d176aa3d54789d49d442bdb641750a00ba2e163d306e533e9d756a7571f05",
+                               "project_id":  "20260914_freshserver_verification_test_881",
+                               "bound_at":  "2026-09-14T15:57:08.419086"
+                           }
+}

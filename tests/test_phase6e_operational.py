@@ -66,8 +66,10 @@ def _summary_manifest(project_id="20231017_inner_plan_001", *, accepted=True,
 
 def _make_video(path: Path, seconds=2):
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i",
+        [resolve_ffmpeg() or "ffmpeg", "-y", "-f", "lavfi", "-i",
          f"color=c=navy:s=720x1280:d={seconds}",
          "-f", "lavfi", "-i",
          f"anullsrc=r=44100:cl=stereo:d={seconds}",

@@ -32,8 +32,10 @@ from app.orchestrator.visual_providers import (
 
 def make_image(path: Path, color="red", size="720x1280"):
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi",
+        [resolve_ffmpeg() or "ffmpeg", "-y", "-f", "lavfi",
          "-i", f"color=c={color}:s={size}",
          "-frames:v", "1", str(path)],
         capture_output=True, check=True, timeout=60,
@@ -42,8 +44,10 @@ def make_image(path: Path, color="red", size="720x1280"):
 
 def make_clip(path: Path, seconds=2, size="720x1280"):
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     subprocess.run(
-        ["ffmpeg", "-y",
+        [resolve_ffmpeg() or "ffmpeg", "-y",
          "-f", "lavfi", "-i", f"color=c=blue:s={size}:d={seconds}",
          "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={seconds}",
          "-c:v", "libx264", "-preset", "ultrafast",
@@ -150,8 +154,10 @@ def test_1_still_image_becomes_valid_vertical_mp4(tmp_path):
     result = provider.generate_scene(_request(duration=2))
     assert result.success is True
     out = Path(result.file_path)
+    from app.assembly.ffmpeg import resolve_ffprobe
+
     probe = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json",
+        [resolve_ffprobe() or "ffprobe", "-v", "quiet", "-print_format", "json",
          "-show_streams", "-show_format", str(out)],
         capture_output=True, text=True,
     )

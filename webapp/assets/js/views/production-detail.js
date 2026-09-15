@@ -21,6 +21,22 @@ VIEWS.productionDetail = {
       counts.INCOMPLETE ? "The production has resumable work." :
       counts.NOT_STARTED ? "The production is ready for its first execution." : "All units are completed; no re-execution is offered.";
     var tone = counts.FAILED ? "danger" : counts.BLOCKED || counts.INCOMPLETE ? "warn" : counts.IN_FLIGHT ? "info" : "neutral";
+    var strategyLabel = {
+      local: "Local / Hybrid (default)",
+      alibaba_image_local_video: "Alibaba Image → Local Video",
+      alibaba_video: "Alibaba Video"
+    }[p.generation_strategy] || "Local / Hybrid (default)";
+    /* Batch 1G: the first-class Production Route is a PRODUCT-level identity
+       (Batch 1D) — never a provider/model, and never inferred from the legacy
+       strategy. Legacy productions have no persisted route. */
+    var routeLabels = {
+      local_ai_assisted: "Local AI-Assisted",
+      full_ai_video: "Full AI Video",
+      google_flow: "Google Flow (legacy private)"
+    };
+    var routeLabel = p.route
+      ? (routeLabels[p.route] || p.route)
+      : "Not specified (legacy)";
 
     var rows = (p.units || []).map(function (u) {
       var intent = u.intent || {}, exec = u.execution || {}, state = exec.state;
@@ -55,7 +71,7 @@ VIEWS.productionDetail = {
       '<section class="card production-hero attention-' + tone + '" aria-labelledby="production-heading"><div class="production-hero-top"><div><p class="eyebrow">Production identity</p><h2 id="production-heading">' + COMPONENTS.esc(p.title) + '</h2><p class="command-text">' + COMPONENTS.esc((p.command || {}).text || "No command text recorded") + '</p></div><div class="hero-status"><span class="attention-dot" aria-hidden="true"></span><strong>Attention</strong><p>' + COMPONENTS.esc(attention) + '</p>' + CC.runBadge(p.run) + '</div></div><div class="state-counts" aria-label="Unit state counts">' + CC.countsRow(counts) + '</div>' + CC.progressBar(counts, p.unit_count) + '</section>' +
       '<section class="card action-panel" aria-labelledby="production-actions-heading"><div class="section-heading"><div><p class="eyebrow">Next action</p><h2 id="production-actions-heading">Command the existing engine</h2></div><div class="action-group">' + productionAction + '</div></div><p class="hint">The server re-derives state at command time. Confirmed commands delegate to ProductionExecutor; polling and refresh never execute work.</p><div id="production-action-feedback" aria-live="polite"></div></section>' +
       '<section class="card" aria-labelledby="units-heading"><div class="section-heading"><div><p class="eyebrow">Production → Units</p><h2 id="units-heading">Unit workload</h2></div><span class="hint">' + COMPONENTS.esc(p.unit_count) + ' units · state authority: ProductionExecutor.derive_progress()</span></div><div class="table-wrap"><table class="data unit-table"><thead><tr><th>#</th><th>Unit</th><th>State / reason</th><th>Blockers</th><th>Bound project</th><th>Action</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6"><div class="empty"><h4>No units recorded</h4></div></td></tr>') + '</tbody></table></div></section>' +
-      '<section class="card evidence-panel" aria-labelledby="intent-heading"><div class="section-heading"><div><p class="eyebrow">Supporting evidence</p><h2 id="intent-heading">Production intent</h2></div></div><dl class="detail-list"><div><dt>Command</dt><dd>' + COMPONENTS.esc((p.command || {}).text || "—") + '</dd></div><div><dt>Workload</dt><dd>' + COMPONENTS.esc((p.command || {}).workload_shape || "—") + '</dd></div><div><dt>Intended units</dt><dd>' + COMPONENTS.esc((p.command || {}).intended_unit_count || p.unit_count) + '</dd></div><div><dt>Plan version</dt><dd>' + COMPONENTS.esc(p.plan_version) + '</dd></div></dl><p class="hint">Plan artifacts and project directories are evidence only. Binding authority remains ProjectManifest.production_binding.</p></section>';
+      '<section class="card evidence-panel" aria-labelledby="intent-heading"><div class="section-heading"><div><p class="eyebrow">Supporting evidence</p><h2 id="intent-heading">Production intent</h2></div></div><dl class="detail-list"><div><dt>Command</dt><dd>' + COMPONENTS.esc((p.command || {}).text || "—") + '</dd></div><div><dt>Mode</dt><dd>' + COMPONENTS.esc((p.command || {}).workload_shape || "—") + '</dd></div><div><dt>Intended units</dt><dd>' + COMPONENTS.esc((p.command || {}).intended_unit_count || p.unit_count) + '</dd></div><div><dt>Route</dt><dd>' + COMPONENTS.esc(routeLabel) + '</dd></div><div><dt>Legacy strategy (compatibility)</dt><dd>' + COMPONENTS.esc(strategyLabel) + '</dd></div><div><dt>Plan version</dt><dd>' + COMPONENTS.esc(p.plan_version) + '</dd></div></dl><p class="hint">Plan artifacts and project directories are evidence only. Binding authority remains ProjectManifest.production_binding.</p></section>';
   },
 
   mount: async function (params) {

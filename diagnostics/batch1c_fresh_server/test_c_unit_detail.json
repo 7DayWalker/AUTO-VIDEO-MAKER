@@ -1,0 +1,199 @@
+﻿{
+    "production_id":  "prd_20260914_freshserver_test_c_alibaba_full_ai_video_201",
+    "production_title":  "FreshServer Test C Alibaba Full AI Video",
+    "plan_version":  1,
+    "unit_intent":  {
+                        "unit_id":  "unit-001",
+                        "ordinal":  1,
+                        "unit_type":  "standalone_video",
+                        "title":  "FreshServer Test C Alibaba Full AI Video",
+                        "description":  "Fresh-server verification Test C: Alibaba Wan text-to-video generates actual motion-video scene clips.",
+                        "premise":  "Fresh-server verification Test C: Alibaba Wan text-to-video generates actual motion-video scene clips.",
+                        "dependencies":  [
+
+                                         ],
+                        "content_intent":  {
+                                               "topic_override":  "Fresh-server verification Test C: Alibaba Wan text-to-video generates actual motion-video scene clips.",
+                                               "target_duration":  10,
+                                               "platform":  "youtube_shorts",
+                                               "tone":  "curious and cinematic",
+                                               "style":  "curious and cinematic",
+                                               "number_of_scenes":  2
+                                           },
+                        "bible_refs":  [
+
+                                       ],
+                        "provider_intent":  "image_motion"
+                    },
+    "execution":  {
+                      "unit_id":  "unit-001",
+                      "ordinal":  1,
+                      "state":  "FAILED",
+                      "project_id":  "20260914_freshserver_verification_test_486",
+                      "bound_plan_version":  1,
+                      "reason":  null
+                  },
+    "run":  {
+                "running":  false,
+                "action":  "execute",
+                "unit_id":  null,
+                "started_at":  "2026-09-14T15:52:43.200299",
+                "finished_at":  "2026-09-14T15:52:57.005599",
+                "complete":  false,
+                "error":  "StageFailedError: Stage \u0027scenes\u0027 failed: Scene scene_01 failed: Alibaba video model \u0027wan2.2-t2v-plus\u0027 was not submitted: requested duration 4s is outside the model\u0027s supported durations [5, 10] (no provider default was substituted)"
+            },
+    "blocking_units":  [
+
+                       ],
+    "plan_evidence":  {
+                          "plan_directory":  "productions/prd_20260914_freshserver_test_c_alibaba_full_ai_video_201/units/unit-001/plan",
+                          "exists":  true,
+                          "complete":  true,
+                          "meta":  {
+                                       "production_plan_version":  1,
+                                       "unit_plan_version":  1,
+                                       "plan_identity":  "20241205_fresh_server_verification_test_c_001",
+                                       "content_hash":  "46960acfa3318d6009ae3f97a571c1b3a1cf7b44631427380c2b719f58cd161b",
+                                       "planner_provider":  "alibaba",
+                                       "planner_model":  "qwen-plus",
+                                       "planner_warnings":  [
+
+                                                            ]
+                                   },
+                          "note":  "Plan artifacts are evidence only; the binding authority is ProjectManifest.production_binding."
+                      },
+    "bound_project":  {
+                          "project_id":  "20260914_freshserver_verification_test_486",
+                          "topic":  "Fresh-server verification Test C: Alibaba Wan text-to-video generates actual motion-video scene clips.",
+                          "created_at":  "2026-09-14T15:52:54.279394",
+                          "updated_at":  "2026-09-14T15:52:56.991659",
+                          "completed_at":  null,
+                          "current_stage":  "scenes",
+                          "dry_run":  false,
+                          "mock_mode":  false,
+                          "stages":  {
+                                         "CONTENT":  {
+                                                         "status":  "COMPLETED",
+                                                         "error":  null,
+                                                         "started_at":  "2026-09-14T15:52:54.282003",
+                                                         "completed_at":  "2026-09-14T15:52:54.286489",
+                                                         "duration_seconds":  0.004486
+                                                     },
+                                         "VOICE":  {
+                                                       "status":  "COMPLETED",
+                                                       "error":  null,
+                                                       "started_at":  "2026-09-14T15:52:54.291096",
+                                                       "completed_at":  "2026-09-14T15:52:56.936248",
+                                                       "duration_seconds":  2.645152
+                                                   },
+                                         "SCENES":  {
+                                                        "status":  "FAILED",
+                                                        "error":  "Stage \u0027scenes\u0027 failed: Scene scene_01 failed: Alibaba video model \u0027wan2.2-t2v-plus\u0027 was not submitted: requested duration 4s is outside the model\u0027s supported durations [5, 10] (no provider default was substituted)",
+                                                        "started_at":  "2026-09-14T15:52:56.936248",
+                                                        "completed_at":  "2026-09-14T15:52:56.991659",
+                                                        "duration_seconds":  null
+                                                    },
+                                         "CAPTIONS":  {
+                                                          "status":  "PENDING",
+                                                          "error":  null,
+                                                          "started_at":  null,
+                                                          "completed_at":  null,
+                                                          "duration_seconds":  null
+                                                      },
+                                         "ASSEMBLY":  {
+                                                          "status":  "PENDING",
+                                                          "error":  null,
+                                                          "started_at":  null,
+                                                          "completed_at":  null,
+                                                          "duration_seconds":  null
+                                                      },
+                                         "COMPLETE":  {
+                                                          "status":  "PENDING",
+                                                          "error":  null,
+                                                          "started_at":  null,
+                                                          "completed_at":  null,
+                                                          "duration_seconds":  null
+                                                      }
+                                     },
+                          "scene_checkpoints":  {
+
+                                                },
+                          "scene_checkpoint_rows":  [
+
+                                                    ],
+                          "production_binding":  {
+                                                     "production_id":  "prd_20260914_freshserver_test_c_alibaba_full_ai_video_201",
+                                                     "unit_id":  "unit-001",
+                                                     "production_plan_version":  1,
+                                                     "unit_plan_identity":  "20241205_fresh_server_verification_test_c_001",
+                                                     "unit_plan_version":  1,
+                                                     "unit_plan_content_hash":  "46960acfa3318d6009ae3f97a571c1b3a1cf7b44631427380c2b719f58cd161b",
+                                                     "project_id":  "20260914_freshserver_verification_test_486",
+                                                     "bound_at":  "2026-09-14T15:52:54.279394"
+                                                 },
+                          "publications":  [
+
+                                           ],
+                          "artifacts":  {
+                                            "content_plan":  {
+                                                                 "type":  "Content plan",
+                                                                 "state":  "AVAILABLE",
+                                                                 "available":  true,
+                                                                 "safe_path":  "output/projects/20260914_freshserver_verification_test_486/content/20241205_fresh_server_verification_test_c_001/production_plan.json",
+                                                                 "media_url":  null,
+                                                                 "reason":  null
+                                                             },
+                                            "voice_audio":  {
+                                                                "type":  "Voice audio",
+                                                                "state":  "RECORDED BUT MISSING",
+                                                                "available":  false,
+                                                                "safe_path":  null,
+                                                                "media_url":  null,
+                                                                "reason":  "recorded file type is not supported for browser preview"
+                                                            },
+                                            "voice_timing":  {
+                                                                 "type":  "Voice timing",
+                                                                 "state":  "AVAILABLE",
+                                                                 "available":  true,
+                                                                 "safe_path":  "output/projects/20260914_freshserver_verification_test_486/voice/20241205_fresh_server_verification_test_c_001/voice_timing.json",
+                                                                 "media_url":  null,
+                                                                 "reason":  null
+                                                             },
+                                            "scene_manifest":  {
+                                                                   "type":  "Scene manifest",
+                                                                   "state":  "FAILED",
+                                                                   "available":  false,
+                                                                   "safe_path":  null,
+                                                                   "media_url":  null,
+                                                                   "reason":  "The authoritative producing stage reports failure."
+                                                               },
+                                            "captions":  {
+                                                             "type":  "Captions",
+                                                             "state":  "NOT GENERATED",
+                                                             "available":  false,
+                                                             "safe_path":  null,
+                                                             "media_url":  null,
+                                                             "reason":  "no path recorded"
+                                                         },
+                                            "final_video":  {
+                                                                "type":  "Final video",
+                                                                "state":  "NOT GENERATED",
+                                                                "available":  false,
+                                                                "safe_path":  null,
+                                                                "media_url":  null,
+                                                                "reason":  "no path recorded"
+                                                            }
+                                        }
+                      },
+    "scene_checkpoint_rows":  [
+
+                              ],
+    "failure_details":  [
+                            {
+                                "stage":  "SCENES",
+                                "error":  "Stage \u0027scenes\u0027 failed: Scene scene_01 failed: Alibaba video model \u0027wan2.2-t2v-plus\u0027 was not submitted: requested duration 4s is outside the model\u0027s supported durations [5, 10] (no provider default was substituted)",
+                                "completed_at":  "2026-09-14T15:52:56.991659"
+                            }
+                        ],
+    "sample":  false
+}

@@ -778,6 +778,30 @@ def _browser_safe_diagnostic(value) -> str | None:
     return _SECRET_VALUE_IN_TEXT.sub("<secret-omitted>", text)
 
 
+# Phase 11C Batch 1 hardening (Finding 4): browsers routinely abort in-flight
+# polling requests (navigation away, tab close, poll timeout). WinError 10053
+# ("established connection was aborted by the software in your host machine")
+# and its siblings are NORMAL client disconnects while writing a response —
+# not production execution failures and not server defects. They are logged
+# cleanly at INFO and never answered with a 500 (the socket is already gone).
+_CLIENT_DISCONNECT_EXCEPTIONS = (
+    ConnectionAbortedError,
+    ConnectionResetError,
+    BrokenPipeError,
+)
+_CLIENT_DISCONNECT_WINERRORS = {10053, 10054}
+
+
+def _is_client_disconnect(exc: Exception) -> bool:
+    """True when an exception is a client-side connection abort, not a defect."""
+    if isinstance(exc, _CLIENT_DISCONNECT_EXCEPTIONS):
+        return True
+    return (
+        isinstance(exc, OSError)
+        and getattr(exc, "winerror", None) in _CLIENT_DISCONNECT_WINERRORS
+    )
+
+
 def _relative_display(path: Path) -> str:
     """Forward-slash display path relative to the project root (never absolute)."""
     try:
@@ -809,14 +833,27 @@ def _production_executor(production_id: str):
     """Build the Phase 10 ProductionExecutor — the ONLY execution engine."""
     from app.orchestrator.production_execution import ProductionExecutor
     from app.orchestrator.models import OrchestratorConfig
-    from app.content.planner import ScenePlanner
+    from app.content.planner import ScenePlanner, create_scene_planner
+    from app.orchestrator.visual_sources import DEFAULT_IMAGE_SOURCE
+    from app.voice import config as voice_config
 
-    # Batch 1 local productions explicitly opt into the existing zero-cost
-    # scene path.  The legacy executor default is intentionally mock-enabled;
-    # passing a runtime config here prevents a product-created local
-    # production from silently becoming a placeholder run.  Content planning
-    # remains deterministic and offline through the existing mock planner; the
-    # visual stage is still real local ImageMotion/FFmpeg execution.
+    # Phase 11C Batch 1: web-created local productions execute through the
+    # REAL production pipeline with the REAL intelligence layer. Content
+    # planning runs on the configured content provider (DEFAULT_LLM_PROVIDER;
+    # OpenRouter is the project's AI API router and "mock" is an explicit
+    # offline mode), narration uses the configured TTS provider (Edge TTS by
+    # default; "mock" only when explicitly configured), and scene imagery is
+    # acquired through the configured visual source. Phase 11C Batch 1
+    # hardening: the default is the ROUTING layer ("auto") — AI image
+    # generation (AVM_IMAGE_MODEL), quality stock (PEXELS_API_KEY), and the
+    # free Wikimedia Commons fallback, selected per scene by the plan's
+    # visual-source hints; Wikimedia is no longer the primary strategy.
+    # Mock mode remains available ONLY as an explicit offline/test mode
+    # (AVM_MOCK_MODE=1 or DEFAULT_LLM_PROVIDER=mock) and its fixture output
+    # never masquerades as AI production.
+    import os as _os
+
+    from app.content.config import DEFAULT_LLM_PROVIDER
     from app.production.storage import load_production
 
     production = load_production(production_id, root=PRODUCTIONS_DIR)
@@ -827,15 +864,36 @@ def _production_executor(production_id: str):
     base_config = None
     planner_factory = None
     if local_units and len(local_units) == len(production.units):
-        base_config = OrchestratorConfig(
-            topic=production.title,
-            mock_mode=False,
-            visual_mode="local",
-            visual_default_provider="image_motion",
-            image_source="fixture",
-            voice_provider="mock",
+        explicit_mock = (
+            _os.getenv("AVM_MOCK_MODE", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+            or str(DEFAULT_LLM_PROVIDER).strip().lower() == "mock"
         )
-        planner_factory = lambda: ScenePlanner(mock_mode=True)
+        if explicit_mock:
+            base_config = OrchestratorConfig(
+                topic=production.title,
+                mock_mode=True,
+                visual_mode="local",
+                visual_default_provider="image_motion",
+                image_source="fixture",
+                voice_provider="mock",
+            )
+            planner_factory = lambda: ScenePlanner(mock_mode=True)
+        else:
+            base_config = OrchestratorConfig(
+                topic=production.title,
+                mock_mode=False,
+                visual_mode="local",
+                visual_default_provider="image_motion",
+                image_source=(
+                    _os.getenv("AVM_IMAGE_SOURCE") or DEFAULT_IMAGE_SOURCE
+                ).strip(),
+                voice_provider=voice_config.TTS_PROVIDER,
+            )
+            # Existing factory: resolves the configured provider at plan time
+            # and fails truthfully when it is unavailable (no silent mock
+            # fallback in real production).
+            planner_factory = create_scene_planner
 
     kwargs = {
         "productions_root": PRODUCTIONS_DIR,
@@ -898,6 +956,43 @@ def create_production_payload(body: dict):
         if output_intent not in {"youtube_shorts", "tiktok"}:
             raise ValueError("output_intent must be youtube_shorts or tiktok")
 
+        # Batch 1C follow-up: production-level generation strategy (user
+        # selected; default preserves the existing local pipeline).
+        from app.production.models import (
+            DEFAULT_GENERATION_STRATEGY,
+            GENERATION_STRATEGIES,
+        )
+
+        generation_strategy = text(
+            "generation_strategy", maximum=64
+        ).lower()
+        if not generation_strategy:
+            generation_strategy = DEFAULT_GENERATION_STRATEGY
+        if generation_strategy not in GENERATION_STRATEGIES:
+            raise ValueError(
+                "generation_strategy must be one of: "
+                + ", ".join(GENERATION_STRATEGIES)
+            )
+
+        # Batch 1D: first-class Production Route.  An explicitly provided
+        # route wins; otherwise the route is derived from the (already
+        # validated) legacy generation strategy, so new productions persist
+        # the first-class product intent while generation_strategy remains
+        # the compatibility field.  Unknown routes fail loudly (never
+        # rerouted, never defaulted silently).
+        from app.production.routes import (
+            PRODUCTION_ROUTES,
+            route_id_for_legacy_strategy,
+        )
+
+        route = text("route", maximum=64).lower()
+        if route and route not in PRODUCTION_ROUTES:
+            raise ValueError(
+                "route must be one of: " + ", ".join(PRODUCTION_ROUTES)
+            )
+        if not route:
+            route = route_id_for_legacy_strategy(generation_strategy)
+
         duration = body.get("target_duration", 30)
         scenes = body.get("scene_count", 6)
         if isinstance(duration, bool) or not isinstance(duration, int) or not 10 <= duration <= 180:
@@ -912,6 +1007,8 @@ def create_production_payload(body: dict):
         production = Production(
             production_id=production_id,
             title=title,
+            generation_strategy=generation_strategy,
+            route=route,
             command=ProductionCommand(
                 text=brief,
                 workload_shape="single_video",
@@ -949,6 +1046,15 @@ def create_production_payload(body: dict):
             created_at=issued_at,
         )
         save_new_production(production, root=PRODUCTIONS_DIR)
+        logger.info(
+            "production.created production=%s route=%s mode=%s "
+            "legacy_strategy=%s units=%d",
+            production.production_id,
+            production.route,
+            production.command.workload_shape,
+            production.generation_strategy,
+            len(production.units),
+        )
     except ValueError as exc:
         return 400, {
             "error": "INVALID_CREATION_REQUEST",
@@ -967,6 +1073,8 @@ def create_production_payload(body: dict):
         "title": production.title,
         "unit_count": len(production.units),
         "creation_method": "local",
+        "generation_strategy": production.generation_strategy,
+        "route": production.route,
         "cost_class": "local_free",
         "message": "Production intent created. Execute it explicitly from Production Detail.",
     })
@@ -1089,6 +1197,8 @@ def _plan_evidence(production_id: str, unit_id: str) -> dict:
                 for key in (
                     "production_plan_version", "unit_plan_version",
                     "plan_identity", "content_hash",
+                    "planner_provider", "planner_model",
+                    "planner_warnings",
                 )
                 if key in raw_meta
             }
@@ -1229,6 +1339,16 @@ def _scene_checkpoint_rows(
         if not isinstance(checkpoint, dict):
             continue
         evidence = checkpoint.get("checkpoint_evidence") or {}
+        # Batch 1F: actual execution provenance for the delivered artifact.
+        # The authoritative scene-manifest ``provenance`` block is mirrored
+        # onto the operational checkpoint at completion; unknown stays None.
+        provenance = checkpoint.get("provenance") or {}
+        # Batch 1H: generic provider accounting for the delivered artifact —
+        # per-attempt usage/billing/cost evidence plus the derived summary.
+        # Unknown stays None (a legacy generation_cost=0 is ambiguous and is
+        # never reinterpreted as a known provider monetary zero).
+        accounting = checkpoint.get("accounting") or {}
+        accounting_summary = accounting.get("summary") or {}
         raw_path = (
             checkpoint.get("video_path")
             or checkpoint.get("file_path")
@@ -1260,7 +1380,36 @@ def _scene_checkpoint_rows(
             "status": checkpoint.get("status"),
             "artifact_state": artifact_state,
             "provider": checkpoint.get("provider") or evidence.get("provider"),
+            # Batch 1F: ``job_id_present`` is kept unchanged for backward
+            # compatibility (OpenRouter vocabulary only). Alibaba carries a
+            # DashScope ``task_id`` instead, so task identity is now reported
+            # kind-aware via ``task_identity_present``.
             "job_id_present": bool(checkpoint.get("job_id") or evidence.get("job_id")),
+            "task_identity_present": bool(
+                checkpoint.get("job_id")
+                or checkpoint.get("task_id")
+                or evidence.get("job_id")
+                or evidence.get("task_id")
+                or provenance.get("request_id")
+            ),
+            # Batch 1F: actual execution provenance (Batch 1G will present
+            # this; None/absent = unknown, never fabricated).
+            "provenance": provenance or None,
+            "actual_provider": provenance.get("provider"),
+            "actual_model": provenance.get("model"),
+            "request_id": provenance.get("request_id"),
+            "fallback_used": provenance.get("fallback_used"),
+            # Batch 1H: additive provider accounting (truthful backend
+            # evidence; the UI decides presentation later). ``cost`` is
+            # provider-reported monetary evidence or None (unknown) — never a
+            # fabricated zero for billable operations.
+            "accounting": accounting or None,
+            "billing_status": accounting_summary.get("billing_status"),
+            "usage": accounting_summary.get("final_usage"),
+            "cost": accounting_summary.get("cost"),
+            "cost_source": accounting_summary.get("cost_source"),
+            "currency": accounting_summary.get("currency"),
+            "attempt_count": accounting_summary.get("attempt_count"),
             "generation_cost": checkpoint.get("generation_cost"),
             "video_available": artifact_state == "AVAILABLE",
             "media_url": (
@@ -1302,6 +1451,8 @@ def productions_index_payload():
             "intended_unit_count": production.command.intended_unit_count,
             "unit_count": len(production.units),
             "plan_version": production.plan_version,
+            "generation_strategy": production.generation_strategy,
+            "route": production.route,
             "created_at": production.created_at,
             "revised_at": production.revised_at,
             "run": dict(_production_runs.get(production.production_id) or {"running": False}),
@@ -1350,6 +1501,8 @@ def production_detail_payload(production_id: str):
     payload = {
         "production_id": production.production_id,
         "title": production.title,
+        "generation_strategy": production.generation_strategy,
+        "route": production.route,
         "command": production.command.model_dump(),
         "plan_version": production.plan_version,
         "created_at": production.created_at,
@@ -1890,9 +2043,24 @@ class AVMHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/productions"):
                 return self._productions_get(path)
             return self._static(path)
-        except Exception:
+        except Exception as exc:
+            if _is_client_disconnect(exc):
+                # Normal browser disconnect during response write (polling
+                # navigation/close). Logged cleanly; never a 500 (the socket
+                # is gone) and never a misleading "GET failed" traceback.
+                logger.info(
+                    "GET %s: client disconnected before the response "
+                    "completed (%s)", path, type(exc).__name__,
+                )
+                return
             logger.exception("GET %s failed", path)
-            return self._json(500, {"detail": "internal error"})
+            try:
+                return self._json(500, {"detail": "internal error"})
+            except Exception:  # noqa: BLE001 - response could not be delivered
+                logger.info(
+                    "GET %s: failure response could not be delivered "
+                    "(client gone)", path,
+                )
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -1929,18 +2097,33 @@ class AVMHandler(BaseHTTPRequestHandler):
             # JSON 500 envelope instead of dropping the connection. Known
             # validation errors are handled inside the payload functions and
             # never reach this branch; nothing is retried automatically.
+            if _is_client_disconnect(exc):
+                # Normal browser disconnect during response write. Logged
+                # cleanly; the command outcome is unaffected because every
+                # durable state change is persisted BEFORE the response.
+                logger.info(
+                    "POST %s: client disconnected before the response "
+                    "completed (%s)", path, type(exc).__name__,
+                )
+                return
             logger.exception("POST %s failed", path)
-            return self._json(500, {
-                "error": "INTERNAL_ERROR",
-                "message": (
-                    "unexpected server error: "
-                    f"{type(exc).__name__}: {_browser_safe_diagnostic(exc)}"
-                ),
-                "guidance": (
-                    "The command was not retried. Check the engine log for "
-                    "the full traceback before retrying manually."
-                ),
-            })
+            try:
+                return self._json(500, {
+                    "error": "INTERNAL_ERROR",
+                    "message": (
+                        "unexpected server error: "
+                        f"{type(exc).__name__}: {_browser_safe_diagnostic(exc)}"
+                    ),
+                    "guidance": (
+                        "The command was not retried. Check the engine log for "
+                        "the full traceback before retrying manually."
+                    ),
+                })
+            except Exception:  # noqa: BLE001 - response could not be delivered
+                logger.info(
+                    "POST %s: failure response could not be delivered "
+                    "(client gone)", path,
+                )
 
     # -- media (range-aware enough for <video> seeking) --------------------
     def _serve_media(self, project_id: str):
@@ -2055,6 +2238,12 @@ class AVMHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    from app.logging_setup import configure_logging
+
+    configure_logging()
+    logger.info(
+        "server.startup runtime=command_center logging_configured=true"
+    )
     port = DEFAULT_PORT
     server = ThreadingHTTPServer(("127.0.0.1", port), AVMHandler)
     url = f"http://127.0.0.1:{port}"

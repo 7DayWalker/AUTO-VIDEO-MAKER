@@ -1,0 +1,90 @@
+{
+  "stages": {
+    "text": {
+      "status": "FAILED",
+      "detail": {
+        "attempted_at": "2026-09-13T00:19:59.081946+00:00",
+        "error_type": "ValidationError",
+        "error": "1 validation error for LLMResponse\nusage.prompt_tokens_details\n  Input should be a valid integer [type=int_type, input_value={'cached_tokens': 0}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/int_type"
+      },
+      "recorded_at": "2026-09-13T00:20:01.263109+00:00"
+    },
+    "json": {
+      "status": "FAILED",
+      "detail": {
+        "attempted_at": "2026-09-13T00:20:01.909888+00:00",
+        "error_type": "ValidationError",
+        "error": "1 validation error for LLMResponse\nusage.prompt_tokens_details\n  Input should be a valid integer [type=int_type, input_value={'cached_tokens': 0}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/int_type"
+      },
+      "recorded_at": "2026-09-13T00:20:04.103716+00:00"
+    },
+    "image": {
+      "status": "LIVE-VALIDATED",
+      "provider_id": "alibaba",
+      "artifact": "C:\\Projects\\AUTO-VIDEO-MAKER\\diagnostics\\batch1c_live\\image\\autosrc_live_image_001.png",
+      "bytes": 834472,
+      "duration": 0.0,
+      "width": 720,
+      "height": 1280,
+      "provenance": {
+        "provider": "alibaba",
+        "model": "wan2.2-t2i-flash",
+        "task_id": "5200f8f7-95f7-4433-87df-1237dfd65591",
+        "source_type": "ai_generated",
+        "usage": {
+          "image_count": 1
+        }
+      },
+      "latency_ms": 12452,
+      "detail": {
+        "attempted_at": "2026-09-13T00:22:41.896719+00:00",
+        "availability": "available",
+        "classification": null
+      },
+      "recorded_at": "2026-09-13T00:22:54.409255+00:00"
+    },
+    "video": {
+      "status": "LIVE-VALIDATED",
+      "provider": "alibaba_video",
+      "model": "wan2.2-t2v-plus",
+      "task_id": "f3cfde29-51af-47b3-92d4-eacdb713c834",
+      "request": {
+        "size": "1080*1920",
+        "duration": 5,
+        "aspect_ratio": "9:16"
+      },
+      "usage": {
+        "video_duration": 5,
+        "video_ratio": "1080*1920",
+        "video_count": 1
+      },
+      "artifact": "C:\\Projects\\AUTO-VIDEO-MAKER\\diagnostics\\batch1c_live\\video\\live_video_001.mp4",
+      "bytes": 3756339,
+      "actual_duration": 5.0,
+      "width": 1080,
+      "height": 1920,
+      "codec": "h264",
+      "audio_facts": {
+        "has_audio": false,
+        "audio_codec": null,
+        "audio_duration": null,
+        "sample_rate": null,
+        "channels": null,
+        "is_synthetic": false
+      },
+      "latency_ms": 102437,
+      "detail": {
+        "attempted_at": "2026-09-13T00:26:02.680390+00:00"
+      },
+      "recorded_at": "2026-09-13T00:27:45.127368+00:00"
+    }
+  },
+  "limits": {
+    "text_calls": 1,
+    "json_calls": 1,
+    "image_generations": 1,
+    "video_generations": 1,
+    "video_duration_seconds": 5,
+    "video_size": "480*880"
+  }
+}

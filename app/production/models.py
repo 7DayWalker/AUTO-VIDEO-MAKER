@@ -34,6 +34,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.production.routes import KNOWN_ROUTES, PRIVATE_ONLY_ROUTES, PRODUCTION_ROUTES
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -55,6 +57,33 @@ PROVIDER_INTENT_NAMES = (
 
 #: Sentinel accepted alongside a concrete provider name.
 PROVIDER_INTENT_DEFAULT = "default"
+
+#: LEGACY / COMPATIBILITY (Batch 1C bridge): user-selectable production-level
+#: GENERATION STRATEGY.
+#:
+#: SUPERSEDED as the master abstraction by the first-class Production Route
+#: (Batch 1D, see ``app/production/routes.py``).  This field remains the
+#: COMPATIBILITY execution bridge so existing productions keep loading and
+#: executing byte-for-byte; new code resolves the effective route through
+#: ``app.production.routes.resolve_effective_route``.  The strategy values
+#: are intentionally unchanged:
+#:
+#: - ``local``                  — the existing local visual pipeline
+#:                                (image sourcing + ImageMotion/local assembly);
+#:                                the default, preserving all prior behavior;
+#: - ``alibaba_image_local_video`` — Alibaba generates scene IMAGES, the
+#:                                existing local pipeline assembles/animates;
+#: - ``alibaba_video``          — Alibaba generates actual MOTION-VIDEO scene
+#:                                clips (Wan t2v via the existing adapter);
+#:                                never a silent Ken-Burns substitution.
+GENERATION_STRATEGIES = (
+    "local",
+    "alibaba_image_local_video",
+    "alibaba_video",
+)
+
+#: Default preserves every existing production's behavior.
+DEFAULT_GENERATION_STRATEGY = "local"
 
 #: Canonical Production Bible sections (extensible; not rigid limits).
 BIBLE_CANONICAL_SECTIONS = (
@@ -343,6 +372,33 @@ class Production(BaseModel):
     bible: Optional[ProductionBible] = Field(
         default=None, description="OPTIONAL shared creative context (A2)"
     )
+    generation_strategy: str = Field(
+        default=DEFAULT_GENERATION_STRATEGY,
+        description=(
+            "LEGACY/COMPATIBILITY (Batch 1C bridge): production-level visual "
+            "generation strategy — one of " + ", ".join(GENERATION_STRATEGIES)
+            + ". Superseded by the first-class `route` field (Batch 1D); "
+            "retained so existing productions load and execute unchanged."
+        ),
+    )
+    route: Optional[str] = Field(
+        default=None,
+        description=(
+            "Batch 1D: first-class PRODUCTION ROUTE — the product-level path "
+            "this production is intended to be made through. New SaaS "
+            "productions must use the SaaS surface (one of: "
+            + ", ".join(PRODUCTION_ROUTES)
+            + "); private-only routes ("
+            + ", ".join(PRIVATE_ONLY_ROUTES)
+            + ") remain loadable for EXISTING/private artifacts but can never "
+            "be selected for a new SaaS production. Route is deliberately NOT "
+            "a provider, model, media strategy, audio strategy, engine, "
+            "assembly engine, quality rule, or distribution target. None "
+            "(absent, e.g. legacy artifacts) = legacy resolution via the "
+            "compatibility generation_strategy bridge; an explicit route "
+            "takes precedence."
+        ),
+    )
     units: List[ProductionUnit] = Field(min_length=1)
     created_at: str = Field(min_length=1)
     revised_at: Optional[str] = None
@@ -350,6 +406,30 @@ class Production(BaseModel):
 
     @model_validator(mode="after")
     def _validate_production(self) -> "Production":
+        # Batch 1D: first-class Production Route.  Absent (None) = legacy
+        # resolution through the compatibility generation_strategy bridge;
+        # an unknown route fails loudly (never rerouted, never defaulted).
+        # SaaS/private boundary: the model accepts every KNOWN route so
+        # EXISTING private (google_flow) artifacts keep loading; selecting a
+        # route for a NEW SaaS production is gated at the creation seams
+        # (save_new_production / server creation) via
+        # assert_saas_production_route.
+        if self.route is not None and self.route not in KNOWN_ROUTES:
+            raise ValueError(
+                "route must be one of: "
+                + ", ".join(KNOWN_ROUTES)
+                + f" (got {self.route!r})"
+            )
+
+        # Generation strategy is an explicit user selection persisted with the
+        # production intent; unknown values fail loudly (never rerouted).
+        if self.generation_strategy not in GENERATION_STRATEGIES:
+            raise ValueError(
+                "generation_strategy must be one of: "
+                + ", ".join(GENERATION_STRATEGIES)
+                + f" (got {self.generation_strategy!r})"
+            )
+
         # Unique unit identities (identity is never ordering-derived).
         unit_ids = [unit.unit_id for unit in self.units]
         duplicates = sorted({uid for uid in unit_ids if unit_ids.count(uid) > 1})

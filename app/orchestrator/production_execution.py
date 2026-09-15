@@ -25,6 +25,16 @@ from app.orchestrator.models import (
     StageStatus,
 )
 from app.production.models import Production, ProductionUnit
+from app.production.routes import (
+    ROUTE_FULL_AI_VIDEO,
+    ROUTE_GOOGLE_FLOW,
+    ROUTE_LOCAL_AI_ASSISTED,
+    EffectiveRoute,
+    resolve_effective_route,
+)
+from app.orchestrator.planning_constraints import (
+    resolve_planning_constraints_for_production,
+)
 from app.production.storage import (
     compute_content_hash,
     load_production,
@@ -198,6 +208,159 @@ def translate_provider_intent(
         config.visual_default_provider = intent
 
 
+def apply_generation_strategy(
+    production: Production,
+    config: OrchestratorConfig,
+    plan: ProductionPlan,
+) -> None:
+    """LEGACY (Batch 1C bridge): apply the persisted GENERATION STRATEGY.
+
+    Superseded as the master abstraction by the first-class Production Route
+    (Batch 1D): :func:`apply_production_route` now owns this seam's
+    responsibility, and ``_config_for_unit`` resolves the effective route.
+    This bridge is RETAINED unchanged for backwards compatibility: existing
+    productions and the frozen Batch 1C behavioral contract keep working,
+    and route-compilation equivalence is tested against it.
+
+    This is a pure translation (the same seam ``translate_provider_intent``
+    uses): it only re-points the EXISTING routing/source configuration; it
+    never builds providers, touches credentials, or performs requests.
+
+    - ``local`` (default): no-op — the existing local pipeline is preserved
+      byte-for-byte, including every legacy production that lacks the field.
+    - ``alibaba_image_local_video``: scene IMAGES come from the existing
+      Alibaba image source (``AlibabaImageSource`` via the single explicit
+      ``alibaba`` selector — a configured-but-failed or unconfigured source
+      fails truthfully with NO silent fallthrough), while the downstream
+      local video/assembly pipeline is untouched.
+    - ``alibaba_video``: every scene routes to the existing Batch 1C
+      ``alibaba_video`` adapter (DashScope Wan t2v, model-aware size
+      selection, async submit/poll/download). A user who selects this NEVER
+      silently receives static-image Ken-Burns motion: the routing is
+      explicit and unavailability fails truthfully.
+
+    Mock mode is deliberately excluded: the explicit offline/test mode stays
+    fully hermetic (fixture imagery, mock planner/voice) regardless of
+    strategy.
+    """
+    strategy = getattr(production, "generation_strategy", None) or (
+        "local"
+    )
+    if config.mock_mode or strategy == "local":
+        return
+    if strategy == "alibaba_image_local_video":
+        config.image_source = "alibaba"
+        return
+    if strategy == "alibaba_video":
+        config.visual_mode = "hybrid"
+        config.visual_default_provider = "alibaba_video"
+        config.visual_scene_routing = {
+            scene.id: "alibaba_video" for scene in plan.scenes
+        }
+        return
+    raise ValueError(
+        f"unknown generation strategy: {strategy!r} "
+        "(expected one of: local, alibaba_image_local_video, alibaba_video)"
+    )
+
+
+@dataclass(frozen=True)
+class RouteCompilation:
+    """Batch 1D: the result of compiling one Production Route at the seam.
+
+    Route is INTENT; ``OrchestratorConfig`` remains the execution
+    configuration.  This record is evidence of what the route compiled into
+    (identity, version, source, surface, legacy overlays) so a production
+    stays explainable after execution.
+    """
+
+    route_id: str
+    route_version: int
+    label: str
+    source: str
+    execution_surface: str
+    legacy_strategy: Optional[str]
+    requires_native_motion: bool
+    overlays_applied: Tuple[str, ...]
+
+
+def apply_production_route(
+    config: OrchestratorConfig,
+    *,
+    effective_route: EffectiveRoute,
+    plan: ProductionPlan,
+) -> RouteCompilation:
+    """Batch 1D: compile the first-class PRODUCTION ROUTE into the EXISTING
+    execution configuration at the same seam the legacy generation-strategy
+    bridge owned (``translate_provider_intent`` → route compilation).
+
+    Pure translation: re-points the EXISTING routing/source configuration;
+    never builds providers, touches credentials, or performs requests.
+
+    Architectural invariants preserved here:
+
+    - Route ≠ provider/model: ``full_ai_video`` compiles onto the CURRENT
+      ``alibaba_video`` provider seam (the verified Batch 1C behavior) while
+      naming no provider/model in its identity; a later provider-resolution
+      layer will own this mapping.
+    - Route ≠ media strategy: ``local_ai_assisted`` leaves media sourcing to
+      the existing media-strategy configuration (``image_source``); legacy
+      compat overlays reproduce the exact Batch 1C bridge behavior for
+      pre-route productions.
+    - Route ≠ engine: the compiler only re-points the existing routing map;
+      per-scene engine selection and ImageMotion behavior are unchanged.
+    - Route ≠ audio: no audio policy is read or written here.
+    - Mock mode is deliberately excluded (fully hermetic), exactly like the
+      legacy bridge.
+    """
+    definition = effective_route.definition
+    overlays: Tuple[str, ...] = ()
+    if not config.mock_mode:
+        if definition.route_id == ROUTE_FULL_AI_VIDEO:
+            # Native motion video for every scene, via the CURRENT provider
+            # seam beneath the route (see invariant note above).  A user who
+            # selects this route NEVER silently receives still-image
+            # Ken-Burns motion: routing is explicit and unavailability fails
+            # truthfully downstream.
+            config.visual_mode = "hybrid"
+            config.visual_default_provider = "alibaba_video"
+            config.visual_scene_routing = {
+                scene.id: "alibaba_video" for scene in plan.scenes
+            }
+        elif definition.route_id == ROUTE_GOOGLE_FLOW:
+            # Existing Google Flow execution surface — no Flow redesign, no
+            # browser/CDP/session changes.  The pipeline's Flow path and the
+            # runtime flow_project_url validation remain authoritative.
+            config.visual_mode = "google_flow"
+        elif definition.route_id == ROUTE_LOCAL_AI_ASSISTED:
+            # The verified local path, byte-for-byte: media sourcing stays
+            # with the media-strategy configuration; the local engine and
+            # FFmpeg assembly are untouched.
+            pass
+        else:  # pragma: no cover - the registry validates route ids upstream
+            raise ValueError(
+                f"unknown production route: {definition.route_id!r} "
+                "(expected one of the registered Production Routes)"
+            )
+        # Legacy compatibility overlays (exact Batch 1C bridge behavior for
+        # productions whose route came from the legacy strategy).  Applied
+        # only when the mapped route equals the effective route, so an
+        # explicit route choice always wins.
+        for key, value in effective_route.compat_overlays.items():
+            setattr(config, key, value)
+            overlays = (*overlays, key)
+    return RouteCompilation(
+        route_id=definition.route_id,
+        route_version=definition.route_version,
+        label=definition.label,
+        source=effective_route.source,
+        execution_surface=definition.execution_surface,
+        legacy_strategy=effective_route.legacy_strategy,
+        requires_native_motion=definition.requires_native_motion,
+        overlays_applied=overlays,
+    )
+
+
 class ProductionExecutor:
     """Re-entrant production-level composer around the existing engine."""
 
@@ -351,6 +514,17 @@ class ProductionExecutor:
         brief = unit_to_content_brief(
             production, unit, defaults=self._brief_defaults()
         )
+        # Batch 1E: capability-aware planning.  The effective route's generic
+        # requirements plus provider-owned capability facts become generic
+        # PlanningConstraints on the PLANNING INPUT only — never execution
+        # configuration, never ProductionPlan.  Mock mode stays inert, and
+        # the resolution reads local capability metadata only (never a
+        # network call, never provider selection).
+        constraints = None
+        if not self.base_config.mock_mode:
+            constraints = resolve_planning_constraints_for_production(production)
+        if constraints is not None:
+            brief = brief.model_copy(update={"planning_constraints": constraints})
         result = self._planner_factory().plan(brief)
         if not result.success or result.plan is None:
             raise RuntimeError(result.error or f"plan generation failed for {unit.unit_id}")
@@ -370,6 +544,30 @@ class ProductionExecutor:
             "unit_plan_version": UNIT_PLAN_VERSION,
             "plan_identity": result.plan.project_id,
             "content_hash": content_hash,
+            # Phase 11C Batch 1: truthful intelligence provenance — which
+            # provider/model produced this plan (None for the explicit mock
+            # planner, which must never masquerade as AI production).
+            "planner_provider": result.provider,
+            "planner_model": result.model,
+            # Phase 11C Batch 1 hardening: durable record of planner-level
+            # warnings (e.g. the duration-preserving scene-duration schema
+            # normalization). Additive provenance; never execution state.
+            "planner_warnings": list(result.warnings or []),
+            # Batch 1E: generic capability-aware planning evidence — recorded
+            # ONLY when constraints were actually applied.  Generic shape;
+            # never provider/model identity; never execution state.
+            **(
+                {
+                    "planning_constraints": {
+                        "source": constraints.source,
+                        "allowed_scene_durations": list(
+                            constraints.allowed_scene_durations or ()
+                        ),
+                    }
+                }
+                if constraints is not None
+                else {}
+            ),
             "generated_at": datetime.now().isoformat(),
         }
         _atomic_write_text(meta_path, json.dumps(metadata, indent=2, ensure_ascii=False))
@@ -459,7 +657,11 @@ class ProductionExecutor:
         bound: Optional[BoundProject],
     ) -> OrchestratorConfig:
         config = self.base_config.model_copy(deep=True)
-        for key, value in artifacts.brief.model_dump().items():
+        brief_values = artifacts.brief.model_dump()
+        # Batch 1E boundary: PlanningConstraints are PLANNING INPUT only and
+        # must never leak into execution configuration.
+        brief_values.pop("planning_constraints", None)
+        for key, value in brief_values.items():
             setattr(config, key, value)
         config.supplied_content_plan_path = artifacts.plan_path
         config.production_id = production.production_id
@@ -470,6 +672,30 @@ class ProductionExecutor:
         config.unit_plan_content_hash = artifacts.content_hash
         config.resume_project_id = bound.directory_id if bound else None
         translate_provider_intent(unit, artifacts.plan, config)
+        # Batch 1D: the first-class PRODUCTION ROUTE is compiled at this
+        # seam, replacing the Batch 1C generation-strategy bridge's
+        # responsibility.  Precedence: explicit route > legacy
+        # generation_strategy > default local; the centralized legacy compat
+        # overlays keep pre-route productions byte-for-byte.  The legacy
+        # bridge (apply_generation_strategy) remains available unchanged.
+        effective = resolve_effective_route(
+            route=production.route,
+            generation_strategy=production.generation_strategy,
+        )
+        compilation = apply_production_route(
+            config, effective_route=effective, plan=artifacts.plan
+        )
+        logger.info(
+            "Route compiled: %s (v%s, %s; source=%s; surface=%s%s)",
+            compilation.route_id,
+            compilation.route_version,
+            compilation.label,
+            compilation.source,
+            compilation.execution_surface,
+            f"; overlays={list(compilation.overlays_applied)}"
+            if compilation.overlays_applied
+            else "",
+        )
         routes_to_flow = config.visual_mode == "google_flow" or (
             config.visual_mode == "hybrid"
             and any(provider == "google_flow" for provider in config.visual_scene_routing.values())
@@ -528,9 +754,13 @@ class ProductionExecutor:
                 production, unit, artifacts, bound=bound
             )
             logger.info(
-                "%s unit %s",
-                "Resuming" if bound else "Executing",
+                "production.execution_started production=%s unit=%s "
+                "route=%s legacy_strategy=%s action=%s",
+                production.production_id,
                 unit.unit_id,
+                production.route or "not_specified",
+                production.generation_strategy,
+                "resume" if bound else "execute",
             )
             attempted.add(unit.unit_id)
             self._orchestrator_factory(config).run()
@@ -541,9 +771,12 @@ __all__ = [
     "BoundProject",
     "ProductionExecutionReport",
     "ProductionExecutor",
+    "RouteCompilation",
     "UnitExecutionState",
     "UnitPlanArtifacts",
     "UnitProgress",
+    "apply_generation_strategy",
+    "apply_production_route",
     "translate_provider_intent",
     "unit_to_content_brief",
 ]

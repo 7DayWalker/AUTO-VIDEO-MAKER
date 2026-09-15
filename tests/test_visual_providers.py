@@ -70,9 +70,11 @@ def make_plan_file(tmp_path: Path, scene_count=1) -> Path:
 def make_source_clip(path: Path, seconds=2):
     """Create a tiny valid MP4 with silent audio (same recipe as mock videos)."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     subprocess.run(
         [
-            "ffmpeg", "-y",
+            resolve_ffmpeg() or "ffmpeg", "-y",
             "-f", "lavfi", "-i", f"color=c=blue:s=720x1280:d={seconds}",
             "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={seconds}",
             "-c:v", "libx264", "-preset", "ultrafast",

@@ -1,0 +1,324 @@
+﻿{
+    "production_id":  "prd_20260914_freshserver_test_c2_alibaba_full_ai_vide_297",
+    "production_title":  "FreshServer Test C2 Alibaba Full AI Video",
+    "plan_version":  1,
+    "unit_intent":  {
+                        "unit_id":  "unit-001",
+                        "ordinal":  1,
+                        "unit_type":  "standalone_video",
+                        "title":  "FreshServer Test C2 Alibaba Full AI Video",
+                        "description":  "Fresh-server verification Test C attempt 2: prove the Alibaba Wan text-to-video route end to end with evenly paced scenes.",
+                        "premise":  "Fresh-server verification Test C attempt 2: prove the Alibaba Wan text-to-video route end to end with evenly paced scenes.",
+                        "dependencies":  [
+
+                                         ],
+                        "content_intent":  {
+                                               "topic_override":  "Fresh-server verification Test C attempt 2: prove the Alibaba Wan text-to-video route end to end with evenly paced scenes.",
+                                               "target_duration":  10,
+                                               "platform":  "youtube_shorts",
+                                               "tone":  "evenly paced, curious and cinematic",
+                                               "style":  "curious and cinematic",
+                                               "number_of_scenes":  2
+                                           },
+                        "bible_refs":  [
+
+                                       ],
+                        "provider_intent":  "image_motion"
+                    },
+    "execution":  {
+                      "unit_id":  "unit-001",
+                      "ordinal":  1,
+                      "state":  "COMPLETED",
+                      "project_id":  "20260914_freshserver_verification_test_881",
+                      "bound_plan_version":  1,
+                      "reason":  null
+                  },
+    "run":  {
+                "running":  false
+            },
+    "blocking_units":  [
+
+                       ],
+    "plan_evidence":  {
+                          "plan_directory":  "productions/prd_20260914_freshserver_test_c2_alibaba_full_ai_vide_297/units/unit-001/plan",
+                          "exists":  true,
+                          "complete":  true,
+                          "meta":  {
+                                       "production_plan_version":  1,
+                                       "unit_plan_version":  1,
+                                       "plan_identity":  "20241219_fresh_server_verification_test_c2_001",
+                                       "content_hash":  "675d176aa3d54789d49d442bdb641750a00ba2e163d306e533e9d756a7571f05",
+                                       "planner_provider":  "alibaba",
+                                       "planner_model":  "qwen-plus",
+                                       "planner_warnings":  [
+
+                                                            ]
+                                   },
+                          "note":  "Plan artifacts are evidence only; the binding authority is ProjectManifest.production_binding."
+                      },
+    "bound_project":  {
+                          "project_id":  "20260914_freshserver_verification_test_881",
+                          "topic":  "Fresh-server verification Test C attempt 2: prove the Alibaba Wan text-to-video route end to end with evenly paced scenes.",
+                          "created_at":  "2026-09-14T15:57:08.419086",
+                          "updated_at":  "2026-09-14T16:00:49.459763",
+                          "completed_at":  "2026-09-14T16:00:49.459763",
+                          "current_stage":  "complete",
+                          "dry_run":  false,
+                          "mock_mode":  false,
+                          "stages":  {
+                                         "CONTENT":  {
+                                                         "status":  "COMPLETED",
+                                                         "error":  null,
+                                                         "started_at":  "2026-09-14T15:57:08.423599",
+                                                         "completed_at":  "2026-09-14T15:57:08.430312",
+                                                         "duration_seconds":  0.006713
+                                                     },
+                                         "VOICE":  {
+                                                       "status":  "COMPLETED",
+                                                       "error":  null,
+                                                       "started_at":  "2026-09-14T15:57:08.430312",
+                                                       "completed_at":  "2026-09-14T15:57:11.298746",
+                                                       "duration_seconds":  2.868434
+                                                   },
+                                         "SCENES":  {
+                                                        "status":  "COMPLETED",
+                                                        "error":  null,
+                                                        "started_at":  "2026-09-14T15:57:11.298746",
+                                                        "completed_at":  "2026-09-14T16:00:36.462871",
+                                                        "duration_seconds":  205.164125
+                                                    },
+                                         "CAPTIONS":  {
+                                                          "status":  "COMPLETED",
+                                                          "error":  null,
+                                                          "started_at":  "2026-09-14T16:00:36.467105",
+                                                          "completed_at":  "2026-09-14T16:00:36.481025",
+                                                          "duration_seconds":  0.01392
+                                                      },
+                                         "ASSEMBLY":  {
+                                                          "status":  "COMPLETED",
+                                                          "error":  null,
+                                                          "started_at":  "2026-09-14T16:00:36.481025",
+                                                          "completed_at":  "2026-09-14T16:00:49.396917",
+                                                          "duration_seconds":  12.915892
+                                                      },
+                                         "COMPLETE":  {
+                                                          "status":  "COMPLETED",
+                                                          "error":  null,
+                                                          "started_at":  null,
+                                                          "completed_at":  "2026-09-14T16:00:49.459763",
+                                                          "duration_seconds":  null
+                                                      }
+                                     },
+                          "scene_checkpoints":  {
+                                                    "scene_01":  {
+                                                                     "provider":  "alibaba_video",
+                                                                     "scene_id":  "scene_01",
+                                                                     "status":  "completed",
+                                                                     "task_id":  "35f651dd-3811-4620-814d-c6c030399ff6",
+                                                                     "model":  "wan2.2-t2v-plus",
+                                                                     "submitted_at":  "2026-09-14T14:57:12.640386+00:00",
+                                                                     "remote_status":  "RUNNING",
+                                                                     "attempt":  9,
+                                                                     "usage":  {
+                                                                                   "video_duration":  5,
+                                                                                   "video_ratio":  "1080*1920",
+                                                                                   "video_count":  1
+                                                                               },
+                                                                     "validation":  {
+                                                                                        "valid":  true,
+                                                                                        "duration":  5.0,
+                                                                                        "width":  1080,
+                                                                                        "height":  1920,
+                                                                                        "codec":  "h264",
+                                                                                        "has_video":  true,
+                                                                                        "has_audio":  false,
+                                                                                        "audio_codec":  null,
+                                                                                        "audio_duration":  null,
+                                                                                        "sample_rate":  null,
+                                                                                        "channels":  null,
+                                                                                        "audio_facts":  {
+                                                                                                            "has_audio":  false,
+                                                                                                            "audio_codec":  null,
+                                                                                                            "audio_duration":  null,
+                                                                                                            "sample_rate":  null,
+                                                                                                            "channels":  null,
+                                                                                                            "is_synthetic":  false
+                                                                                                        }
+                                                                                    },
+                                                                     "audio_facts":  {
+                                                                                         "has_audio":  false,
+                                                                                         "audio_codec":  null,
+                                                                                         "audio_duration":  null,
+                                                                                         "sample_rate":  null,
+                                                                                         "channels":  null,
+                                                                                         "is_synthetic":  false
+                                                                                     },
+                                                                     "updated_at":  "2026-09-14T15:58:55.532060",
+                                                                     "sequence":  1,
+                                                                     "generation_cost":  0
+                                                                 },
+                                                    "scene_02":  {
+                                                                     "provider":  "alibaba_video",
+                                                                     "scene_id":  "scene_02",
+                                                                     "status":  "completed",
+                                                                     "task_id":  "00c8df4a-0c30-41c6-a141-424e7bce066a",
+                                                                     "model":  "wan2.2-t2v-plus",
+                                                                     "submitted_at":  "2026-09-14T14:58:57.402309+00:00",
+                                                                     "remote_status":  "RUNNING",
+                                                                     "attempt":  9,
+                                                                     "usage":  {
+                                                                                   "video_duration":  5,
+                                                                                   "video_ratio":  "1080*1920",
+                                                                                   "video_count":  1
+                                                                               },
+                                                                     "validation":  {
+                                                                                        "valid":  true,
+                                                                                        "duration":  5.0,
+                                                                                        "width":  1080,
+                                                                                        "height":  1920,
+                                                                                        "codec":  "h264",
+                                                                                        "has_video":  true,
+                                                                                        "has_audio":  false,
+                                                                                        "audio_codec":  null,
+                                                                                        "audio_duration":  null,
+                                                                                        "sample_rate":  null,
+                                                                                        "channels":  null,
+                                                                                        "audio_facts":  {
+                                                                                                            "has_audio":  false,
+                                                                                                            "audio_codec":  null,
+                                                                                                            "audio_duration":  null,
+                                                                                                            "sample_rate":  null,
+                                                                                                            "channels":  null,
+                                                                                                            "is_synthetic":  false
+                                                                                                        }
+                                                                                    },
+                                                                     "audio_facts":  {
+                                                                                         "has_audio":  false,
+                                                                                         "audio_codec":  null,
+                                                                                         "audio_duration":  null,
+                                                                                         "sample_rate":  null,
+                                                                                         "channels":  null,
+                                                                                         "is_synthetic":  false
+                                                                                     },
+                                                                     "updated_at":  "2026-09-14T16:00:36.453038",
+                                                                     "sequence":  2,
+                                                                     "generation_cost":  0
+                                                                 }
+                                                },
+                          "scene_checkpoint_rows":  [
+                                                        {
+                                                            "scene_id":  "scene_01",
+                                                            "status":  "completed",
+                                                            "artifact_state":  "AVAILABLE",
+                                                            "provider":  "alibaba_video",
+                                                            "job_id_present":  false,
+                                                            "generation_cost":  0,
+                                                            "video_available":  true,
+                                                            "media_url":  "/api/projects/20260914_freshserver_verification_test_881/scenes/scene_01/media",
+                                                            "updated_at":  "2026-09-14T15:58:55.532060"
+                                                        },
+                                                        {
+                                                            "scene_id":  "scene_02",
+                                                            "status":  "completed",
+                                                            "artifact_state":  "AVAILABLE",
+                                                            "provider":  "alibaba_video",
+                                                            "job_id_present":  false,
+                                                            "generation_cost":  0,
+                                                            "video_available":  true,
+                                                            "media_url":  "/api/projects/20260914_freshserver_verification_test_881/scenes/scene_02/media",
+                                                            "updated_at":  "2026-09-14T16:00:36.453038"
+                                                        }
+                                                    ],
+                          "production_binding":  {
+                                                     "production_id":  "prd_20260914_freshserver_test_c2_alibaba_full_ai_vide_297",
+                                                     "unit_id":  "unit-001",
+                                                     "production_plan_version":  1,
+                                                     "unit_plan_identity":  "20241219_fresh_server_verification_test_c2_001",
+                                                     "unit_plan_version":  1,
+                                                     "unit_plan_content_hash":  "675d176aa3d54789d49d442bdb641750a00ba2e163d306e533e9d756a7571f05",
+                                                     "project_id":  "20260914_freshserver_verification_test_881",
+                                                     "bound_at":  "2026-09-14T15:57:08.419086"
+                                                 },
+                          "publications":  [
+
+                                           ],
+                          "artifacts":  {
+                                            "content_plan":  {
+                                                                 "type":  "Content plan",
+                                                                 "state":  "AVAILABLE",
+                                                                 "available":  true,
+                                                                 "safe_path":  "output/projects/20260914_freshserver_verification_test_881/content/20241219_fresh_server_verification_test_c2_001/production_plan.json",
+                                                                 "media_url":  null,
+                                                                 "reason":  null
+                                                             },
+                                            "voice_audio":  {
+                                                                "type":  "Voice audio",
+                                                                "state":  "RECORDED BUT MISSING",
+                                                                "available":  false,
+                                                                "safe_path":  null,
+                                                                "media_url":  null,
+                                                                "reason":  "recorded file type is not supported for browser preview"
+                                                            },
+                                            "voice_timing":  {
+                                                                 "type":  "Voice timing",
+                                                                 "state":  "AVAILABLE",
+                                                                 "available":  true,
+                                                                 "safe_path":  "output/projects/20260914_freshserver_verification_test_881/voice/20241219_fresh_server_verification_test_c2_001/voice_timing.json",
+                                                                 "media_url":  null,
+                                                                 "reason":  null
+                                                             },
+                                            "scene_manifest":  {
+                                                                   "type":  "Scene manifest",
+                                                                   "state":  "AVAILABLE",
+                                                                   "available":  true,
+                                                                   "safe_path":  "output/projects/20260914_freshserver_verification_test_881/scenes/20241219_fresh_server_verification_test_c2_001/scene_manifest.json",
+                                                                   "media_url":  null,
+                                                                   "reason":  null
+                                                               },
+                                            "captions":  {
+                                                             "type":  "Captions",
+                                                             "state":  "AVAILABLE",
+                                                             "available":  true,
+                                                             "safe_path":  "output/projects/20260914_freshserver_verification_test_881/captions/captions.srt",
+                                                             "media_url":  null,
+                                                             "reason":  null
+                                                         },
+                                            "final_video":  {
+                                                                "type":  "Final video",
+                                                                "state":  "AVAILABLE",
+                                                                "available":  true,
+                                                                "safe_path":  "output/projects/20260914_freshserver_verification_test_881/final/20241219_fresh_server_verification_test_c2_001_final.mp4",
+                                                                "media_url":  "/api/projects/20260914_freshserver_verification_test_881/media",
+                                                                "reason":  null
+                                                            }
+                                        }
+                      },
+    "scene_checkpoint_rows":  [
+                                  {
+                                      "scene_id":  "scene_01",
+                                      "status":  "completed",
+                                      "artifact_state":  "AVAILABLE",
+                                      "provider":  "alibaba_video",
+                                      "job_id_present":  false,
+                                      "generation_cost":  0,
+                                      "video_available":  true,
+                                      "media_url":  "/api/projects/20260914_freshserver_verification_test_881/scenes/scene_01/media",
+                                      "updated_at":  "2026-09-14T15:58:55.532060"
+                                  },
+                                  {
+                                      "scene_id":  "scene_02",
+                                      "status":  "completed",
+                                      "artifact_state":  "AVAILABLE",
+                                      "provider":  "alibaba_video",
+                                      "job_id_present":  false,
+                                      "generation_cost":  0,
+                                      "video_available":  true,
+                                      "media_url":  "/api/projects/20260914_freshserver_verification_test_881/scenes/scene_02/media",
+                                      "updated_at":  "2026-09-14T16:00:36.453038"
+                                  }
+                              ],
+    "failure_details":  [
+
+                        ],
+    "sample":  false
+}

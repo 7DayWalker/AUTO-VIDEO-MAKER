@@ -21,6 +21,7 @@ from urllib.parse import quote, urljoin
 from playwright.sync_api import sync_playwright, Page, Browser, TimeoutError as PlaywrightTimeout
 
 from app.content.models import ProductionPlan
+from app.assembly.ffmpeg import resolve_ffprobe
 from app.flow.browser import (
     connect_to_chrome,
     get_page_from_browser,
@@ -115,10 +116,26 @@ def validate_video_file(file_path: Path, expected_aspect_ratio: str = None) -> d
     if file_size == 0:
         return {"valid": False, "error": "File is empty", "file_size": 0}
     
+    ffprobe = resolve_ffprobe()
+    if not ffprobe:
+        # Validation is part of the truthful execution contract: without
+        # FFprobe a scene can never be confirmed, so report invalid rather
+        # than passing unverified media.
+        return {
+            "valid": False,
+            "error": (
+                "FFprobe executable not found; video validation is "
+                "unavailable. Install FFmpeg and add it to PATH, or set "
+                "FFMPEG_PATH (ffprobe is derived from the same directory) "
+                "/ FFPROBE_PATH."
+            ),
+            "file_size": file_size,
+        }
+
     try:
         result = subprocess.run(
             [
-                "ffprobe",
+                ffprobe,
                 "-v", "quiet",
                 "-print_format", "json",
                 "-show_format",

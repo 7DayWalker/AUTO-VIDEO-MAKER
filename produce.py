@@ -27,6 +27,7 @@ from datetime import datetime
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from app.logging_setup import configure_logging
 from app.orchestrator.models import OrchestratorConfig, PipelineStage
 from app.orchestrator.pipeline import (
     ProductionOrchestrator,
@@ -44,26 +45,19 @@ from app.orchestrator.exceptions import (
 
 
 def setup_logging(verbose: bool = False) -> None:
-    """Configure logging."""
+    """Configure logging (delegates to the shared Batch 1I setup)."""
     ensure_orchestrator_directories()
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = ORCHESTRATOR_LOGS_DIR / f"produce_{timestamp}.log"
-    
+
     level = logging.DEBUG if verbose else logging.INFO
-    
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-    
-    # Reduce noise from some libraries
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    # Batch 1I: shared, idempotent configuration. Observable CLI behavior is
+    # preserved exactly: INFO by default (DEBUG with --verbose), the AVM text
+    # format, this timestamped file destination, stdout, and third-party
+    # noise suppression (urllib3/httpx held at WARNING centrally).
+    configure_logging(level=level, log_file=log_file)
 
 
 def load_persisted_visual_config(resume_project_id):

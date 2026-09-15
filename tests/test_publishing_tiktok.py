@@ -563,18 +563,39 @@ def _write_probe_video(tmp_path, size):
     return str(path)
 
 
-def test_step5f_default_chunk_math_unchanged(monkeypatch):
+def test_step5f_default_chunk_math_follows_tiktok_contract(monkeypatch):
+    # Phase 11C Batch 1 hardening (Finding 3): TikTok FILE_UPLOAD requires
+    # total_chunk_count = floor(video_size / chunk_size) (min 1), with the
+    # FINAL chunk absorbing the remainder. The old ceil math declared one
+    # chunk too many (e.g. 8 instead of 7 for the 75,699,693-byte field
+    # failure) and desynchronized the upload from the declaration.
     monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
     # The exact real candidate video from Step 5E.
-    assert _tk_mod._resolve_chunk_params(22_670_365, 10_000_000) == (10_000_000, 3)
+    assert _tk_mod._resolve_chunk_params(22_670_365, 10_000_000) == (10_000_000, 2)
+    # The exact field-reported failure: ceil said 8, TikTok requires 7.
+    assert _tk_mod._resolve_chunk_params(75_699_693, 10_485_760) == (10_485_760, 7)
 
 
 def test_step5f_chunk_math_edge_cases(monkeypatch):
     monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
     resolve = _tk_mod._resolve_chunk_params
-    assert resolve(5_000_000, 10_000_000) == (10_000_000, 1)     # smaller than one chunk
+    # Smaller than one chunk: single-chunk plan MUST declare
+    # chunk_size == video_size (declaring 10MB for a smaller video is what
+    # produced TikTok's "The chunk size is invalid").
+    assert resolve(5_000_000, 10_000_000) == (5_000_000, 1)
     assert resolve(20_000_000, 10_000_000) == (10_000_000, 2)    # exact multiple
-    assert resolve(20_000_001, 10_000_000) == (10_000_000, 3)    # one byte over the boundary
+    assert resolve(20_000_001, 10_000_000) == (10_000_000, 2)    # remainder rides the final chunk
+    assert resolve(10_000_000, 10_000_000) == (10_000_000, 1)    # exactly one chunk
+
+
+def test_step5f_chunk_math_rejects_empty_and_invalid_inputs(monkeypatch):
+    monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        _tk_mod._resolve_chunk_params(0, 10_000_000)
+    with _pytest.raises(ValueError):
+        _tk_mod._resolve_chunk_params(1_000, 0)
 
 
 def test_step5f_single_chunk_diagnostic_opt_in(monkeypatch):
@@ -583,7 +604,7 @@ def test_step5f_single_chunk_diagnostic_opt_in(monkeypatch):
         monkeypatch.setenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, value)
         assert _tk_mod._resolve_chunk_params(size, 10_000_000) == (size, 1)
     monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV)
-    assert _tk_mod._resolve_chunk_params(size, 10_000_000) == (10_000_000, 3)
+    assert _tk_mod._resolve_chunk_params(size, 10_000_000) == (10_000_000, 2)
 
 
 def test_step5f_default_init_declares_multi_chunk(tmp_path, monkeypatch):
@@ -603,9 +624,38 @@ def test_step5f_default_init_declares_multi_chunk(tmp_path, monkeypatch):
         "source": "FILE_UPLOAD",
         "video_size": 25_000_000,
         "chunk_size": 10_000_000,
-        "total_chunk_count": 3,
+        "total_chunk_count": 2,
     }
     assert result["chunk_size"] == 10_000_000
+
+
+def test_small_video_init_declares_single_chunk_equal_to_video_size(
+    tmp_path, monkeypatch
+):
+    """Regression for the manual-test failure: a sub-10MB video (the normal
+    AVM short) must declare ONE chunk whose size equals the video size —
+    never a 10MB chunk over a smaller file ("The chunk size is invalid")."""
+    monkeypatch.delenv(_tk_mod.TIKTOK_SINGLE_CHUNK_INIT_ENV, raising=False)
+    video = _write_probe_video(tmp_path, 7_500_000)
+    session = _FakeSession()
+    publisher = _ProbePublisher(session)
+
+    result = publisher.init_direct_post(
+        video_path=video,
+        title="probe",
+        privacy_level="SELF_ONLY",
+    )
+
+    source_info = session.init_bodies[0]["source_info"]
+    assert source_info == {
+        "source": "FILE_UPLOAD",
+        "video_size": 7_500_000,
+        "chunk_size": 7_500_000,
+        "total_chunk_count": 1,
+    }
+    publisher.upload_video_chunks(result["upload_url"], video)
+    assert len(session.puts) == 1
+    assert session.puts[0]["Content-Range"] == "bytes 0-7499999/7500000"
 
 
 def test_step5f_diagnostic_mode_declares_and_uploads_single_chunk(
@@ -648,11 +698,12 @@ def test_step5f_upload_loop_matches_declaration_in_normal_mode(
     )
     publisher.upload_video_chunks(result["upload_url"], video)
 
+    # Exactly total_chunk_count PUTs; the FINAL chunk absorbs the remainder
+    # (15,000,000 bytes here — within TikTok's 128MB final-chunk allowance).
     assert result["chunk_size"] == 10_000_000
-    assert len(session.puts) == 3
+    assert len(session.puts) == 2
     assert session.puts[0]["Content-Range"] == "bytes 0-9999999/25000000"
-    assert session.puts[1]["Content-Range"] == "bytes 10000000-19999999/25000000"
-    assert session.puts[2]["Content-Range"] == "bytes 20000000-24999999/25000000"
+    assert session.puts[1]["Content-Range"] == "bytes 10000000-24999999/25000000"
 
 
 # ---------------------------------------------------------------------------

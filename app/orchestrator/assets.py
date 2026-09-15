@@ -38,6 +38,13 @@ PROVIDER_EXTERNAL_VIDEO = "external_video"
 PROVIDER_GEMINI_OMNI = "gemini_omni"
 # Phase 7E: generic OpenRouter video generation; no local asset is required.
 PROVIDER_OPENROUTER_VIDEO = "openrouter_video"
+# Batch 1C: Alibaba (DashScope Wan t2v) motion-video generation; like the
+# other generation providers it produces the scene video directly from the
+# prompt and requires no local source asset (its resolve_asset is None by
+# contract). Exempting it keeps the Phase 6C asset gate truthful for the
+# user-selected alibaba_video generation strategy instead of demanding an
+# image from a prompt-driven video provider.
+PROVIDER_ALIBABA_VIDEO = "alibaba_video"
 
 # Media types each zero-cost provider can legitimately consume.
 REQUIRED_MEDIA_TYPES = {
@@ -52,6 +59,7 @@ GENERATION_PROVIDERS = {
     PROVIDER_GOOGLE_FLOW,
     PROVIDER_GEMINI_OMNI,
     PROVIDER_OPENROUTER_VIDEO,
+    PROVIDER_ALIBABA_VIDEO,
 }
 
 
@@ -246,7 +254,13 @@ def intake_assets(
             "bytes": stored_path.stat().st_size,
         }
         prov = (provenance or {}).get(scene_id) or {}
-        for key in ("supplied_by", "source_provider", "source_status"):
+        # Phase 11C Batch 1 hardening: "source_metadata" carries the visual
+        # source's rich provenance (kind, license, photographer, landing
+        # page, AI model, usage/cost) — additive, secret-free, and never a
+        # routing authority.
+        for key in (
+            "supplied_by", "source_provider", "source_status", "source_metadata",
+        ):
             if prov.get(key):
                 entry[key] = prov[key]
         manifest["assets"][scene_id] = entry

@@ -27,8 +27,20 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
-# Default LLM provider (openrouter, gemini, mock)
+# Default LLM provider (alibaba, openrouter, gemini, mock).
+# Batch 1C: "alibaba" selects Alibaba Cloud Model Studio as PRIMARY with
+# classified OpenRouter FALLBACK (see ALIBABA_FALLBACK_ENABLED below).
 DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "gemini")
+
+# ----- Alibaba Cloud Model Studio (Batch 1C PRIMARY provider) -----
+# Configuration lives in app/content/providers/alibaba.py; these switches
+# control wrapper-level behavior only. The credential itself is read from
+# ALIBABA_API_KEY by the provider (never here, never logged, never persisted).
+# ALIBABA_FALLBACK_ENABLED=false makes the deployment honestly Alibaba-only:
+# eligible Alibaba failures then fail truthfully instead of hitting OpenRouter.
+ALIBABA_FALLBACK_ENABLED = os.getenv(
+    "ALIBABA_FALLBACK_ENABLED", "true"
+).strip().lower() not in ("0", "false", "no", "off")
 
 # Request timeout (seconds)
 LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))

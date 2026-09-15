@@ -1,0 +1,10 @@
+﻿{
+    "status":  "created",
+    "production_id":  "prd_20260914_freshserver_test_a_local_hybrid_200",
+    "title":  "FreshServer Test A Local Hybrid",
+    "unit_count":  1,
+    "creation_method":  "local",
+    "generation_strategy":  "local",
+    "cost_class":  "local_free",
+    "message":  "Production intent created. Execute it explicitly from Production Detail."
+}

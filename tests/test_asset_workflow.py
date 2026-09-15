@@ -31,8 +31,10 @@ from app.orchestrator.visual_providers import (
 
 def make_image(path: Path, color="red", size="720x1280"):
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi",
+        [resolve_ffmpeg() or "ffmpeg", "-y", "-f", "lavfi",
          "-i", f"color=c={color}:s={size}",
          "-frames:v", "1", str(path)],
         capture_output=True, check=True, timeout=60,
@@ -41,8 +43,10 @@ def make_image(path: Path, color="red", size="720x1280"):
 
 def make_clip(path: Path, seconds=2, size="720x1280"):
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     subprocess.run(
-        ["ffmpeg", "-y",
+        [resolve_ffmpeg() or "ffmpeg", "-y",
          "-f", "lavfi", "-i", f"color=c=blue:s={size}:d={seconds}",
          "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={seconds}",
          "-c:v", "libx264", "-preset", "ultrafast",

@@ -37,8 +37,10 @@ from app.orchestrator.visual_providers import (
 
 def make_clip(path: Path, seconds=1, size="180x320"):
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     subprocess.run(
-        ["ffmpeg", "-y",
+        [resolve_ffmpeg() or "ffmpeg", "-y",
          "-f", "lavfi", "-i", f"color=c=blue:s={size}:d={seconds}",
          "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={seconds}",
          "-c:v", "libx264", "-preset", "ultrafast",

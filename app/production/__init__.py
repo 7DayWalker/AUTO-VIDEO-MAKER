@@ -6,6 +6,12 @@ Public surface of the production intent package:
 - ``models``      — the durable intent artifact schema (Production and its
                     components). Intent ONLY: no execution state, no transport,
                     no credentials, no provider invocation.
+- ``routes``      — the first-class PRODUCTION ROUTE registry (Batch 1D):
+                    product-level route identities, requirements/defaults,
+                    and the centralized legacy ``generation_strategy``
+                    compatibility mapping. Route is intent: never a provider,
+                    model, media strategy, audio strategy, engine, assembly,
+                    quality, or distribution concept.
 - ``identity``    — collision-safe ``prd_YYYYMMDD_<slug>_<###>`` allocation.
 - ``validation``  — deliberate, evidence-based artifact validation
                     (schema compatibility, intent/execution separation,
@@ -20,6 +26,7 @@ from app.production.models import (
     BIBLE_CANONICAL_SECTIONS,
     PROVIDER_INTENT_DEFAULT,
     PROVIDER_INTENT_NAMES,
+    PRODUCTION_ROUTES,
     RECOMMENDED_UNIT_TYPES,
     SCHEMA_NAME,
     SUPPORTED_SCHEMA_VERSION,
@@ -30,6 +37,14 @@ from app.production.models import (
     ProductionBible,
     ProductionCommand,
     ProductionUnit,
+)
+from app.production.routes import (
+    DEFAULT_PRODUCTION_ROUTE,
+    ROUTE_REGISTRY,
+    EffectiveRoute,
+    LegacyStrategyRouteMapping,
+    resolve_effective_route,
+    route_id_for_legacy_strategy,
 )
 from app.production.identity import (
     generate_production_id,
@@ -67,6 +82,7 @@ __all__ = [
     "PROVIDER_INTENT_DEFAULT",
     "BIBLE_CANONICAL_SECTIONS",
     "RECOMMENDED_UNIT_TYPES",
+    "PRODUCTION_ROUTES",
     "Production",
     "ProductionCommand",
     "ProductionBible",
@@ -74,6 +90,13 @@ __all__ = [
     "ProductionUnit",
     "EpisodeMetadata",
     "PlanReference",
+    # routes (Batch 1D: first-class Production Route)
+    "DEFAULT_PRODUCTION_ROUTE",
+    "ROUTE_REGISTRY",
+    "EffectiveRoute",
+    "LegacyStrategyRouteMapping",
+    "resolve_effective_route",
+    "route_id_for_legacy_strategy",
     # identity
     "generate_production_id",
     "production_id_exists",

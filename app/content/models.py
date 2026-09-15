@@ -6,8 +6,8 @@ Pydantic models for content briefs, scripts, scenes, and production plans.
 
 import re
 from datetime import datetime
-from typing import Any, Dict, Optional, List, Literal
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any, Dict, Optional, List, Literal, Tuple
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.content.config import (
     SUPPORTED_PLATFORMS,
@@ -23,6 +23,26 @@ from app.content.config import (
     MIN_SCENE_DURATION,
     MAX_SCENE_DURATION,
 )
+
+
+class PlanningConstraints(BaseModel):
+    """Batch 1E: generic capability-aware PLANNING constraints.
+
+    Derived upstream from Production Route requirements plus provider/model
+    capability facts, and attached to the ContentBrief as a PLANNING INPUT
+    only.  Deliberately generic: never a provider name, model id, vendor, or
+    execution configuration; never persisted into ``ProductionPlan``; never
+    carried into ``OrchestratorConfig``.  The provider adapters remain the
+    final authority at generation time.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Exact per-scene durations (integer seconds) the resolved video model
+    #: accepts, when authoritatively known; None = no duration constraint.
+    allowed_scene_durations: Optional[Tuple[int, ...]] = None
+    #: Generic evidence label for where the constraint came from.
+    source: str = "model_capability"
 
 
 class ContentBrief(BaseModel):
@@ -60,6 +80,17 @@ class ContentBrief(BaseModel):
     production_context: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Optional production-derived planning context",
+    )
+    # Batch 1E: generic capability-aware planning constraints (e.g. allowed
+    # scene durations) derived from route requirements + provider/model
+    # capability facts.  PLANNING INPUT only — additive; legacy briefs
+    # without this field behave exactly as before.
+    planning_constraints: Optional[PlanningConstraints] = Field(
+        default=None,
+        description=(
+            "Optional generic planning constraints for capability-aware "
+            "planning (planning input only; never execution configuration)"
+        ),
     )
     
     @field_validator("platform")
@@ -139,6 +170,15 @@ class Scene(BaseModel):
     visual_style: Optional[str] = Field(default=None, description="Visual style notes")
     camera_direction: Optional[str] = Field(default=None, description="Camera movement")
     sound_design: Optional[str] = Field(default=None, description="Sound effects notes")
+    # Phase 11C Batch 1 hardening: minimal scene-level visual-source
+    # intelligence hint for the visual ROUTING layer. "ai_image" = the scene
+    # needs AI image generation (specific fictional/cinematic visual);
+    # "stock" = real-world stock imagery can represent it; None = no hint
+    # (routing uses the configured chain order). Additive planning signal
+    # only — never execution state, never a provider identity.
+    visual_source: Optional[str] = Field(
+        default=None, description="Visual acquisition hint: ai_image | stock"
+    )
     
     @field_validator("id")
     @classmethod
@@ -148,6 +188,30 @@ class Scene(BaseModel):
         if not re.match(r'^[a-zA-Z0-9_-]+$', v):
             raise ValueError(f"Scene ID must be alphanumeric with underscores/hyphens: {v}")
         return v
+    
+    @field_validator("visual_source")
+    @classmethod
+    def validate_visual_source(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize the routing hint leniently (never reject a whole plan
+        because a model phrased the hint slightly differently)."""
+        if v is None:
+            return None
+        text = str(v).strip().lower().replace("-", "_").replace(" ", "_")
+        if not text:
+            return None
+        ai_values = {
+            "ai_image", "ai", "ai_generated", "ai_gen", "generated",
+            "generate", "generation", "synthetic",
+        }
+        stock_values = {
+            "stock", "stock_photo", "stock_image", "photo", "photography",
+            "real", "realistic", "real_world",
+        }
+        if text in ai_values:
+            return "ai_image"
+        if text in stock_values:
+            return "stock"
+        return None
     
     @field_validator("purpose")
     @classmethod

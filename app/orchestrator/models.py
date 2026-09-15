@@ -413,6 +413,14 @@ class OrchestratorConfig(BaseModel):
     openrouter_model: Optional[str] = Field(
         default_factory=lambda: (os.getenv("AVM_OPENROUTER_MODEL") or "").strip() or None
     )
+    # Batch 1F (configured-model evidence): the configured Alibaba video model
+    # rides with the scene configuration snapshot so CONFIGURED vs ACTUAL
+    # provenance stays distinguishable. Model selection/resolution itself is
+    # unchanged (the adapter still reads the env/default); this is
+    # configuration evidence and is never actual execution provenance.
+    alibaba_model: Optional[str] = Field(
+        default_factory=lambda: (os.getenv("AVM_ALIBABA_VIDEO_MODEL") or "").strip() or None
+    )
     openrouter_resolution: Optional[str] = Field(
         default_factory=lambda: (os.getenv("AVM_OPENROUTER_RESOLUTION") or "").strip() or None
     )
@@ -551,6 +559,10 @@ class OrchestratorConfig(BaseModel):
             "visual_scene_routing": dict(self.visual_scene_routing),
             "visual_source": self.image_source,
             "openrouter_model": self.openrouter_model,
+            # Batch 1F: configured-model evidence for the Alibaba adapter
+            # (selection stays env/default inside the adapter; this snapshot
+            # only records what was configured, never what actually ran).
+            "alibaba_model": self.alibaba_model,
             "openrouter_resolution": self.openrouter_resolution,
             "openrouter_allow_paid": self.openrouter_allow_paid,
             "openrouter_allow_paid_fallback": self.openrouter_allow_paid_fallback,

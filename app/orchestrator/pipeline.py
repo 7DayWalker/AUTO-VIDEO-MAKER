@@ -35,8 +35,9 @@ from app.assembly.audio_contract import (
     DEFAULT_AUDIO_POLICY,
     normalize_audio_policy,
 )
-from app.assembly.ffmpeg import probe_media
+from app.assembly.ffmpeg import probe_media, resolve_ffmpeg
 from app.orchestrator.captions import generate_srt_from_timing, validate_srt_file
+from app.voice.config import VOICE_DURATION_WARNING_THRESHOLD
 from app.voice.validator import validate_audio_file
 from app.orchestrator.exceptions import (
     OrchestratorError,
@@ -62,6 +63,94 @@ def ensure_orchestrator_directories() -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
 
+# Batch 1A: the LOCAL narration-driven providers whose render duration may be
+# reconciled to the measured narration timeline. Remote/billable providers
+# (gemini_omni, openrouter_video, google_flow, external_video) are deliberately
+# excluded: their generated media owns its own duration/audio (Phase 7D;
+# roadmap 8A.12) and keeps its plan-backed generation length.
+LOCAL_RENDER_PROVIDERS = frozenset({"image_motion", "local_asset"})
+
+
+def reconcile_local_render_durations(
+    planned_durations: List[float],
+    narration_duration: float,
+    *,
+    shrink_deadband_seconds: float = 2.0,
+    min_duration: int = 1,
+    max_duration: int = 60,
+) -> Optional[List[int]]:
+    """Reconcile LOCAL scene render durations to the measured narration.
+
+    Batch 1A synchronization fix. The local still-image motion route renders
+    scenes from the plan's independent ``estimated_duration`` values while the
+    narration duration is only measured after the voice stage; when the two
+    diverge, assembly pads (or trims) narration against the mismatched visual
+    timeline (observed as ~36.2s of narration inside a ~60s video). This helper
+    redistributes the planned proportions across the measured narration
+    duration so the rendered visual total converges on the narration timeline.
+
+    Returns ``None`` when reconciliation must not apply:
+
+    - no/invalid narration or no scenes;
+    - a narration SHORTFALL within ``shrink_deadband_seconds`` of the planned
+      total (the existing assembly tolerance/padding handles container and
+      codec timing differences; extension below has no deadband, preserving
+      the previous always-extend behavior).
+
+    The returned integer durations always satisfy the renderer's
+    ``FlowGenerationConfig`` bounds (``1 <= duration <= 60``) and, whenever
+    achievable within those bounds, total at least ``ceil(narration_duration)``
+    so assembly never has to trim narration. Rounding uses floor plus a
+    largest-remainder distribution, which keeps the total overshoot below one
+    second instead of accumulating per-scene ceiling drift. The plan itself is
+    never mutated.
+    """
+    narration = float(narration_duration) if narration_duration else 0.0
+    if not planned_durations or narration <= 0:
+        return None
+    planned_total = sum(float(value) for value in planned_durations)
+    if planned_total <= 0:
+        return None
+    if (
+        narration < planned_total
+        and (planned_total - narration) <= shrink_deadband_seconds
+    ):
+        return None
+
+    scale = narration / planned_total
+    proportional = [max(0.0, float(value)) * scale for value in planned_durations]
+    target_total = int(math.ceil(narration))
+    durations = [
+        max(min_duration, min(max_duration, int(math.floor(value))))
+        for value in proportional
+    ]
+
+    remaining = target_total - sum(durations)
+    if remaining > 0:
+        # Largest-remainder distribution: grow the scenes that lost the most
+        # fractional seconds first (earlier sequence wins ties). Scene order in
+        # ``planned_durations`` is sequence order by caller contract.
+        order = sorted(
+            range(len(durations)),
+            key=lambda index: (
+                -(proportional[index] - math.floor(proportional[index])),
+                index,
+            ),
+        )
+        position = 0
+        while remaining > 0 and any(duration < max_duration for duration in durations):
+            index = order[position % len(order)]
+            if durations[index] < max_duration:
+                durations[index] += 1
+                remaining -= 1
+            position += 1
+    # A negative remainder cannot be corrected: the floors (raised to the
+    # renderer minimum) already exceed the narration target only when the
+    # minimum dominates many tiny scenes. That overshoot is truthful — the
+    # renderer minimum is a hard constraint — and the caller logs it.
+    return durations
+
+
 class ProductionOrchestrator:
     """
     End-to-end video production orchestrator.
@@ -78,6 +167,12 @@ class ProductionOrchestrator:
         self.config = config
         self.manifest: Optional[ProjectManifest] = None
         self.project_dir: Optional[Path] = None
+        # Batch 1A: reconciliation evidence recorded by the local boundary pass
+        # and surfaced by whichever scene-stage path aggregates the final
+        # SCENES result (the hybrid aggregation overwrites the local pass's
+        # stage result, so the evidence must survive on the instance).
+        self.batch1a_reconciled: bool = False
+        self.batch1a_render_durations: Optional[Dict[str, int]] = None
         
         # Ensure directories exist
         ensure_orchestrator_directories()
@@ -166,6 +261,16 @@ class ProductionOrchestrator:
             logger.info("PIPELINE COMPLETE")
             logger.info("=" * 60)
             logger.info(f"Final video: {self.manifest.final_video_path}")
+            # Batch 1I: one concise per-stage duration summary. The values
+            # already exist on StageResult; this only surfaces them.
+            logger.info(
+                "production.stage_durations %s",
+                {
+                    name: result.duration_seconds
+                    for name, result in self.manifest.stages.items()
+                    if result.duration_seconds is not None
+                },
+            )
             
             return self.manifest
             
@@ -1393,7 +1498,11 @@ class ProductionOrchestrator:
         - A configured-but-dormant/failed source is reported honestly and
           NEVER silently falls back to Google Flow or fake assets.
 
-        Returns ``(auto_mappings, notes, source_provider_id)``.
+        Returns ``(auto_mappings, notes, source_provider_id, scene_results)``
+        where ``scene_results`` maps each successfully sourced scene id to its
+        ``VisualSourceResult`` (the truthful per-scene provider identity and
+        provenance metadata — with routing, different scenes may legitimately
+        come from different configured child sources).
         """
         from app.orchestrator.visual_sources import (
             VisualSourceContext,
@@ -1410,7 +1519,7 @@ class ProductionOrchestrator:
         ).get("visual_source")
         source = create_visual_source(selector)
         if source is None:
-            return {}, [], None
+            return {}, [], None, {}
 
         pending_ids = {scene.id for scene in pending}
         target_ids = {
@@ -1425,17 +1534,18 @@ class ProductionOrchestrator:
         target_ids -= set((manifest.get("assets") or {}).keys())
 
         if not target_ids:
-            return {}, [], source.name
+            return {}, [], source.name, {}
 
         if not source.is_available():
             notes = [
                 f"automatic visual source '{source.name}' is not ready to "
                 f"source imagery: {source.configuration_summary()}"
             ]
-            return {}, notes, source.name
+            return {}, notes, source.name, {}
 
         scene_by_id = {scene.id: scene for scene in plan.scenes}
         auto_mappings: Dict[str, str] = {}
+        scene_results: Dict[str, Any] = {}
         notes: List[str] = []
         auto_src_dir = self.project_dir / "temp" / "auto_source"
 
@@ -1452,6 +1562,9 @@ class ProductionOrchestrator:
                 visual_style=getattr(scene, "visual_style", None),
                 camera_direction=getattr(scene, "camera_direction", None),
                 on_screen_text=getattr(scene, "on_screen_text", None),
+                # Phase 11C Batch 1 hardening: the scene's own optional
+                # visual-source intelligence hint drives the routing layer.
+                source_hint=getattr(scene, "visual_source", None),
                 aspect_ratio=self.config.scene_aspect_ratio,
                 output_dir=auto_src_dir,
             )
@@ -1464,13 +1577,14 @@ class ProductionOrchestrator:
                 )
             ):
                 auto_mappings[scene.id] = str(result.artifact_path)
+                scene_results[scene.id] = result
             else:
                 notes.append(
                     f"Scene '{sid}': automatic visual source {source.name} "
                     f"could not produce a usable image: {result.message}"
                 )
 
-        return auto_mappings, notes, source.name
+        return auto_mappings, notes, source.name, scene_results
     def _run_project_asset_gate(
         self,
         *,
@@ -1550,7 +1664,7 @@ class ProductionOrchestrator:
         manifest = asset_workflow.load_asset_manifest(self.project_dir)
         mappings = dict(self.config.asset_mappings or {})
 
-        auto_mappings, source_notes, source_provider = (
+        auto_mappings, source_notes, source_provider, scene_results = (
             self._auto_source_missing_assets(
                 plan=plan,
                 pending=pending,
@@ -1576,11 +1690,25 @@ class ProductionOrchestrator:
                 else:
                     provenance[sid] = {"supplied_by": "user"}
             for sid in auto_mappings:
-                provenance[sid] = {
+                result = scene_results.get(sid)
+                entry = {
                     "supplied_by": "auto_source",
-                    "source_provider": source_provider or "unknown",
+                    # Phase 11C Batch 1 hardening: TRUE per-scene provider
+                    # identity — with visual routing, the child source that
+                    # actually produced the artifact (pexels / openrouter /
+                    # wikimedia) can differ from the selector identity.
+                    "source_provider": (
+                        result.provider_id if result is not None
+                        else (source_provider or "unknown")
+                    ),
                     "source_status": "success",
                 }
+                if result is not None and result.metadata:
+                    # Rich visual-source provenance (kind, license,
+                    # photographer, landing page, AI model, usage/cost) is
+                    # persisted with the project-owned asset.
+                    entry["source_metadata"] = dict(result.metadata)
+                provenance[sid] = entry
             manifest, intake_errors = asset_workflow.intake_assets(
                 self.project_dir, plan.scenes, mappings, scoped_providers,
                 provenance=provenance,
@@ -1709,6 +1837,7 @@ class ProductionOrchestrator:
             SceneManifest,
         )
         from app.orchestrator.visual_providers import (
+            ZERO_COST_PROVIDERS,
             create_visual_provider,
         )
         # Phase 8: shared scene execution lifecycle lives behind the uniform
@@ -1750,24 +1879,54 @@ class ProductionOrchestrator:
         )
 
         scene_paths: list = []
-        # Local still-image motion has no provider-native timing to negotiate.
-        # Keep the immutable plan untouched, but extend generated local scene
-        # clips proportionally when validated narration would otherwise be
-        # truncated by assembly's existing audio-duration guard.
-        local_duration_scale = 1.0
+        # Batch 1A: reconcile the LOCAL narration-driven render timeline with
+        # the measured narration BEFORE any scene is rendered (post-voice,
+        # pre-render seam). The plan, the voice timing artifact, and remote/
+        # billable provider requests are never touched: media that owns its
+        # own duration/audio keeps its plan-backed generation length, and
+        # final audio selection stays with the Phase 7D assembly policy.
+        reconciled_render_durations: Optional[Dict[str, int]] = None
         if self.manifest.voice_audio_path and Path(self.manifest.voice_audio_path).is_file():
             try:
                 voice_duration = probe_media(Path(self.manifest.voice_audio_path)).duration
-                planned_duration = sum(float(scene.estimated_duration) for scene in plan.scenes)
-                if planned_duration > 0 and voice_duration > planned_duration:
-                    local_duration_scale = voice_duration / planned_duration
-                    logger.info(
-                        "Extending local motion timeline %.2fx to cover narration "
-                        "(%.2fs over %.2fs); plan intent remains unchanged",
-                        local_duration_scale,
-                        voice_duration,
-                        planned_duration,
+                if voice_duration and voice_duration > 0:
+                    ordered_scenes = sorted(plan.scenes, key=lambda s: s.sequence)
+                    planned_duration = sum(
+                        float(scene.estimated_duration) for scene in ordered_scenes
                     )
+                    reconciled = reconcile_local_render_durations(
+                        [float(scene.estimated_duration) for scene in ordered_scenes],
+                        float(voice_duration),
+                        shrink_deadband_seconds=VOICE_DURATION_WARNING_THRESHOLD,
+                    )
+                    if reconciled is not None:
+                        reconciled_render_durations = {
+                            scene.id: duration
+                            for scene, duration in zip(ordered_scenes, reconciled)
+                        }
+                        # Batch 1A: instance-level evidence survives the hybrid
+                        # aggregation's stage-result overwrite.
+                        self.batch1a_reconciled = True
+                        self.batch1a_render_durations = dict(reconciled_render_durations)
+                        logger.info(
+                            "Batch 1A: reconciled local visual timeline to the "
+                            "measured narration (%.2fs narration vs %.2fs planned); "
+                            "render durations: %s",
+                            voice_duration,
+                            planned_duration,
+                            ", ".join(
+                                f"{scene.id}={duration}s"
+                                for scene, duration in zip(ordered_scenes, reconciled)
+                            ),
+                        )
+                    else:
+                        logger.info(
+                            "Batch 1A: measured narration (%.2fs) is within "
+                            "tolerance of the planned local visual timeline "
+                            "(%.2fs); no reconciliation applied",
+                            voice_duration,
+                            planned_duration,
+                        )
             except Exception as exc:  # noqa: BLE001 - normal validation reports later
                 logger.warning("Could not inspect narration for local timing: %s", exc)
 
@@ -1810,21 +1969,29 @@ class ProductionOrchestrator:
                 scene_config=self.config.to_scene_config_dict(),
                 aspect_ratio=self.config.scene_aspect_ratio,
             )
-            # Batch 1: proportional extension is a LOCAL still-image motion
-            # behavior only.  Remote/billable providers that share this
-            # boundary pass (gemini_omni, external_video) must never receive
-            # a runtime duration override; their generation length stays
-            # plan-backed exactly as the operator configured it.
+            # Batch 1A: the reconciled timeline applies to LOCAL
+            # narration-driven scenes only. Remote/billable providers that
+            # share this boundary pass (gemini_omni, external_video) must
+            # never receive a runtime duration override; their generation
+            # length stays plan-backed exactly as the operator configured it,
+            # and any native audio they return keeps its Phase 7D ownership.
             if (
-                local_duration_scale > 1.0
-                and chosen_provider in {"image_motion", "local_asset"}
+                reconciled_render_durations is not None
+                and chosen_provider in LOCAL_RENDER_PROVIDERS
             ):
-                request.config.duration = max(
-                    1, math.ceil(float(scene.estimated_duration) * local_duration_scale)
-                )
+                request.config.duration = reconciled_render_durations[scene.id]
 
             def persist_local_checkpoint(update: Dict[str, Any]) -> None:
-                update = {**update, "provider": chosen_provider}
+                # Batch 1F: the EMITTING provider's identity survives. The
+                # routed/selected provider is already durably recorded in
+                # ``scene_config.scene_provider_routing`` (selection evidence);
+                # force-relabeling an OpenRouter fallback callback as
+                # ``alibaba_video`` produced invalid provenance (a checkpoint
+                # claiming alibaba_video while carrying OpenRouter's
+                # job_id/model). Providers that do not identify themselves in
+                # a callback still fall back to the routed name.
+                update = dict(update)
+                update.setdefault("provider", chosen_provider)
                 current = self.manifest.scene_checkpoints.get(update["scene_id"], {})
                 current.update(update)
                 self.manifest.scene_checkpoints[update["scene_id"]] = current
@@ -1834,9 +2001,9 @@ class ProductionOrchestrator:
                     sequence=scene.sequence,
                     file=f"{scene.id}.mp4",
                     status=current.get("status", "completed"),
-                    generation_cost=current.get("generation_cost", 0),
+                    generation_cost=current.get("generation_cost"),
                     checkpoint_evidence={
-                        "provider": chosen_provider,
+                        "provider": current.get("provider") or chosen_provider,
                         # Kept for backward compatibility with existing
                         # readers (output MP4 path). The true source lives in
                         # ``source_asset`` below (Phase 6C provenance fix).
@@ -1883,23 +2050,66 @@ class ProductionOrchestrator:
             )
 
             scene_paths.append(str(result.file_path))
+            # Batch 1H: truthful per-family cost accounting. The historical
+            # "generation_cost" field keeps its Google-Flow-credits semantics:
+            # the known non-billable local family consumes 0 credits, while
+            # billable remote providers (Alibaba/OpenRouter/Gemini) record
+            # None — their monetary truth now lives in the generic accounting
+            # block built by the completion seam (never a fabricated 0).
+            generation_cost = (
+                0 if chosen_provider in ZERO_COST_PROVIDERS else None
+            )
+            # Batch 1F/1H: the completion update is the SINGLE capture seam.
+            # ``completion`` carries the generic provenance AND accounting
+            # blocks derived from the ACTUAL provider result (never from the
+            # routing map); flat remote keys (task_id/job_id/...) keep arriving
+            # through the provider callbacks above.
+            completion = completion_checkpoint_update(
+                result=result,
+                validation=validation,
+                provider_name=chosen_provider,
+                sequence=scene.sequence,
+                extra_fields={
+                    "generation_cost": generation_cost,
+                    # Phase 6C: TRUE SOURCE asset provenance (project-owned
+                    # copy or pinned legacy file), distinct from the output
+                    # MP4 path.
+                    "source_asset": source_ref,
+                },
+                include_provenance=False,
+                checkpoint=self.manifest.scene_checkpoints.get(scene.id),
+            )
             self.manifest.scene_checkpoints[scene.id] = {
                 **self.manifest.scene_checkpoints.get(scene.id, {}),
-                **completion_checkpoint_update(
-                    result=result,
-                    validation=validation,
-                    provider_name=chosen_provider,
-                    sequence=scene.sequence,
-                    extra_fields={
-                        "generation_cost": 0,
-                        # Phase 6C: TRUE SOURCE asset provenance (project-owned
-                        # copy or pinned legacy file), distinct from the output
-                        # MP4 path.
-                        "source_asset": source_ref,
-                    },
-                    include_provenance=False,
-                ),
+                **completion,
             }
+            # Batch 1F/1H: the delivered artifact's authoritative provenance
+            # and accounting are written into the scene manifest entry at
+            # completion, so the manifest answers "what actually generated
+            # this artifact?" and "what did it consume?".
+            current_checkpoint = self.manifest.scene_checkpoints[scene.id]
+            scene_manifest.add_scene(
+                scene_id=scene.id,
+                sequence=scene.sequence,
+                file=f"{scene.id}.mp4",
+                status="completed",
+                generation_cost=current_checkpoint.get("generation_cost"),
+                checkpoint_evidence={
+                    "provider": (
+                        current_checkpoint.get("provider") or chosen_provider
+                    ),
+                    # Kept for backward compatibility with existing
+                    # readers (output MP4 path). The true source lives in
+                    # ``source_asset`` below (Phase 6C provenance fix).
+                    "asset_reference": current_checkpoint.get("file_path"),
+                    "source_asset": current_checkpoint.get("source_asset"),
+                },
+                file_path=str(result.file_path),
+                validation=validation,
+                provenance=completion.get("provenance") or {},
+                accounting=completion.get("accounting") or {},
+            )
+            save_scene_manifest(scene_manifest, project_scenes_dir)
             self._save_manifest()
             logger.info(f"Local scene {scene.id} complete: {result.file_path}")
 
@@ -1919,6 +2129,11 @@ class ProductionOrchestrator:
                     sorted(set((provider_by_scene or {}).values()))
                     or ["local_asset"]
                 ),
+                # Batch 1A evidence: whether the local render timeline was
+                # reconciled to the measured narration, and the exact integer
+                # render durations applied per scene (None = within tolerance).
+                "local_timeline_reconciled": reconciled_render_durations is not None,
+                "local_render_durations": reconciled_render_durations,
             },
             started_at=started_at,
         ))
@@ -2057,16 +2272,19 @@ class ProductionOrchestrator:
             if result_audio_facts is not None:
                 validation = {**validation, "audio_facts": result_audio_facts}
             scene_paths.append(str(result.file_path))
-            current = self.manifest.scene_checkpoints.get(scene.id, {})
-            current.update(
-                completion_checkpoint_update(
-                    result=result,
-                    validation=validation,
-                    provider_name=OPENROUTER_VIDEO_PROVIDER,
-                    sequence=scene.sequence,
-                    audio_facts=result_audio_facts,
-                )
+            # Batch 1F/1H: the completion update carries the same generic
+            # provenance AND accounting blocks written into the scene manifest
+            # entry below, so every path persists evidence in one vocabulary.
+            completion = completion_checkpoint_update(
+                result=result,
+                validation=validation,
+                provider_name=OPENROUTER_VIDEO_PROVIDER,
+                sequence=scene.sequence,
+                audio_facts=result_audio_facts,
+                checkpoint=self.manifest.scene_checkpoints.get(scene.id),
             )
+            current = self.manifest.scene_checkpoints.get(scene.id, {})
+            current.update(completion)
             self.manifest.scene_checkpoints[scene.id] = current
             scene_manifest.add_scene(
                 scene_id=scene.id,
@@ -2084,6 +2302,8 @@ class ProductionOrchestrator:
                 },
                 file_path=str(result.file_path),
                 validation=validation,
+                provenance=completion.get("provenance") or {},
+                accounting=completion.get("accounting") or {},
             )
             save_scene_manifest(scene_manifest, project_scenes_dir)
             self._save_manifest()
@@ -2196,6 +2416,11 @@ class ProductionOrchestrator:
                 "providers": providers_used,
                 "credits_used": self.manifest.total_credits_used - credits_before,
                 "routing": routing,
+                # Batch 1A evidence (recorded by the local boundary pass when
+                # the local render timeline was reconciled to the measured
+                # narration; False/None when not applicable).
+                "local_timeline_reconciled": self.batch1a_reconciled,
+                "local_render_durations": self.batch1a_render_durations,
             },
             started_at=started_at,
         ))
@@ -2505,11 +2730,20 @@ class ProductionOrchestrator:
         """Create a mock video file for testing."""
         import subprocess
         
+        ffmpeg = resolve_ffmpeg()
+        if not ffmpeg:
+            raise DependencyError(
+                "ffmpeg",
+                "FFmpeg executable not found; mock video creation is "
+                "unavailable. Install FFmpeg and add it to PATH, or set "
+                "FFMPEG_PATH.",
+            )
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Use FFmpeg to create a test video
         cmd = [
-            "ffmpeg", "-y",
+            ffmpeg, "-y",
             "-f", "lavfi",
             "-i", f"color=c=blue:s=1080x1920:d={duration}",
             "-f", "lavfi",
@@ -2525,9 +2759,13 @@ class ProductionOrchestrator:
             subprocess.run(cmd, capture_output=True, check=True, timeout=60)
             logger.debug(f"Created mock video: {output_path}")
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to create mock video: {e}")
-            # Create empty file as fallback
-            output_path.touch()
+            # Never leave an empty stand-in file behind: an invalid mock
+            # video must fail the stage truthfully.
+            raise DependencyError("ffmpeg", f"mock video creation failed: {e}")
         except FileNotFoundError:
-            logger.warning("FFmpeg not available for mock video creation")
-            output_path.touch()
+            raise DependencyError(
+                "ffmpeg",
+                "FFmpeg executable not found; mock video creation is "
+                "unavailable. Install FFmpeg and add it to PATH, or set "
+                "FFMPEG_PATH.",
+            )

@@ -214,6 +214,25 @@ class SceneManifestEntry(BaseModel):
     checkpoint_evidence: Dict[str, Any] = Field(default_factory=dict)
     file_path: Optional[str] = None
     validation: Dict[str, Any] = Field(default_factory=dict)
+    # Batch 1F: authoritative ACTUAL execution provenance for the DELIVERED
+    # artifact — the actual provider/model that produced it, the generic
+    # request_id/request_id_kind mapping of the provider-native task/job
+    # identity, and the fallback state. Written at scene completion from the
+    # provider result via ``completion_checkpoint_update``; never derived from
+    # routing/selection configuration. Additive and optional: legacy entries
+    # without this field load unchanged, and an empty dict means the
+    # provenance is unknown (never fabricated).
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+    # Batch 1H: authoritative PROVIDER ACCOUNTING for the delivered artifact —
+    # what each provider attempt consumed, whether it was billable, and what
+    # cost evidence exists. Related to provenance (same request identities)
+    # but deliberately NOT conflated with it: provenance answers WHO/WHAT
+    # executed; accounting answers WHAT WAS CONSUMED/BILLED. Additive and
+    # optional: legacy entries without this field load unchanged, and an
+    # empty dict means the accounting is unknown (never fabricated; a legacy
+    # generation_cost=0 is ambiguous and is never reinterpreted as a known
+    # provider monetary zero).
+    accounting: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SceneManifest(BaseModel):

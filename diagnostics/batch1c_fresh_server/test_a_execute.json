@@ -1,0 +1,7 @@
+﻿{
+    "status":  "executing",
+    "production_id":  "prd_20260914_freshserver_test_a_local_hybrid_200",
+    "unit_id":  null,
+    "current_state":  null,
+    "message":  "Execute command accepted for production prd_20260914_freshserver_test_a_local_hybrid_200. The Phase 10 ProductionExecutor is running in the background; COMPLETED units are never restarted and remote in-flight jobs are never re-submitted. Poll GET /api/productions/prd_20260914_freshserver_test_a_local_hybrid_200/progress for live state."
+}

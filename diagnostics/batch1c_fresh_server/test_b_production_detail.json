@@ -1,0 +1,78 @@
+﻿{
+    "production_id":  "prd_20260914_freshserver_test_b_alibaba_image_local_v_914",
+    "title":  "FreshServer Test B Alibaba Image Local Video",
+    "generation_strategy":  "alibaba_image_local_video",
+    "command":  {
+                    "text":  "Fresh-server verification Test B: Alibaba generates scene images, local AVM machinery assembles the video.",
+                    "workload_shape":  "single_video",
+                    "intended_unit_count":  1,
+                    "explicit_constraints":  {
+                                                 "mode":  "single_video",
+                                                 "output_intent":  "youtube_shorts",
+                                                 "target_duration":  10,
+                                                 "scene_count":  2,
+                                                 "creation_method":  "local",
+                                                 "cost_class":  "local_free"
+                                             },
+                    "creation_context":  {
+                                             "source":  "web_create_video"
+                                         },
+                    "issued_at":  "2026-09-14T15:50:44.620960"
+                },
+    "plan_version":  1,
+    "created_at":  "2026-09-14T15:50:44.620960",
+    "revised_at":  null,
+    "unit_count":  1,
+    "counts":  {
+                   "NOT_STARTED":  0,
+                   "BLOCKED":  0,
+                   "IN_FLIGHT":  0,
+                   "INCOMPLETE":  0,
+                   "COMPLETED":  1,
+                   "FAILED":  0
+               },
+    "complete":  true,
+    "units":  [
+                  {
+                      "intent":  {
+                                     "unit_id":  "unit-001",
+                                     "ordinal":  1,
+                                     "unit_type":  "standalone_video",
+                                     "title":  "FreshServer Test B Alibaba Image Local Video",
+                                     "description":  "Fresh-server verification Test B: Alibaba generates scene images, local AVM machinery assembles the video.",
+                                     "premise":  "Fresh-server verification Test B: Alibaba generates scene images, local AVM machinery assembles the video.",
+                                     "dependencies":  [
+
+                                                      ],
+                                     "content_intent":  {
+                                                            "topic_override":  "Fresh-server verification Test B: Alibaba generates scene images, local AVM machinery assembles the video.",
+                                                            "target_duration":  10,
+                                                            "platform":  "youtube_shorts",
+                                                            "tone":  "curious and cinematic",
+                                                            "style":  "curious and cinematic",
+                                                            "number_of_scenes":  2
+                                                        },
+                                     "bible_refs":  [
+
+                                                    ],
+                                     "provider_intent":  "image_motion"
+                                 },
+                      "execution":  {
+                                        "unit_id":  "unit-001",
+                                        "ordinal":  1,
+                                        "state":  "COMPLETED",
+                                        "project_id":  "20260914_freshserver_verification_test_273",
+                                        "bound_plan_version":  1,
+                                        "reason":  null
+                                    },
+                      "blocking_units":  [
+
+                                         ],
+                      "plan_exists":  true
+                  }
+              ],
+    "run":  {
+                "running":  false
+            },
+    "sample":  false
+}

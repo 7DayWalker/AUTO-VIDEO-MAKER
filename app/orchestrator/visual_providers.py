@@ -69,10 +69,15 @@ GEMINI_OMNI_DEFAULT_RESOLUTION = "720p"
 # enter zero-cost auto-sourcing behavior (Phase 6F targets image_motion /
 # local_asset scenes only).
 ZERO_COST_PROVIDERS = {LOCAL_ASSET_PROVIDER, IMAGE_MOTION_PROVIDER, EXTERNAL_VIDEO_PROVIDER}
+# Batch 1C: Alibaba Cloud Model Studio is AVM's PRIMARY AI video provider
+# (with classified OpenRouter fallback inside its adapter). It is
+# cost-bearing and never enters zero-cost auto-sourcing.
+ALIBABA_VIDEO_PROVIDER = "alibaba_video"
 VALID_PROVIDERS = ZERO_COST_PROVIDERS | {
     GOOGLE_FLOW_PROVIDER,
     GEMINI_OMNI_PROVIDER,
     OPENROUTER_VIDEO_PROVIDER,
+    ALIBABA_VIDEO_PROVIDER,
 }
 
 DEFAULT_HYBRID_PROVIDER = IMAGE_MOTION_PROVIDER
@@ -1256,6 +1261,19 @@ def create_visual_provider(
                     or default_openrouter_cache_path()
                 ),
                 generate_audio=scene_config.get("openrouter_generate_audio"),
+            )
+        if provider == ALIBABA_VIDEO_PROVIDER:
+            # Batch 1C: Alibaba is the PRIMARY AI video provider; its
+            # adapter owns the classified OpenRouter fallback. Configuration
+            # is read without network access; construction never calls the
+            # provider.
+            from app.orchestrator.alibaba_video import (
+                FallbackVideoVisualProvider,
+            )
+
+            return FallbackVideoVisualProvider(
+                scenes_output_dir,
+                model=scene_config.get("alibaba_model"),
             )
 
     mode = normalize_visual_mode(mode)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel
 
+from app.assembly.ffmpeg import resolve_ffprobe
 from app.voice.exceptions import VoiceValidationError
 
 logger = logging.getLogger(__name__)
@@ -66,10 +67,26 @@ def validate_audio_file(file_path: Path) -> AudioValidationResult:
         )
     
     # Use FFprobe to get audio info
+    ffprobe = resolve_ffprobe()
+    if not ffprobe:
+        # The production contract requires FFprobe to confirm a playable
+        # stream.  Fail truthfully and actionably; never accept unverified
+        # audio.
+        logger.error("FFprobe is not available; audio cannot be accepted")
+        return AudioValidationResult(
+            valid=False,
+            errors=[
+                "FFprobe executable not found; audio validation is unavailable. "
+                "Install FFmpeg (both ffmpeg and ffprobe) and add it to PATH, "
+                "or set FFMPEG_PATH (ffprobe is derived from the same "
+                "directory) / FFPROBE_PATH."
+            ],
+            file_size=file_size,
+        )
     try:
         result = subprocess.run(
             [
-                "ffprobe",
+                ffprobe,
                 "-v", "quiet",
                 "-print_format", "json",
                 "-show_format",

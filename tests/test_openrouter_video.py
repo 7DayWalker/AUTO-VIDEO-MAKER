@@ -43,8 +43,10 @@ PROJECT_ID = "20260829_openrouter_probe_001"
 
 def make_clip(path: Path, *, seconds: float = 1.0, size: str = "180x320", with_audio: bool = True) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
     args = [
-        "ffmpeg", "-y",
+        resolve_ffmpeg() or "ffmpeg", "-y",
         "-f", "lavfi", "-i", f"color=c=blue:s={size}:d={seconds}:r=30",
     ]
     if with_audio:

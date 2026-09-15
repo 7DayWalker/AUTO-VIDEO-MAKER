@@ -43,6 +43,20 @@ window.CC = (function () {
     if (run && run.error) return '<span class="badge err">Last run failed</span>';
     return "";
   }
+  /* Batch 1G: the first-class Production Route (product-level identity).
+     Never a provider/model, and never inferred from the legacy strategy. */
+  var ROUTE_LABELS = {
+    local_ai_assisted: "Local AI-Assisted",
+    full_ai_video: "Full AI Video",
+    google_flow: "Google Flow (legacy)"
+  };
+  function routeChip(route) {
+    if (!route) {
+      return '<span class="badge muted" title="Created before first-class Production Routes (Batch 1D); route not specified. Route is never inferred from the legacy generation strategy.">Route not specified (legacy)</span>';
+    }
+    var label = ROUTE_LABELS[route] || route;
+    return '<span class="badge muted" title="Production Route (product-level identity; not a provider/model): ' + C.esc(label) + '">' + C.esc(label) + '</span>';
+  }
   function actionButtons(p) {
     var counts = p.counts || {};
     var running = p.run && p.run.running;
@@ -57,7 +71,7 @@ window.CC = (function () {
   }
   return { STATES: STATES, ORDER: ORDER, stateInfo: stateInfo, stateBadge: stateBadge,
     stateExplanation: stateExplanation, countsRow: countsRow, progressBar: progressBar,
-    runBadge: runBadge, actionButtons: actionButtons };
+    runBadge: runBadge, routeChip: routeChip, actionButtons: actionButtons };
 })();
 
 CC.confirmDialog = function (opts, onConfirm) {
@@ -102,7 +116,7 @@ VIEWS.productions = {
       var attention = p.error || !p.counts ? "Production data requires inspection." : counts.FAILED ? "Failure requires inspection." : counts.BLOCKED ? "Dependencies require attention." : counts.IN_FLIGHT ? "Execution is active or a remote job is in flight." : counts.INCOMPLETE ? "Work can continue with Resume." : counts.NOT_STARTED ? "Ready for first execution." : "No attention required.";
       var tone = p.error || !p.counts || counts.FAILED ? "danger" : counts.BLOCKED || counts.INCOMPLETE ? "warn" : counts.IN_FLIGHT ? "info" : "neutral";
       return '<article class="card production-card attention-' + tone + '">' +
-        '<div class="production-card-head"><div><p class="eyebrow">Production</p><h2 class="production-title">' + COMPONENTS.esc(p.title) + '</h2><p class="mono muted-text">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + ' units</p></div><div>' + CC.runBadge(p.run) + '</div></div>' +
+        '<div class="production-card-head"><div><p class="eyebrow">Production</p><h2 class="production-title">' + COMPONENTS.esc(p.title) + '</h2><p class="mono muted-text">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + ' units</p></div><div>' + CC.routeChip(p.route) + CC.runBadge(p.run) + '</div></div>' +
         '<div class="attention-strip"><span class="attention-dot" aria-hidden="true"></span><span>' + COMPONENTS.esc(attention) + '</span></div>' +
         '<div class="production-card-body"><p class="command-label">Production intent</p><p class="command-text">' + COMPONENTS.esc(p.command_text) + '</p><div class="state-counts" aria-label="Six-state unit summary">' + CC.countsRow(counts) + '</div>' + CC.progressBar(counts, p.unit_count) + (p.error ? '<p class="inline-error">' + COMPONENTS.esc(p.error) + '</p>' : '') + '</div>' +
         '<div class="production-card-foot"><a class="btn btn-sm" href="#/productions/' + encodeURIComponent(p.production_id) + '">Inspect production</a><span class="spacer"></span>' + CC.actionButtons(p) + '</div></article>';

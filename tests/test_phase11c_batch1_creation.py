@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from app.production.storage import load_production
+from app.voice import config as voice_config
 from app.web import server as web
 
 
@@ -18,6 +19,20 @@ def _request():
         "scene_count": 6,
         "tone": "clear and cinematic",
     }
+
+
+class _StubProvider:
+    name = "stub-ai"
+    model = "stub-model"
+
+
+class _StubPlanner:
+    """Plan-time stand-in for the configured intelligence provider."""
+
+    provider = _StubProvider()
+
+    def plan(self, brief):
+        raise AssertionError("planner must not be invoked while only wiring")
 
 
 def test_creation_persists_intent_only(tmp_path, monkeypatch):
@@ -53,9 +68,29 @@ def test_creation_rejects_later_or_invalid_modes(tmp_path, monkeypatch):
     assert not (tmp_path / "productions").exists()
 
 
-def test_local_production_executor_is_real_and_offline_planned(tmp_path, monkeypatch):
+def test_local_production_executor_uses_configured_intelligence(
+    tmp_path, monkeypatch
+):
+    """Batch 1: web-created local productions plan via the CONFIGURED content
+    intelligence provider (never a hardcoded mock), narrate via the configured
+    TTS provider, and acquire imagery via the configured visual source."""
     monkeypatch.setattr(web, "PRODUCTIONS_DIR", tmp_path / "productions")
     monkeypatch.setattr(web, "PROJECTS_DIR", tmp_path / "projects")
+    monkeypatch.delenv("AVM_MOCK_MODE", raising=False)
+    monkeypatch.setenv("AVM_IMAGE_SOURCE", "wikimedia")
+    monkeypatch.setattr(voice_config, "TTS_PROVIDER", "edge_tts")
+
+    captured = {}
+    stub = _StubPlanner()
+
+    def _fake_factory(*, mock_mode=False, output_dir=None):
+        captured["mock_mode"] = mock_mode
+        return stub
+
+    monkeypatch.setattr(
+        "app.content.planner.create_scene_planner", _fake_factory
+    )
+
     status, payload = web.create_production_payload(_request())
     assert status == 201
 
@@ -64,5 +99,30 @@ def test_local_production_executor_is_real_and_offline_planned(tmp_path, monkeyp
     assert executor.base_config.mock_mode is False
     assert executor.base_config.visual_mode == "local"
     assert executor.base_config.visual_default_provider == "image_motion"
+    assert executor.base_config.image_source == "wikimedia"
+    assert executor.base_config.voice_provider == "edge_tts"
+    assert executor._planner_factory() is stub
+    assert captured["mock_mode"] is False
+
+
+def test_local_production_executor_explicit_mock_mode_is_offline(
+    tmp_path, monkeypatch
+):
+    """AVM_MOCK_MODE=1 is the explicit offline/test contract: mock planner,
+    mock narration, and fixture imagery — clearly labelled, never presented
+    as AI production."""
+    monkeypatch.setattr(web, "PRODUCTIONS_DIR", tmp_path / "productions")
+    monkeypatch.setattr(web, "PROJECTS_DIR", tmp_path / "projects")
+    monkeypatch.setenv("AVM_MOCK_MODE", "1")
+
+    status, payload = web.create_production_payload(_request())
+    assert status == 201
+
+    executor = web._production_executor(payload["production_id"])
+
+    assert executor.base_config.mock_mode is True
+    assert executor.base_config.visual_mode == "local"
+    assert executor.base_config.visual_default_provider == "image_motion"
     assert executor.base_config.image_source == "fixture"
+    assert executor.base_config.voice_provider == "mock"
     assert executor._planner_factory().provider.name == "mock"

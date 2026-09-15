@@ -1,0 +1,23 @@
+﻿{
+    "project_id":  "20260914_freshserver_verification_test_273",
+    "directory_id":  "20260914_freshserver_verification_test_273",
+    "topic":  "Fresh-server verification Test B: Alibaba generates scene images, local AVM machinery assembles the video.",
+    "created_at":  "2026-09-14T15:50:56.200692",
+    "current_stage":  "complete",
+    "stage_status":  "complete",
+    "final_video_available":  true,
+    "publications":  [
+
+                     ],
+    "sample":  false,
+    "production_binding":  {
+                               "production_id":  "prd_20260914_freshserver_test_b_alibaba_image_local_v_914",
+                               "unit_id":  "unit-001",
+                               "production_plan_version":  1,
+                               "unit_plan_identity":  "20241205_fresh_server_verification_test_b_001",
+                               "unit_plan_version":  1,
+                               "unit_plan_content_hash":  "3ae8d6b8c5f25f9298d30ff0ea3f2fb5f478f34b8f30ab44aae99bdcb7e41b47",
+                               "project_id":  "20260914_freshserver_verification_test_273",
+                               "bound_at":  "2026-09-14T15:50:56.200692"
+                           }
+}

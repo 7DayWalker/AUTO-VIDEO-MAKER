@@ -55,8 +55,19 @@ TIKTOK_SINGLE_CHUNK_INIT_ENV = "TIKTOK_SINGLE_CHUNK_INIT"
 def _resolve_chunk_params(size: int, chunk_size: int) -> tuple:
     """Return the effective (chunk_size, total_chunk_count) for a video.
 
-    Normal mode: ceil-division multi-chunk plan. Diagnostic single-chunk
-    mode (env-gated): one chunk covering the entire file.
+    TikTok FILE_UPLOAD contract (media transfer guide; verified against the
+    'invalid_params' field reports that Phase 11C Batch 1 hardening fixes):
+
+    - ``total_chunk_count`` = ``floor(video_size / chunk_size)``, minimum 1;
+    - the FINAL chunk absorbs the remainder bytes (it may exceed
+      ``chunk_size``, up to 128 MB) — there is no extra short chunk;
+    - when the plan is a single chunk, ``chunk_size`` MUST equal
+      ``video_size`` (declaring a 10 MB chunk for a smaller video is what
+      produced "The chunk size is invalid");
+    - chunks are otherwise 5-64 MB; the 10 MB default satisfies this.
+
+    Diagnostic single-chunk mode (env-gated, Step 5F) is unchanged: one
+    declared chunk covering the entire file.
     """
     if os.environ.get(TIKTOK_SINGLE_CHUNK_INIT_ENV, "").strip().lower() in {
         "1",
@@ -65,7 +76,15 @@ def _resolve_chunk_params(size: int, chunk_size: int) -> tuple:
         "on",
     }:
         return size, 1
-    return chunk_size, max(1, (size + chunk_size - 1) // chunk_size)
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if size <= 0:
+        raise ValueError("video file is empty; nothing can be uploaded")
+    total_chunks = max(1, size // chunk_size)
+    if total_chunks == 1:
+        # Single-chunk plan: the declared chunk size IS the video size.
+        return size, 1
+    return chunk_size, total_chunks
 
 # Scopes required by this publishing path (official scope names).
 TIKTOK_SCOPES = ["user.info.basic", "video.publish"]
@@ -507,17 +526,30 @@ class TikTokPublisher:
     ) -> None:
         """Upload the local file to the short-lived upload_url in chunks.
 
-        ``chunk_size=None`` resolves via the same plan as init (including the
-        opt-in single-chunk diagnostic mode), keeping declaration and actual
-        chunking internally consistent.
+        Sends EXACTLY ``total_chunk_count`` PUT requests — the same plan
+        declared at init (including the opt-in single-chunk diagnostic
+        mode). The FINAL chunk absorbs the remainder bytes, matching
+        TikTok's last-chunk-absorbs-remainder model; sending an extra short
+        chunk (the old ceil behavior) desynchronizes the upload from the
+        declaration. Coverage is verified truthfully at the end.
         """
         size = os.path.getsize(video_path)
-        if chunk_size is None:
-            chunk_size, _total = _resolve_chunk_params(size, 10_000_000)
+        chunk_size, total_chunks = _resolve_chunk_params(
+            size, chunk_size if chunk_size else 10_000_000
+        )
         offset = 0
         with open(video_path, "rb") as handle:
-            while offset < size:
-                chunk = handle.read(chunk_size)
+            for index in range(total_chunks):
+                if index == total_chunks - 1:
+                    chunk = handle.read()  # final chunk absorbs the remainder
+                else:
+                    chunk = handle.read(chunk_size)
+                if not chunk:
+                    raise RuntimeError(
+                        f"TikTok chunk upload incomplete: file shrank or read "
+                        f"failed at chunk {index + 1}/{total_chunks} "
+                        f"(offset {offset}, declared size {size})"
+                    )
                 end = offset + len(chunk) - 1
                 headers = {
                     "Content-Type": "video/mp4",
@@ -531,6 +563,11 @@ class TikTokPublisher:
                         f"(HTTP {response.status_code}): {response.text[:200]}"
                     )
                 offset += len(chunk)
+        if offset != size:
+            raise RuntimeError(
+                f"TikTok chunk upload incomplete: uploaded {offset} of "
+                f"{size} bytes across {total_chunks} chunks"
+            )
 
     def submit_direct_post(self, video_path: str, metadata: Any) -> str:
         """

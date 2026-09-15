@@ -18,6 +18,7 @@ No method in this module performs a request during import or construction.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -56,6 +57,9 @@ OPENROUTER_PAID = "paid"
 OPENROUTER_TERMINAL_FAILURE_STATUSES = frozenset(
     {"failed", "error", "cancelled", "canceled", "expired"}
 )
+
+# Batch 1I: module logger — this seam was previously completely silent.
+logger = logging.getLogger(__name__)
 
 
 class OpenRouterVideoError(RuntimeError):
@@ -622,7 +626,14 @@ def _extract_video_url(payload: Mapping[str, Any]) -> Optional[str]:
 
 
 def _extract_usage(payload: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
-    usage = payload.get("usage") or payload.get("cost")
+    """Batch 1H: usage means provider consumption quantities ONLY.
+
+    A monetary ``cost`` object is deliberately NOT used as a usage fallback
+    (the previous ``payload.get("usage") or payload.get("cost")`` could place
+    money inside a field named usage). Cost evidence is carried separately by
+    ``estimated_cost`` / ``actual_cost``.
+    """
+    usage = payload.get("usage")
     return usage if isinstance(usage, Mapping) else None
 
 
@@ -700,6 +711,15 @@ class OpenRouterVideoVisualProvider:
         time.sleep(seconds)
 
     def _fail(self, request: SceneGenerationRequest, error: str, **verification: Any) -> SceneGenerationResult:
+        # Batch 1I: OpenRouter was previously silent on every failure path;
+        # one truthful WARNING per classified failure (no payloads, no URLs).
+        logger.warning(
+            "provider.operation_failed scene=%s provider=openrouter_video "
+            "model=%s error=%s",
+            request.scene_id,
+            verification.get("model") or self.model,
+            error,
+        )
         result = SceneGenerationResult.failure(request.scene_id, request.sequence, error)
         result.verification.update({"provider": OPENROUTER_VIDEO_PROVIDER, **_jsonable(verification)})
         return result
@@ -783,6 +803,10 @@ class OpenRouterVideoVisualProvider:
             "polling_url": submit_payload.get("polling_url"),
             "estimated_cost": _jsonable(submit_payload.get("estimated_cost") or submit_payload.get("cost_estimate")),
             "actual_cost": _jsonable(actual_cost),
+            # Batch 1H: OpenRouter reports/bills monetary amounts in USD —
+            # provider semantics recorded with the cost evidence, never mixed
+            # into usage.
+            "currency": "USD",
             "usage": _jsonable(usage),
             "pricing_skus": _jsonable(model.pricing_skus),
             "audio_facts": facts.model_dump(),
@@ -802,6 +826,15 @@ class OpenRouterVideoVisualProvider:
             audio_facts=facts,
         )
         result.verification.update(verification)
+        logger.info(
+            "provider.completed scene=%s provider=openrouter_video "
+            "model=%s job_id=%s usage_present=%s actual_cost_present=%s "
+            "estimated_cost_present=%s",
+            request.scene_id, model.model_id, job_id,
+            verification.get("usage") is not None,
+            verification.get("actual_cost") is not None,
+            verification.get("estimated_cost") is not None,
+        )
         self._checkpoint(
             checkpoint_callback,
             {
@@ -918,6 +951,13 @@ class OpenRouterVideoVisualProvider:
         if not job_id or not polling_url:
             return self._fail(request, "OpenRouter submission did not return both job id and polling_url", model=model.model_id)
         access = model.access
+        logger.info(
+            "provider.request_submitted scene=%s provider=openrouter_video "
+            "model=%s job_id=%s request_id_kind=job_id access=%s "
+            "estimated_cost_present=%s",
+            request.scene_id, model.model_id, job_id, access,
+            bool(submit_payload.get("estimated_cost") or submit_payload.get("cost_estimate")),
+        )
         self._checkpoint(
             checkpoint_callback,
             {
@@ -934,8 +974,17 @@ class OpenRouterVideoVisualProvider:
             },
         )
         payload = dict(submit_payload)
+        last_status: Optional[str] = None
         for attempt in range(self._poll_max_attempts):
             status = _extract_status(payload)
+            if status != last_status:
+                # Bounded polling visibility: first poll + status changes.
+                logger.info(
+                    "provider.poll_progress scene=%s job_id=%s "
+                    "attempt=%d remote_status=%s",
+                    request.scene_id, job_id, attempt + 1, status or "unknown",
+                )
+                last_status = status
             if status in {"completed", "succeeded", "success"}:
                 return self._download_and_materialize(
                     request, model, job_id=job_id, submit_payload=submit_payload,
@@ -1030,6 +1079,11 @@ class OpenRouterVideoVisualProvider:
         try:
             require_audio = self.generate_audio
             model, body = self._model_and_request(request, require_audio=require_audio)
+            logger.info(
+                "provider.model_selected scene=%s provider=openrouter_video "
+                "model=%s access=%s",
+                request.scene_id, model.model_id, model.access,
+            )
             if dry_run:
                 return SceneGenerationResult.dry_run(
                     request.scene_id,
@@ -1126,3 +1180,53 @@ class OpenRouterVideoVisualProvider:
 def default_openrouter_cache_path() -> Optional[Path]:
     value = os.getenv(OPENROUTER_CACHE_PATH_ENV)
     return Path(value) if value else None
+
+
+def openrouter_video_planning_facts() -> Optional[ModelCapabilityFacts]:
+    """Batch 1E: provider-owned projection of GENERIC planning capability
+    facts for the currently configured OpenRouter video model.
+
+    - Availability gate mirrors the adapter's own ``is_available()``
+      semantics (a configured OpenRouter API key and a configured model).
+    - Facts come ONLY from the locally cached video-model catalog
+      (``_read_cache`` — TTL-checked, disk-local).  This function NEVER
+      performs a network call: a missing, stale, or model-missing cache
+      honestly yields NO facts rather than fetching or inventing values.
+    - Returned facts carry no provider/model identity.
+    """
+    from app.orchestrator.planning_constraints import ModelCapabilityFacts
+
+    if not os.getenv(OPENROUTER_API_KEY_ENV, ""):
+        return None
+    model_id = (os.getenv(OPENROUTER_MODEL_ENV, "") or "").strip()
+    if not model_id:
+        return None
+    cache_path = default_openrouter_cache_path()
+    if cache_path is None:
+        return None
+    try:
+        catalog = OpenRouterVideoCatalog(
+            OpenRouterHTTPClient(api_key=""),
+            cache_path=cache_path,
+        )
+        cached = catalog._read_cache()  # disk-local read; never a fetch
+    except Exception:  # noqa: BLE001 - facts must never break planning
+        return None
+    entry = next(
+        (
+            model
+            for model in (cached or [])
+            if model.model_id == model_id
+            and model.supported_durations
+        ),
+        None,
+    )
+    if entry is None:
+        return None
+    cleaned = tuple(sorted({int(d) for d in entry.supported_durations if int(d) > 0}))
+    if not cleaned:
+        return None
+    return ModelCapabilityFacts(
+        supported_durations=cleaned,
+        source="model_capability",
+    )

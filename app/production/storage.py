@@ -36,6 +36,7 @@ from typing import List, Optional
 from pydantic import ValidationError
 
 from app.production.models import Production
+from app.production.routes import assert_saas_production_route
 from app.production.validation import assert_valid_production
 
 _PRODUCTION_FILE = "production.json"
@@ -214,12 +215,20 @@ def save_new_production(
     Validates before persistence, atomically writes the current intent, and
     REFUSES to overwrite an existing identity. Immutable snapshots of
     superseded versions are written by ``save_revision``.
+
+    SaaS/private boundary: a NEW production can only select a SaaS product
+    route (``assert_saas_production_route``) — ``google_flow`` is a
+    private-only capability and is never a new SaaS route. Existing
+    artifacts (including legacy private ones) keep loading, and
+    ``save_revision`` remains ungated so legacy private productions stay
+    revisable.
     """
     if production.plan_version != 1:
         raise ValueError(
             "a new production must have plan_version == 1 "
             f"(got {production.plan_version})"
         )
+    assert_saas_production_route(production.route)
     assert_valid_production(production)
     target = current_path(production.production_id, root)
     if target.exists():

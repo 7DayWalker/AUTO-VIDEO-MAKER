@@ -30,7 +30,9 @@ HEIGHT = 288
 
 
 def _run_ffmpeg(args):
-    subprocess.run(["ffmpeg", "-y", *args], capture_output=True, check=True, timeout=120)
+    from app.assembly.ffmpeg import resolve_ffmpeg
+
+    subprocess.run([resolve_ffmpeg() or "ffmpeg", "-y", *args], capture_output=True, check=True, timeout=120)
 
 
 def make_video(path: Path, *, duration=2.0, with_audio=True, frequency=440) -> Path:
@@ -74,8 +76,10 @@ def make_project(tmp_path: Path, scenes, *, voiceover=None, policy=None):
 
 
 def probe_streams(path: Path):
+    from app.assembly.ffmpeg import resolve_ffprobe
+
     result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", "-show_format", str(path)],
+        [resolve_ffprobe() or "ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", "-show_format", str(path)],
         capture_output=True,
         text=True,
         check=True,
