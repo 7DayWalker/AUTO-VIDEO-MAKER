@@ -533,6 +533,19 @@ def test_create_view_generation_strategy_contract():
     assert 'strategy: "local"' in source
     # The selection is persisted with the creation payload.
     assert "generation_strategy: d.strategy" in source
+    # Track 3 Increment 5: creator-first hierarchy with progressive disclosure.
+    # The brief leads; destination and length are primary; title/path/scenes
+    # are natively collapsible advanced controls; cost truth stays visible.
+    assert "What are you making?" in source
+    assert "<details" in source and "advanced-panel" in source
+    assert 'id="f-brief"' in source
+    assert 'id="f-title"' in source
+    assert 'id="f-duration"' in source
+    assert source.index('id="f-brief"') < source.index('id="f-duration"')
+    assert source.index('id="f-duration"') < source.index("<details")
+    assert source.index("<details") < source.index('id="f-title"')
+    assert "Free · local tools" in source
+    assert "Uses paid API" in source
 
 
 def test_production_detail_displays_persisted_strategy():
