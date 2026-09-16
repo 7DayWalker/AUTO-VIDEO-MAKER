@@ -59,6 +59,23 @@ VIEWS.productionDetail = {
       return '<tr><td>' + COMPONENTS.esc(intent.ordinal) + '</td><td><a class="unit-link" href="' + unitUrl + '">' + COMPONENTS.esc(intent.unit_id) + '</a><div class="hint">' + COMPONENTS.esc(intent.title) + '</div></td><td>' + CC.stateBadge(state) + '<div class="state-reason">' + COMPONENTS.esc(exec.reason || ((u.blocking_units || []).length ? "Waiting for dependency evidence" : "")) + '</div></td><td title="' + blockerLabel + '">' + (blockers || '<span class="muted-text">None</span>') + '</td><td>' + project + '</td><td>' + action + '</td></tr>';
     }).join("");
 
+    /* Track 3 Increment 4: for a COMPLETED single-video production the
+       user's primary question is "Where is my video?" — surface the real
+       final artifact prominently, reusing the existing media endpoint and
+       the same player conventions as the project output page. Media
+       absence or failure simply omits this section; it never alters the
+       truthful production-state presentation. */
+    var videoHero = "";
+    if (API.live && p.unit_count === 1 && counts.COMPLETED === 1 && !(p.run && p.run.running)) {
+      var soleUnit = (p.units || [])[0] || {};
+      var soleProjectId = (soleUnit.execution || {}).project_id;
+      if (soleProjectId) {
+        var soleProject = await API.getProject(soleProjectId).catch(function () { return null; });
+        if (soleProject && !soleProject.sample && soleProject.final_video_available) {
+          videoHero = '<section class="card media-hero" aria-labelledby="video-hero-heading"><div class="section-heading"><div><p class="eyebrow">Your video</p><h2 id="video-hero-heading">Completed output</h2></div><a class="btn btn-sm" href="#/projects/' + encodeURIComponent(soleProjectId) + '">Open output page</a></div><div class="media-player"><video controls preload="metadata" src="' + COMPONENTS.esc(API.mediaUrl(soleProjectId)) + '"></video></div></section>';
+        }
+      }
+    }
     var runnable = firstRunnable ? firstRunnable.intent.unit_id : "";
     var productionAction = "";
     if (p.run && p.run.running) productionAction = '<button class="btn" disabled title="An active command is registered">Execution active</button>';
@@ -69,7 +86,7 @@ VIEWS.productionDetail = {
 
     var times = CC.timeMeta(p.created_at, p.revised_at);
     var timesHtml = times ? '<p class="cc-times">' + times + '</p>' : "";
-    return '<div class="page-head"><div><p class="eyebrow">Production control</p><h1 class="page-title">' + COMPONENTS.esc(p.title) + '</h1><p class="page-sub mono">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + ' units</p>' + timesHtml + '</div><div class="head-actions"><button class="btn" data-cc-refresh>Refresh</button></div></div>' +
+    return '<div class="page-head"><div><p class="eyebrow">Production control</p><h1 class="page-title">' + COMPONENTS.esc(p.title) + '</h1><p class="page-sub mono">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + ' units</p>' + timesHtml + '</div><div class="head-actions"><button class="btn" data-cc-refresh>Refresh</button></div></div>' + videoHero +
       '<section class="card production-hero attention-' + tone + '" aria-labelledby="production-heading"><div class="production-hero-top"><div><p class="eyebrow">Production identity</p><h2 id="production-heading">' + COMPONENTS.esc(p.title) + '</h2><p class="command-text">' + COMPONENTS.esc((p.command || {}).text || "No command text recorded") + '</p></div><div class="hero-status"><span class="attention-dot" aria-hidden="true"></span><strong>Attention</strong><p>' + COMPONENTS.esc(attention) + '</p>' + CC.runBadge(p.run) + '</div></div><div class="state-counts" aria-label="Unit state counts">' + CC.countsRow(counts) + '</div>' + CC.stateBar(counts, p.unit_count) + '</section>' +
       '<section class="card action-panel" aria-labelledby="production-actions-heading"><div class="section-heading"><div><p class="eyebrow">Next action</p><h2 id="production-actions-heading">Next step</h2></div><div class="action-group">' + productionAction + '</div></div><p class="hint">State is re-verified on the server when you confirm. Refreshing never starts work — only the buttons above do.</p><div id="production-action-feedback" aria-live="polite"></div></section>' +
       '<section class="card" aria-labelledby="units-heading"><div class="section-heading"><div><p class="eyebrow">Production → Units</p><h2 id="units-heading">Unit workload</h2></div><span class="hint">' + COMPONENTS.esc(p.unit_count) + ' units · live state derived from disk</span></div><div class="table-wrap"><table class="data unit-table"><thead><tr><th>#</th><th>Unit</th><th>State / reason</th><th>Blockers</th><th>Bound project</th><th>Action</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6"><div class="empty"><h4>No units recorded</h4></div></td></tr>') + '</tbody></table></div></section>' +

@@ -98,9 +98,19 @@ window.COMPONENTS = (function () {
     const stage = p.stage_status === "complete" ? ["ok", "Ready"] :
                   p.stage_status === "failed" ? ["err", "Failed"] :
                   p.stage_status === "running" ? ["warn", "Generating"] : ["muted", "Draft"];
+    /* Track 3 Increment 4 — REAL OUTPUT ONLY: the preview is the actual
+       final-video artifact delivered by the existing range-aware media
+       endpoint. No thumbnail is generated, no AI/provider call is made, and
+       demo imagery is never used as output. Media failure restores the
+       neutral fallback locally and never alters production state. */
+    function mediaThumb(p) {
+      if (!(window.API && API.live) || p.sample || !p.final_video_available) return "";
+      return '<video class="pc-thumb-media" preload="metadata" muted playsinline tabindex="-1" aria-hidden="true" src="' +
+        esc(API.mediaUrl(p.project_id)) + '" onerror="this.remove()"></video>';
+    }
     return (
       '<a class="card card-hover project-card" href="#/projects/' + encodeURIComponent(p.project_id) + '">' +
-        '<div class="pc-thumb">' + ICONS.film + "</div>" +
+        '<div class="pc-thumb">' + ICONS.film + mediaThumb(p) + "</div>" +
         '<div class="pc-meta">' +
           '<div class="project-title">' + esc(p.topic) +
             (p.sample ? ' <span class="sample-tag">Sample</span>' : "") + "</div>" +

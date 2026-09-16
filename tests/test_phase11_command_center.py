@@ -934,6 +934,12 @@ def test_phase11_ui_source_contract():
     assert 'p.stage_status === "failed"' in components_src
     assert "var returnTarget = modalTrigger" in components_src
     assert "returnTarget.focus()" in components_src
+    # Track 3 Increment 4: project cards show the REAL final video through the
+    # existing media endpoint; demo/missing/failing media never renders as output.
+    assert "pc-thumb-media" in components_src
+    assert "API.mediaUrl" in components_src
+    assert "final_video_available" in components_src
+    assert 'onerror="this.remove()"' in components_src  # local fallback only
     assert "pub.updated_at || null" in activity_src
     assert "when: p.created_at" not in activity_src
     assert "if (API.live) projects.forEach" in activity_src
@@ -948,6 +954,11 @@ def test_phase11_ui_source_contract():
     assert "project-publish-feedback" in project_src
     assert "role=\"alert\"" in project_src
     assert "attentionPriority" in src["productions.js"]
+    # Track 3 Increment 4: completed single-video productions surface the real
+    # final video prominently; absence/failure omits the section truthfully.
+    assert "media-hero" in src["production-detail.js"]
+    assert "Your video" in src["production-detail.js"]
+    assert "final_video_available" in src["production-detail.js"]
 
     # Structured API errors surface truthfully in the UI (F-01/F-02/F-03).
     assert "errBody.message || errBody.error || errBody.detail" in api_src

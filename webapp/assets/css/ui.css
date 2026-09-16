@@ -201,6 +201,14 @@
   position: relative;
 }
 .pc-thumb svg { width: 34px; height: 34px; opacity: .5; }
+/* Track 3 Increment 4: real-output preview overlays the neutral fallback;
+   object-fit crops vertical (9:16) renders into the consistent card frame. */
+.pc-thumb-media {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  background: transparent;
+}
 .project-card .pc-meta { padding: 15px 17px 17px; display: flex; flex-direction: column; gap: 9px; flex: 1; }
 .project-title { font-size: 14.5px; font-weight: 650; letter-spacing: -0.01em; }
 .project-date { font-size: 11.5px; color: var(--text-faint); }
