@@ -450,7 +450,6 @@ textarea.input { resize: vertical; min-height: 90px; }
 .attention-info .attention-dot, .attention-info .hero-status .attention-dot { background: var(--accent); }
 .state-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 15px; }
 .state-chip { border-radius: 999px; }
-.progress-wrap { margin-top: 15px; }
 .production-card-foot, .unit-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .production-card-foot { padding: 14px 20px 18px; border-top: 1px solid var(--border); }
 .inline-error { margin-top: 12px; padding: 9px 11px; border: 1px solid rgba(248,113,113,.28); border-radius: 8px; color: var(--danger); font-size: 12px; }
@@ -536,12 +535,32 @@ textarea.input { resize: vertical; min-height: 90px; }
   .destination-actions { justify-content: flex-start; }
 }
 
-.statebar {
-  height: 8px; border-radius: 6px; overflow: hidden;
+/* Track 3 Increment 1 — multi-state distribution bar (counts-derived;
+   communicates state distribution, never invented completion progress). */
+.statebar-multi {
+  display: flex; overflow: hidden;
+  height: 8px; border-radius: 6px;
   background: var(--surface-2); border: 1px solid var(--border);
   margin: 10px 0 6px;
 }
-.statebar-fill { height: 100%; background: linear-gradient(90deg, #34d399, #4f8cff); }
+.statebar-seg { height: 100%; min-width: 4px; flex: 0 1 auto; }
+.statebar-seg.ok    { background: var(--success); }
+.statebar-seg.info  { background: var(--accent); }
+.statebar-seg.warn  { background: var(--warn); }
+.statebar-seg.err   { background: var(--danger); }
+.statebar-seg.muted { background: var(--surface-3); }
+/* Restrained in-flight activity cue; disabled entirely for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .statebar-seg.info { animation: statebar-pulse 2.4s ease-in-out infinite; }
+  @keyframes statebar-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .6; } }
+}
+
+/* Temporal context (server timestamps; missing timestamps render nothing). */
+.cc-times {
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+  margin-top: 6px; color: var(--text-faint); font-size: 11.5px;
+}
+.cc-times time { color: var(--text-muted); }
 
 .kv-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .kv-table th {
@@ -578,6 +597,23 @@ textarea.input { resize: vertical; min-height: 90px; }
 .empty .e-icon svg { width: 24px; height: 24px; }
 .empty h4 { color: var(--text); font-size: 15px; }
 .empty p { font-size: 13px; max-width: 44ch; }
+
+/* ----- Command Center hero (Track 3 Inc 2: primary create action) ------- */
+
+.cc-hero {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 24px; margin-bottom: 20px;
+}
+.cc-hero-text { min-width: 0; }
+.cc-hero-text h2 { margin: 2px 0 6px; font-size: 22px; }
+.cc-hero-text .page-sub { margin: 0; max-width: 62ch; }
+.cc-hero-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+@media (max-width: 720px) {
+  .cc-hero { flex-direction: column; align-items: stretch; }
+  .cc-hero-actions { flex-wrap: wrap; }
+}
+
+/* ----- Workspace (project detail) --------------------------------------- */
 
 /* ----- Workspace (project detail) --------------------------------------- */
 

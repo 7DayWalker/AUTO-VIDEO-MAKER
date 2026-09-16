@@ -908,7 +908,8 @@ def test_phase11_ui_source_contract():
 
     # F-01: the UI never offers Resume Unit for FAILED units.
     assert 'state === "INCOMPLETE" || state === "IN_FLIGHT"' in src["unit-detail.js"]
-    assert "produce.py --resume" in src["unit-detail.js"]  # truthful recovery note
+    assert "Recovery is explicit by design" in src["unit-detail.js"]  # truthful recovery note (Track 3 Inc 2: product language, no CLI in user surfaces)
+    assert "no automatic retry" in src["unit-detail.js"]  # no silent recovery is ever offered
     assert 'exec.state === "FAILED"' in src["production-detail.js"]
 
     # F-10: known dynamic interpolations are escaped before HTML insertion.
@@ -964,7 +965,9 @@ def test_phase11b_overview_source_contract():
     assert "Production data" in source
     assert "Live empty" in source
     assert "Demo samples" in source
-    assert "The Command Center does not create production records" in source
+    assert "no productions yet" in source
+    assert "#/create" in source  # empty state guides to the existing creation flow
+    assert "never replaced by demo productions" in source  # truthfulness invariant retained
     assert source.index("counts.FAILED") < source.index("counts.BLOCKED")
     assert source.index("counts.BLOCKED") < source.index("counts.IN_FLIGHT")
     assert source.index("counts.IN_FLIGHT") < source.index("counts.INCOMPLETE")

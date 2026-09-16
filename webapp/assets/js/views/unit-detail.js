@@ -6,7 +6,7 @@ VIEWS.unitDetail = {
   title: "Unit",
 
   render: async function (params) {
-    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "Live unit state is unavailable. Start the local engine with: python -m app.web.server") + '</div>';
+    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "Live unit state is unavailable. Start the engine on this machine, then refresh.") + '</div>';
     var u;
     try { u = await API.getUnit(params.productionId, params.unitId); }
     catch (e) { return '<div class="card cc-state-panel error-panel">' + COMPONENTS.emptyState("alert", "Unit data unavailable", String(e.message || e)) + '</div>'; }
@@ -37,7 +37,7 @@ VIEWS.unitDetail = {
       ["Bound project", exec.project_id ? '<a href="#/projects/' + encodeURIComponent(exec.project_id) + '">' + COMPONENTS.esc(exec.project_id) + '</a>' : '<span class="muted-text">Unbound — no project has been adopted.</span>'],
       ["Bound plan version", COMPONENTS.esc(exec.bound_plan_version || "—")]
     ];
-    if ((u.blocking_units || []).length) execRows.push(["Blocking units", COMPONENTS.esc(u.blocking_units.join(", ")) + " — complete these first; Phase 10 enforces dependencies."]);
+    if ((u.blocking_units || []).length) execRows.push(["Blocking units", COMPONENTS.esc(u.blocking_units.join(", ")) + " — complete these first; AVM enforces dependencies."]);
 
     var meta = (u.plan_evidence && u.plan_evidence.meta) || {};
     var planRows = [
@@ -54,12 +54,12 @@ VIEWS.unitDetail = {
     var html = '<div class="page-head"><div><p class="eyebrow">Unit workspace</p><h1 class="page-title">' + COMPONENTS.esc(intent.title || intent.unit_id) + '</h1><p class="page-sub"><a href="' + back + '">Back to production</a> · ' + COMPONENTS.esc(u.production_title) + ' · ' + COMPONENTS.esc(intent.unit_id) + '</p>' + actionFeedback + sectionLinks + '</div></div>' +
       '<section class="card unit-hero attention-' + (state === "FAILED" ? "danger" : state === "BLOCKED" || state === "INCOMPLETE" ? "warn" : state === "IN_FLIGHT" ? "info" : "neutral") + '" aria-labelledby="unit-heading"><div class="unit-hero-top"><div><p class="eyebrow">Execution state</p><h2 id="unit-heading">' + CC.stateBadge(state) + '</h2><p class="state-meaning">' + COMPONENTS.esc(stateMeaning) + '</p></div><div class="unit-hero-project">' + (exec.project_id ? '<span class="eyebrow">Bound project</span><a href="#/projects/' + encodeURIComponent(exec.project_id) + '">' + COMPONENTS.esc(exec.project_id) + '</a>' : '<span class="muted-text">Unbound project</span>') + '</div></div>' + VIEWS.unitDetail.actionPanel(u, exec) + '</section>' +
       '<div class="unit-sections">' +
-      '<section class="card" aria-labelledby="intent-section"><div class="section-heading"><div><p class="eyebrow">Production → Unit</p><h2 id="intent-section">Intent</h2></div><span class="badge muted">Authoritative production intent</span></div>' + VIEWS.unitDetail.kv(intentRows) + '</section>' +
-      '<section class="card" aria-labelledby="execution-section"><div class="section-heading"><div><p class="eyebrow">Phase 10 authority</p><h2 id="execution-section">Execution</h2></div><span class="hint">Derived from ProductionExecutor.derive_progress()</span></div>' + VIEWS.unitDetail.kv(execRows) + VIEWS.unitDetail.stagePanel(project) + '</section>' +
+      '<section class="card" aria-labelledby="intent-section"><div class="section-heading"><div><p class="eyebrow">Production → Unit</p><h2 id="intent-section">Creative brief</h2></div><span class="badge muted">Saved with the production</span></div>' + VIEWS.unitDetail.kv(intentRows) + '</section>' +
+      '<section class="card" aria-labelledby="execution-section"><div class="section-heading"><div><p class="eyebrow">Production engine</p><h2 id="execution-section">Execution</h2></div><span class="hint">Live state derived from disk</span></div>' + VIEWS.unitDetail.kv(execRows) + VIEWS.unitDetail.stagePanel(project) + '</section>' +
       '<section class="card" aria-labelledby="media-section"><div class="section-heading"><div><p class="eyebrow">Unit → Media</p><h2 id="media-section">Media and storyboard</h2></div><span class="hint">Existing evidence only</span></div>' + VIEWS.unitDetail.mediaPanel(u, finalVideo) + '</section>' +
       '<section class="card" aria-labelledby="evidence-section"><div class="section-heading"><div><p class="eyebrow">Supporting evidence</p><h2 id="evidence-section">Artifacts and plan evidence</h2></div></div>' + VIEWS.unitDetail.artifactPanel(project) + VIEWS.unitDetail.kv(planRows) + '<p class="hint">Plan artifacts and paths are evidence only; binding authority remains ProjectManifest.production_binding.</p></section>' +
       (u.failure_details && u.failure_details.length ? VIEWS.unitDetail.failurePanel(u) : '') +
-      '<section class="card" aria-labelledby="reconciliation-section"><div class="section-heading"><div><p class="eyebrow">Read-only check</p><h2 id="reconciliation-section">Reconciliation</h2></div></div><div id="cc-reconciliation"><p class="hint">Run the existing reconciliation oracle on demand. Nothing is persisted or repaired.</p></div><button class="btn" data-cc-reconcile>Run reconciliation</button></section>' +
+      '<section class="card" aria-labelledby="reconciliation-section"><div class="section-heading"><div><p class="eyebrow">Read-only check</p><h2 id="reconciliation-section">Reconciliation</h2></div></div><div id="cc-reconciliation"><p class="hint">Run a read-only check that verifies completed work against the actual files. Nothing is modified.</p></div><button class="btn" data-cc-reconcile>Run reconciliation</button></section>' +
       '<section class="card" aria-labelledby="publishing-section"><div class="section-heading"><div><p class="eyebrow">Unit ? Publishing</p><h2 id="publishing-section">Publishing</h2></div><span class="hint">Existing records and explicit actions only</span></div>' + VIEWS.unitDetail.publishingPanel(u, project, connections, finalVideo) + '</section>' +
       '</div>';
     return html;
@@ -117,8 +117,8 @@ VIEWS.unitDetail = {
       if (u.run && u.run.running) buttons.push('<button class="btn" disabled title="An active command is registered">Inspecting active run</button>');
       else buttons.push('<button class="btn" data-cc-cmd="resume">Resume Unit</button>');
       note = "Inspect first. Resume never submits another remote job.";
-    } else if (state === "BLOCKED") note = "View blockers: " + (u.blocking_units || []).join(', ') + ". Phase 10 must satisfy them first.";
-    else if (state === "FAILED") note = "Inspect failure details. FAILED_UNIT_REQUIRES_EXPLICIT_RECOVERY; use the existing project recovery path (python produce.py --resume <project_id>) only after diagnosis. No retry, skip, fallback, or force action is offered.";
+    } else if (state === "BLOCKED") note = "View blockers: " + (u.blocking_units || []).join(', ') + ". AVM handles them first.";
+    else if (state === "FAILED") note = "Inspect failure details. Recovery is explicit by design — no automatic retry, skip, fallback, or force. After diagnosis, use the Resume action on the Production page.";
     else note = "Completed units are not re-executed.";
     var project = u.bound_project, final = project && project.artifacts && project.artifacts.final_video;
     return '<div class="unit-actions"><div class="action-group">' + buttons.join('') + '</div><p class="hint">' + COMPONENTS.esc(note || 'Commands require explicit confirmation and delegate to the existing engine.') + '</p></div>';
@@ -179,7 +179,8 @@ VIEWS.unitDetail = {
           var kindLabel = provenance.request_id_kind === "task_id" ? "Task"
             : provenance.request_id_kind === "job_id" ? "Job" : "Request";
           var fullIdentity = kindLabel + ": " + provenance.request_id;
-          spans.push('<span class="mono" title="' + COMPONENTS.esc(fullIdentity) + '">' +
+          spans.push('<span class="mono" aria-label="Request identity: ' + COMPONENTS.esc(fullIdentity) + '" title="' +
+            COMPONENTS.esc(fullIdentity) + '">' +
             COMPONENTS.esc(kindLabel + ": " + compactId(provenance.request_id)) + '</span>');
         }
       } else if (row.provider) {
@@ -194,7 +195,7 @@ VIEWS.unitDetail = {
       var media = row.video_available && row.media_url;
       var preview = media ? '<video controls preload="none" src="' + COMPONENTS.esc(media) + '"></video>' : '<div class="scene-placeholder"><span>' + COMPONENTS.esc(row.artifact_state || "NOT GENERATED") + '</span></div>';
       return '<li class="scene-card"><div class="scene-number">' + COMPONENTS.esc(index + 1) + '</div><div class="scene-content">' + preview + '<div class="scene-meta"><strong>' + COMPONENTS.esc(row.scene_id) + '</strong><span>' + COMPONENTS.esc(row.artifact_state || row.status || "Evidence unavailable") + '</span>' + executionSpans(row) + '<span>' + COMPONENTS.esc(row.updated_at || "Timestamp unavailable") + '</span></div></div></li>';
-    }).join('') + '</ol>' : '<div class="media-empty"><p>No scene checkpoint evidence is recorded for this bound project.</p></div>';
+    }).join('') + '</ol>' : '<div class="media-empty"><p>No scene previews yet — scenes appear here as the engine produces them.</p></div>';
     return '<div class="unit-media-grid"><div>' + video + '</div><div><p class="eyebrow">Scene storyboard</p>' + storyboard + '</div></div>';
   },
 
@@ -211,7 +212,7 @@ VIEWS.unitDetail = {
   mount: async function (params) {
     var productionId = params.productionId, unitId = params.unitId;
     function command(action) { API.productionCommand(productionId, action, unitId).then(function (res) { COMPONENTS.toast(res.message || "Command accepted", "ok"); App.refresh(); }).catch(function (err) { var message = err.message || String(err), feedback = document.getElementById("unit-action-feedback"); if (feedback) feedback.innerHTML = '<p class="inline-error" role="alert">' + COMPONENTS.esc(message) + '</p>'; COMPONENTS.toast(message, "err"); }); }
-    document.querySelectorAll("[data-cc-cmd]").forEach(function (button) { button.addEventListener("click", function () { var action = button.getAttribute("data-cc-cmd"); CC.confirmDialog({ title: action === "execute" ? "Execute unit?" : "Resume unit?", description: (action === "execute" ? "Execute" : "Resume") + " unit " + unitId + "?", scope: "Scope: 1 unit (" + unitId + ") only; Phase 10 owns dependencies and remote-job protection.", firstAction: "First action: ProductionExecutor.execute(unit_id=\"" + unitId + "\") receives the confirmed command.", confirmLabel: action === "execute" ? "Execute Unit" : "Resume Unit" }, function () { command(action); }); }); });
+    document.querySelectorAll("[data-cc-cmd]").forEach(function (button) { button.addEventListener("click", function () { var action = button.getAttribute("data-cc-cmd"); CC.confirmDialog({ title: action === "execute" ? "Execute unit?" : "Resume unit?", description: (action === "execute" ? "Execute" : "Resume") + " unit " + unitId + "?", scope: "Scope: 1 unit (" + unitId + ") only; dependencies and remote-job protection are handled automatically.", firstAction: "First action: AVM starts production of this unit in the background.", confirmLabel: action === "execute" ? "Execute Unit" : "Resume Unit" }, function () { command(action); }); }); });
     var publish = document.querySelector("[data-cc-publish]");
     if (publish) publish.addEventListener("click", function () { CC.confirmDialog({ title: "Publish unit?", description: "Publish unit " + unitId + " through the existing TikTok publishing flow?", scope: "1 completed, bound unit; no batch publishing.", firstAction: "The existing publishing adapter receives the confirmed request and owns durable outcomes.", confirmLabel: "Publish Unit" }, function () { API.publishUnit(productionId, unitId).then(function (res) { COMPONENTS.toast(res.message || "Publish result received", res.status === "published" ? "ok" : "err"); App.refresh(); }).catch(function (err) { var message = err.message || String(err), feedback = document.getElementById("unit-action-feedback"); if (feedback) feedback.innerHTML = '<p class="inline-error" role="alert">' + COMPONENTS.esc(message) + '</p>'; COMPONENTS.toast(message, "err"); }); }); });
     var reconcile = document.querySelector("[data-cc-reconcile]");

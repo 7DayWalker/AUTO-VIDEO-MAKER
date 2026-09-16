@@ -68,7 +68,7 @@ window.App = (function () {
     const viewEl = document.getElementById("view");
     viewEl.setAttribute("aria-busy", "true");
     try {
-      viewEl.innerHTML = '<div class="empty" role="status" aria-live="polite"><span class="hint">Loading…</span></div>';
+      viewEl.innerHTML = '<div class="empty" role="status" aria-live="polite"><span class="hint">Loading ' + C.esc(route.view().title || "") + '…</span></div>';
       const html = await route.view().render(params);
       viewEl.innerHTML = html;
       document.title = route.view().title + " — Auto Video Maker";

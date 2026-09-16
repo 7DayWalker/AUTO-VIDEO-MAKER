@@ -317,7 +317,11 @@ def _strategy_request():
     )
 
 
-def test_unconfigured_alibaba_video_fails_truthfully(tmp_path):
+def test_unconfigured_alibaba_video_fails_truthfully(tmp_path, monkeypatch):
+    # Hermetic isolation: this test exercises the UNCONFIGURED path; the host
+    # environment may legitimately carry Alibaba credentials (Track 3 Inc 2).
+    monkeypatch.delenv("ALIBABA_API_KEY", raising=False)
+
     provider = create_visual_provider(
         "hybrid",
         scene_config={},
@@ -518,7 +522,9 @@ def test_create_view_generation_strategy_contract():
 
     # The control renders with the exact three strategy values.
     assert 'id="f-strategy"' in source
-    assert "'local', 'Local / Hybrid'" in source
+    assert "'local', 'Local (Recommended)'" in source
+    assert "Production path" in source  # Track 3 Inc 2: user-facing label
+    assert "Uses paid API" in source  # cost-class truth on the path selector
     assert "alibaba_image_local_video" in source
     assert "Alibaba Image → Local Video" in source
     assert "'alibaba_video', 'Alibaba Video'" in source

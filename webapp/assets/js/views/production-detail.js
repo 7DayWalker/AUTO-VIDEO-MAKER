@@ -6,7 +6,7 @@ VIEWS.productionDetail = {
   title: "Production",
 
   render: async function (params) {
-    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "Live production state is unavailable. Start the local engine with: python -m app.web.server") + '</div>';
+    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "Live production state is unavailable. Start the engine on this machine, then refresh.") + '</div>';
     var p;
     try { p = await API.getProduction(params.id); }
     catch (e) { return '<div class="card cc-state-panel error-panel">' + COMPONENTS.emptyState("alert", "Production data unavailable", String(e.message || e)) + '</div>'; }
@@ -22,10 +22,10 @@ VIEWS.productionDetail = {
       counts.NOT_STARTED ? "The production is ready for its first execution." : "All units are completed; no re-execution is offered.";
     var tone = counts.FAILED ? "danger" : counts.BLOCKED || counts.INCOMPLETE ? "warn" : counts.IN_FLIGHT ? "info" : "neutral";
     var strategyLabel = {
-      local: "Local / Hybrid (default)",
+      local: "Local (default)",
       alibaba_image_local_video: "Alibaba Image → Local Video",
       alibaba_video: "Alibaba Video"
-    }[p.generation_strategy] || "Local / Hybrid (default)";
+    }[p.generation_strategy] || "Local (default)";
     /* Batch 1G: the first-class Production Route is a PRODUCT-level identity
        (Batch 1D) — never a provider/model, and never inferred from the legacy
        strategy. Legacy productions have no persisted route. */
@@ -67,10 +67,12 @@ VIEWS.productionDetail = {
     else if (counts.FAILED > 0) productionAction = '<span class="hint">Inspect failed units; no automatic recovery.</span>';
     else productionAction = '<span class="hint">Completed — no re-execution.</span>';
 
-    return '<div class="page-head"><div><p class="eyebrow">Production control</p><h1 class="page-title">' + COMPONENTS.esc(p.title) + '</h1><p class="page-sub mono">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + ' units · created ' + COMPONENTS.esc(p.created_at) + '</p></div><div class="head-actions"><button class="btn" data-cc-refresh>Refresh</button></div></div>' +
-      '<section class="card production-hero attention-' + tone + '" aria-labelledby="production-heading"><div class="production-hero-top"><div><p class="eyebrow">Production identity</p><h2 id="production-heading">' + COMPONENTS.esc(p.title) + '</h2><p class="command-text">' + COMPONENTS.esc((p.command || {}).text || "No command text recorded") + '</p></div><div class="hero-status"><span class="attention-dot" aria-hidden="true"></span><strong>Attention</strong><p>' + COMPONENTS.esc(attention) + '</p>' + CC.runBadge(p.run) + '</div></div><div class="state-counts" aria-label="Unit state counts">' + CC.countsRow(counts) + '</div>' + CC.progressBar(counts, p.unit_count) + '</section>' +
-      '<section class="card action-panel" aria-labelledby="production-actions-heading"><div class="section-heading"><div><p class="eyebrow">Next action</p><h2 id="production-actions-heading">Command the existing engine</h2></div><div class="action-group">' + productionAction + '</div></div><p class="hint">The server re-derives state at command time. Confirmed commands delegate to ProductionExecutor; polling and refresh never execute work.</p><div id="production-action-feedback" aria-live="polite"></div></section>' +
-      '<section class="card" aria-labelledby="units-heading"><div class="section-heading"><div><p class="eyebrow">Production → Units</p><h2 id="units-heading">Unit workload</h2></div><span class="hint">' + COMPONENTS.esc(p.unit_count) + ' units · state authority: ProductionExecutor.derive_progress()</span></div><div class="table-wrap"><table class="data unit-table"><thead><tr><th>#</th><th>Unit</th><th>State / reason</th><th>Blockers</th><th>Bound project</th><th>Action</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6"><div class="empty"><h4>No units recorded</h4></div></td></tr>') + '</tbody></table></div></section>' +
+    var times = CC.timeMeta(p.created_at, p.revised_at);
+    var timesHtml = times ? '<p class="cc-times">' + times + '</p>' : "";
+    return '<div class="page-head"><div><p class="eyebrow">Production control</p><h1 class="page-title">' + COMPONENTS.esc(p.title) + '</h1><p class="page-sub mono">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + ' units</p>' + timesHtml + '</div><div class="head-actions"><button class="btn" data-cc-refresh>Refresh</button></div></div>' +
+      '<section class="card production-hero attention-' + tone + '" aria-labelledby="production-heading"><div class="production-hero-top"><div><p class="eyebrow">Production identity</p><h2 id="production-heading">' + COMPONENTS.esc(p.title) + '</h2><p class="command-text">' + COMPONENTS.esc((p.command || {}).text || "No command text recorded") + '</p></div><div class="hero-status"><span class="attention-dot" aria-hidden="true"></span><strong>Attention</strong><p>' + COMPONENTS.esc(attention) + '</p>' + CC.runBadge(p.run) + '</div></div><div class="state-counts" aria-label="Unit state counts">' + CC.countsRow(counts) + '</div>' + CC.stateBar(counts, p.unit_count) + '</section>' +
+      '<section class="card action-panel" aria-labelledby="production-actions-heading"><div class="section-heading"><div><p class="eyebrow">Next action</p><h2 id="production-actions-heading">Next step</h2></div><div class="action-group">' + productionAction + '</div></div><p class="hint">State is re-verified on the server when you confirm. Refreshing never starts work — only the buttons above do.</p><div id="production-action-feedback" aria-live="polite"></div></section>' +
+      '<section class="card" aria-labelledby="units-heading"><div class="section-heading"><div><p class="eyebrow">Production → Units</p><h2 id="units-heading">Unit workload</h2></div><span class="hint">' + COMPONENTS.esc(p.unit_count) + ' units · live state derived from disk</span></div><div class="table-wrap"><table class="data unit-table"><thead><tr><th>#</th><th>Unit</th><th>State / reason</th><th>Blockers</th><th>Bound project</th><th>Action</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6"><div class="empty"><h4>No units recorded</h4></div></td></tr>') + '</tbody></table></div></section>' +
       '<section class="card evidence-panel" aria-labelledby="intent-heading"><div class="section-heading"><div><p class="eyebrow">Supporting evidence</p><h2 id="intent-heading">Production intent</h2></div></div><dl class="detail-list"><div><dt>Command</dt><dd>' + COMPONENTS.esc((p.command || {}).text || "—") + '</dd></div><div><dt>Mode</dt><dd>' + COMPONENTS.esc((p.command || {}).workload_shape || "—") + '</dd></div><div><dt>Intended units</dt><dd>' + COMPONENTS.esc((p.command || {}).intended_unit_count || p.unit_count) + '</dd></div><div><dt>Route</dt><dd>' + COMPONENTS.esc(routeLabel) + '</dd></div><div><dt>Legacy strategy (compatibility)</dt><dd>' + COMPONENTS.esc(strategyLabel) + '</dd></div><div><dt>Plan version</dt><dd>' + COMPONENTS.esc(p.plan_version) + '</dd></div></dl><p class="hint">Plan artifacts and project directories are evidence only. Binding authority remains ProjectManifest.production_binding.</p></section>';
   },
 
@@ -82,13 +84,13 @@ VIEWS.productionDetail = {
     document.querySelectorAll("[data-cc-prod]").forEach(function (button) {
       button.addEventListener("click", function () {
         var action = button.getAttribute("data-cc-prod"), total = button.getAttribute("data-total"), first = button.getAttribute("data-first");
-        CC.confirmDialog({ title: action === "execute" ? "Execute production?" : "Resume production?", description: (action === "execute" ? "Execute" : "Resume") + " production " + id + "?", scope: total + " units total; only the existing executor decides eligible work.", firstAction: first ? "First action: the Phase 10 ProductionExecutor starts with the current eligible unit " + first + " in the background." : "First action: no eligible unit is currently available; failed units require explicit recovery.", confirmLabel: action === "execute" ? "Execute Production" : "Resume Production" }, function () { command(action); });
+        CC.confirmDialog({ title: action === "execute" ? "Execute production?" : "Resume production?", description: (action === "execute" ? "Execute" : "Resume") + " production " + id + "?", scope: total + " units total; only the AVM engine decides eligible work.", firstAction: first ? "First action: AVM starts with the current eligible unit " + first + " in the background." : "First action: no eligible unit is currently available; failed units require explicit recovery.", confirmLabel: action === "execute" ? "Execute Production" : "Resume Production" }, function () { command(action); });
       });
     });
     document.querySelectorAll("[data-cc-unit]").forEach(function (button) {
       button.addEventListener("click", function () {
         var action = button.getAttribute("data-cc-unit"), unitId = button.getAttribute("data-unit-id");
-        CC.confirmDialog({ title: action === "execute" ? "Execute unit?" : "Resume unit?", description: (action === "execute" ? "Execute" : "Resume") + " unit " + unitId + "?", scope: "Scope: 1 unit (" + unitId + "). Phase 10 owns dependencies and remote-job protection.", firstAction: "The confirmed command delegates to ProductionExecutor.execute(unit_id=\"" + unitId + "\").", confirmLabel: action === "execute" ? "Execute Unit" : "Resume Unit" }, function () { command(action, unitId); });
+        CC.confirmDialog({ title: action === "execute" ? "Execute unit?" : "Resume unit?", description: (action === "execute" ? "Execute" : "Resume") + " unit " + unitId + "?", scope: "Scope: 1 unit (" + unitId + "). Dependencies and remote-job protection are handled automatically.", firstAction: "The confirmed command starts production of this unit in the background.", confirmLabel: action === "execute" ? "Execute Unit" : "Resume Unit" }, function () { command(action, unitId); });
       });
     });
     var refresh = document.querySelector("[data-cc-refresh]");

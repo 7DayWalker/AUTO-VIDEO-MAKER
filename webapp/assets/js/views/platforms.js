@@ -53,9 +53,8 @@ VIEWS.platforms = {
       btn.addEventListener("click", function () {
         COMPONENTS.modal(
           "<h3>Local engine required</h3>" +
-          "<p>This screen is currently running with demo data because the AVM engine bridge is not reachable. " +
-          "Start the local experience server, then connect for real:</p>" +
-          '<div class="code-line" style="margin-top:12px">python -m app.web.server</div>' +
+          "<p>This screen is currently running with demo data because the AVM engine isn't reachable. " +
+          "Start the AVM engine on this machine, then connect for real.</p>" +
           '<div class="modal-actions"><button class="btn" onclick="COMPONENTS.closeModal()">Close</button></div>'
         );
       });

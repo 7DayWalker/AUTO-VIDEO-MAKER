@@ -30,13 +30,69 @@ window.CC = (function () {
       return '<span class="chip state-chip ' + info.badge + '"><strong>' + C.esc(counts[key] == null ? 0 : counts[key]) + '</strong> ' + C.esc(info.label) + '</span>';
     }).join("");
   }
-  function progressBar(counts, total) {
-    var done = counts && counts.COMPLETED || 0;
+  /* Track 3 Increment 1: multi-state DISTRIBUTION bar. Segment widths come
+     only from the durable six-state counts (never invented progress); the
+     state-counts chips above it remain the textual, non-color channel.
+     Zero-count states render no segment; NOT_STARTED units are the unlit
+     remainder of the track. */
+  var BAR_STATES = [
+    { key: "COMPLETED", tone: "ok" },
+    { key: "IN_FLIGHT", tone: "info" },
+    { key: "INCOMPLETE", tone: "warn" },
+    { key: "FAILED", tone: "err" },
+    { key: "BLOCKED", tone: "muted" }
+  ];
+  function stateSummary(counts) {
+    counts = counts || {};
+    return BAR_STATES.filter(function (seg) { return (counts[seg.key] || 0) > 0; })
+      .map(function (seg) {
+        return (counts[seg.key] || 0) + " " + STATES[seg.key].label.toLowerCase();
+      })
+      .join(" · ");
+  }
+  function stateBar(counts, total) {
+    counts = counts || {};
     var denominator = Number(total) || 0;
-    var pct = denominator ? Math.round(done / denominator * 100) : 0;
-    return '<div class="progress-wrap" aria-label="' + C.esc(done + ' of ' + denominator + ' units completed') + '">' +
-      '<div class="statebar"><div class="statebar-fill" style="width:' + pct + '%"></div></div>' +
-      '<span class="hint">' + C.esc(done + '/' + denominator + ' units completed (' + pct + '%)') + '</span></div>';
+    var summary = stateSummary(counts);
+    if (!denominator || !summary) return "";
+    var segments = BAR_STATES.filter(function (seg) { return (counts[seg.key] || 0) > 0; })
+      .map(function (seg) {
+        var count = counts[seg.key] || 0;
+        var pct = Math.round(count / denominator * 100);
+        var label = STATES[seg.key].label;
+        return '<span class="statebar-seg ' + seg.tone + '" aria-hidden="true" style="width:' + pct + '%" title="' +
+          C.esc(count + " " + label.toLowerCase()) + '"></span>';
+      }).join("");
+    return '<div class="statebar-multi" role="img" aria-label="' + C.esc(summary) + '">' + segments + '</div>';
+  }
+  /* Temporal context from SERVER-provided timestamps only. Missing/invalid
+     timestamps render nothing at all (never "just now" without a real
+     timestamp); the exact time stays in title + <time datetime>. */
+  function relTime(iso) {
+    if (!iso) return null;
+    var then = new Date(iso);
+    if (isNaN(then.getTime())) return null;
+    var seconds = Math.max(0, Math.floor((Date.now() - then.getTime()) / 1000));
+    if (seconds < 60) return "just now";
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + "m ago";
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + "h ago";
+    var days = Math.floor(hours / 24);
+    if (days < 7) return days + "d ago";
+    return then.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  }
+  function timeMeta(created_at, revised_at) {
+    var created = relTime(created_at);
+    var revised = relTime(revised_at);
+    var parts = [];
+    if (created) parts.push('<span>Created <time datetime="' + C.esc(String(created_at)) +
+      '" title="' + C.esc(String(created_at)) + '">' + C.esc(created) + '</time></span>');
+    if (revised && String(revised_at) !== String(created_at)) {
+      parts.push('<span>Updated <time datetime="' + C.esc(String(revised_at)) +
+        '" title="' + C.esc(String(revised_at)) + '">' + C.esc(revised) + '</time></span>');
+    }
+    return parts.join("");
   }
   function runBadge(run) {
     if (run && run.running) return '<span class="badge info">Active run</span>';
@@ -70,7 +126,8 @@ window.CC = (function () {
     return html || '<span class="hint">No safe command available.</span>';
   }
   return { STATES: STATES, ORDER: ORDER, stateInfo: stateInfo, stateBadge: stateBadge,
-    stateExplanation: stateExplanation, countsRow: countsRow, progressBar: progressBar,
+    stateExplanation: stateExplanation, countsRow: countsRow, stateBar: stateBar,
+    stateSummary: stateSummary, timeMeta: timeMeta, relTime: relTime,
     runBadge: runBadge, routeChip: routeChip, actionButtons: actionButtons };
 })();
 
@@ -95,11 +152,11 @@ window.VIEWS = window.VIEWS || {};
 VIEWS.productions = {
   title: "Command Center",
   render: async function () {
-    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "Live production data is unavailable. Start the local engine with: python -m app.web.server") + '</div>';
+    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "The local AVM engine isn't running, so live production data is unavailable. Start the engine on this machine, then refresh.") + '</div>';
     var items;
     try { items = await API.getProductions(); }
-    catch (e) { return '<div class="card cc-state-panel error-panel">' + COMPONENTS.emptyState("alert", "Production data unavailable", String(e.message || e)) + '</div>'; }
-    if (!items.length) return '<div class="page-head"><div><p class="eyebrow">Personal production control</p><h1 class="page-title">Command Center</h1><p class="page-sub">Production is the primary operational object. No live production intents exist yet.</p></div></div><div class="card cc-state-panel">' + COMPONENTS.emptyState("sparkle", "No productions yet", "Create a durable production intent through produce.py. The Command Center does not create production records.") + '</div>';
+    catch (e) { return '<div class="card cc-state-panel error-panel">' + COMPONENTS.emptyState("alert", "Production data unavailable", String(e.message || e) + " — reload the page to try again. Nothing was invented to fill this page.") + '</div>'; }
+    if (!items.length) return '<div class="page-head"><div><p class="eyebrow">Home</p><h1 class="page-title">Command Center</h1><p class="page-sub">Your videos and their production status will live here.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/create">Create Video</a></div></div><div class="card cc-state-panel">' + COMPONENTS.emptyState("sparkle", "No productions yet", "Create your first video — AVM will plan, produce, and render it, and it will appear here with live status.", '<a class="btn btn-primary" href="#/create">Create Video</a>') + '</div>';
     function attentionPriority(p) {
       var counts = p.counts || {};
       if (p.error || !p.counts) return 0;
@@ -114,14 +171,18 @@ VIEWS.productions = {
     var cards = items.map(function (p) {
       var counts = p.counts || {};
       var attention = p.error || !p.counts ? "Production data requires inspection." : counts.FAILED ? "Failure requires inspection." : counts.BLOCKED ? "Dependencies require attention." : counts.IN_FLIGHT ? "Execution is active or a remote job is in flight." : counts.INCOMPLETE ? "Work can continue with Resume." : counts.NOT_STARTED ? "Ready for first execution." : "No attention required.";
+      var times = CC.timeMeta(p.created_at, p.revised_at);
+      var timesHtml = times ? '<p class="cc-times">' + times + '</p>' : "";
       var tone = p.error || !p.counts || counts.FAILED ? "danger" : counts.BLOCKED || counts.INCOMPLETE ? "warn" : counts.IN_FLIGHT ? "info" : "neutral";
       return '<article class="card production-card attention-' + tone + '">' +
-        '<div class="production-card-head"><div><p class="eyebrow">Production</p><h2 class="production-title">' + COMPONENTS.esc(p.title) + '</h2><p class="mono muted-text">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + ' units</p></div><div>' + CC.routeChip(p.route) + CC.runBadge(p.run) + '</div></div>' +
+        '<div class="production-card-head"><div><h2 class="production-title">' + COMPONENTS.esc(p.title) + '</h2><p class="mono muted-text">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + (p.unit_count === 1 ? ' video' : ' videos') + '</p>' + timesHtml + '</div><div>' + CC.routeChip(p.route) + CC.runBadge(p.run) + '</div></div>' +
         '<div class="attention-strip"><span class="attention-dot" aria-hidden="true"></span><span>' + COMPONENTS.esc(attention) + '</span></div>' +
-        '<div class="production-card-body"><p class="command-label">Production intent</p><p class="command-text">' + COMPONENTS.esc(p.command_text) + '</p><div class="state-counts" aria-label="Six-state unit summary">' + CC.countsRow(counts) + '</div>' + CC.progressBar(counts, p.unit_count) + (p.error ? '<p class="inline-error">' + COMPONENTS.esc(p.error) + '</p>' : '') + '</div>' +
+        '<div class="production-card-body"><p class="command-label">Brief</p><p class="command-text">' + COMPONENTS.esc(p.command_text) + '</p><div class="state-counts" aria-label="Six-state unit summary">' + CC.countsRow(counts) + '</div>' + CC.stateBar(counts, p.unit_count) + (p.error ? '<p class="inline-error">' + COMPONENTS.esc(p.error) + '</p>' : '') + '</div>' +
         '<div class="production-card-foot"><a class="btn btn-sm" href="#/productions/' + encodeURIComponent(p.production_id) + '">Inspect production</a><span class="spacer"></span>' + CC.actionButtons(p) + '</div></article>';
     }).join("");
-    return '<div class="page-head"><div><p class="eyebrow">Personal production control</p><h1 class="page-title">Command Center</h1><p class="page-sub">Inspect durable production intent and executor-derived progress. Commands are explicit, confirmed, and never automatic.</p></div></div><div id="production-command-feedback" aria-live="polite"></div><div class="cc-toolbar"><label class="field-inline"><span class="sr-only">Filter productions</span><input class="input" id="production-filter" type="search" placeholder="Filter productions" autocomplete="off"></label><span class="hint">' + COMPONENTS.esc(items.length + ' live production' + (items.length === 1 ? '' : 's')) + '</span></div><div class="grid productions-grid" id="production-cards">' + cards + '</div>';
+    return '<div class="page-head"><div><p class="eyebrow">Home</p><h1 class="page-title">Command Center</h1><p class="page-sub">Every production and its live status. Commands are explicit and confirmed — nothing runs without your approval.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/create">Create Video</a></div></div>' +
+      '<section class="card cc-hero" aria-label="Create a video"><div class="cc-hero-text"><p class="eyebrow">Create</p><h2>What are we making today?</h2><p class="page-sub">Describe your idea — AVM plans, produces, and renders the video. You approve every command.</p></div><div class="cc-hero-actions"><a class="btn btn-primary btn-lg" href="#/create">Create Video</a><a class="btn" href="#/projects">View Projects</a></div></section>' +
+      '<div id="production-command-feedback" aria-live="polite"></div><div class="cc-toolbar"><label class="field-inline"><span class="sr-only">Filter productions</span><input class="input" id="production-filter" type="search" placeholder="Filter productions" autocomplete="off"></label><span class="hint">' + COMPONENTS.esc(items.length + ' production' + (items.length === 1 ? '' : 's')) + '</span></div><div class="grid productions-grid" id="production-cards">' + cards + '</div>';
   },
   mount: async function () {
     var filter = document.getElementById("production-filter");
@@ -132,7 +193,7 @@ VIEWS.productions = {
     document.querySelectorAll("[data-cc]").forEach(function (button) {
       button.addEventListener("click", function () {
         var action = button.getAttribute("data-cc"), id = button.getAttribute("data-id"), total = button.getAttribute("data-total");
-        CC.confirmDialog({ title: action === "execute" ? "Execute production?" : "Resume production?", description: (action === "execute" ? "Execute" : "Resume") + " production " + id + "?", scope: total + " units total; only the existing executor decides eligible work.", firstAction: "The Phase 10 ProductionExecutor receives the confirmed command in the background; no completed unit is restarted and no remote job is resubmitted.", confirmLabel: action === "execute" ? "Execute Production" : "Resume Production" }, function () {
+        CC.confirmDialog({ title: action === "execute" ? "Execute production?" : "Resume production?", description: (action === "execute" ? "Execute" : "Resume") + " production " + id + "?", scope: total + " units total; only the AVM engine decides eligible work.", firstAction: "AVM receives the confirmed command in the background; no completed unit is restarted and no remote job is resubmitted.", confirmLabel: action === "execute" ? "Execute Production" : "Resume Production" }, function () {
           API.productionCommand(id, action).then(function (res) { COMPONENTS.toast(res.message || "Command accepted", "ok"); location.hash = "#/productions/" + encodeURIComponent(id); }).catch(function (err) { var message = err.message || String(err), feedback = document.getElementById("production-command-feedback"); if (feedback) feedback.innerHTML = '<p class="inline-error" role="alert">' + COMPONENTS.esc(message) + '</p>'; COMPONENTS.toast(message, "err"); });
         });
       });

@@ -28,28 +28,28 @@ VIEWS.create = {
 
   frame: function (tabs, body) {
     return '<div class="page-head"><div><p class="eyebrow">Local-first studio</p><h1 class="page-title">Create Video</h1>' +
-      '<p class="page-sub">Turn one idea into a durable production. Start with a single video and keep execution under your control.</p></div></div>' +
+      '<p class="page-sub">Turn one idea into a finished video. Describe it, review it, then produce it when you are ready.</p></div></div>' +
       '<div class="steps">' + tabs.join('<span class="step-sep"></span>') + '</div>' +
       '<div class="card card-pad creation-card">' + body + '</div>';
   },
 
   renderDescribe: function () {
     var d = VIEWS.create.data;
-    return '<div class="creation-intro"><span class="creation-icon">' + ICONS.create + '</span><div><h2>Single Video</h2><p class="hint">One Production · one production unit · one final video.</p></div></div>' +
-      '<div class="field"><label for="f-title">Working title</label><input class="input" id="f-title" maxlength="200" placeholder="e.g. The hidden life of city trees" value="' + COMPONENTS.esc(d.title) + '"><span class="hint">This becomes the name of your durable Production.</span></div>' +
-      '<div class="field"><label for="f-brief">Creative brief</label><textarea class="input" id="f-brief" maxlength="500" rows="4" placeholder="What should this video explain, show, or make people feel?">' + COMPONENTS.esc(d.brief) + '</textarea><span class="hint">Your brief is saved durably with the Production. Execution plans content with your configured AI provider (OpenRouter-compatible), sources real still imagery, and renders locally with ImageMotion and FFmpeg.</span></div>' +
+    return '<div class="creation-intro"><span class="creation-icon">' + ICONS.create + '</span><div><h2>Single Video</h2><p class="hint">One production · one final video.</p></div></div>' +
+      '<div class="field"><label for="f-title">Working title</label><input class="input" id="f-title" maxlength="200" placeholder="e.g. The hidden life of city trees" value="' + COMPONENTS.esc(d.title) + '"><span class="hint">This becomes the production\'s name.</span></div>' +
+      '<div class="field"><label for="f-brief">Creative brief</label><textarea class="input" id="f-brief" maxlength="500" rows="4" placeholder="What should this video explain, show, or make people feel?">' + COMPONENTS.esc(d.brief) + '</textarea><span class="hint">Your brief drives planning, sourcing, and rendering. It is saved with the production.</span></div>' +
       '<div class="field"><label>Output intent</label><div class="choice-grid compact" id="f-output">' +
         [['youtube_shorts', 'YouTube Shorts', '9:16 vertical'], ['tiktok', 'TikTok', '9:16 vertical']].map(function (item) {
           return '<button type="button" class="choice' + (d.outputIntent === item[0] ? ' selected' : '') + '" data-output="' + item[0] + '"><div class="c-title">' + COMPONENTS.esc(item[1]) + '</div><div class="c-sub">' + COMPONENTS.esc(item[2]) + '</div></button>';
         }).join('') + '</div></div>' +
-      '<div class="field"><label>Generation Strategy</label><div class="choice-grid compact" id="f-strategy">' +
+      '<div class="field"><label>Production path</label><div class="choice-grid compact" id="f-strategy">' +
         [
-          ['local', 'Local / Hybrid', 'Local visual generation and assembly.'],
-          ['alibaba_image_local_video', 'Alibaba Image → Local Video', 'Alibaba generates scene images; AVM assembles the video locally.'],
-          ['alibaba_video', 'Alibaba Video', 'Alibaba generates actual motion-video scenes.']
+          ['local', 'Local (Recommended)', 'Free — planning, imagery, and rendering stay on this machine.'],
+          ['alibaba_image_local_video', 'Alibaba Image → Local Video', 'Uses paid API — Alibaba generates scene images; AVM assembles the video locally.'],
+          ['alibaba_video', 'Alibaba Video', 'Uses paid API — Alibaba generates actual motion-video scenes.']
         ].map(function (item) {
           return '<button type="button" class="choice' + (d.strategy === item[0] ? ' selected' : '') + '" data-strategy="' + item[0] + '"><div class="c-title">' + COMPONENTS.esc(item[1]) + '</div><div class="c-sub">' + COMPONENTS.esc(item[2]) + '</div></button>';
-        }).join('') + '</div><span class="hint">How scene visuals are generated. Local / Hybrid is the default and keeps the current behavior.</span></div>' +
+        }).join('') + '</div><span class="hint">How scene visuals are made. The recommended path is free; paid paths use your configured provider account and fail loudly if unavailable.</span></div>' +
       '<div class="creation-inline-fields"><div class="field"><label for="f-duration">Target duration</label><select class="input" id="f-duration"><option value="15"' + (d.duration === 15 ? ' selected' : '') + '>15 seconds</option><option value="30"' + (d.duration === 30 ? ' selected' : '') + '>30 seconds</option><option value="45"' + (d.duration === 45 ? ' selected' : '') + '>45 seconds</option><option value="60"' + (d.duration === 60 ? ' selected' : '') + '>60 seconds</option></select></div><div class="field"><label for="f-scenes">Scene count</label><select class="input" id="f-scenes"><option value="4"' + (d.scenes === 4 ? ' selected' : '') + '>4 visual beats</option><option value="6"' + (d.scenes === 6 ? ' selected' : '') + '>6 visual beats</option><option value="8"' + (d.scenes === 8 ? ' selected' : '') + '>8 visual beats</option></select></div></div>' +
       '<div class="creation-actions"><span class="hint">You can adjust details before creating the Production.</span><button class="btn btn-primary" data-create-step="next">Continue</button></div>';
   },
@@ -58,27 +58,27 @@ VIEWS.create = {
     var d = VIEWS.create.data;
     var title = d.title.trim() || d.brief.trim();
     var strategyInfo = {
-      local: ['Local / Hybrid', 'Local visual generation and assembly (default).'],
+      local: ['Local', 'Planning, imagery, and rendering stay on this machine.'],
       alibaba_image_local_video: ['Alibaba Image → Local Video', 'Alibaba generates scene images; AVM assembles the video locally.'],
       alibaba_video: ['Alibaba Video', 'Alibaba generates actual motion-video scenes.']
-    }[d.strategy] || ['Local / Hybrid', 'Local visual generation and assembly (default).'];
+    }[d.strategy] || ['Local', 'Planning, imagery, and rendering stay on this machine.'];
     return '<div class="creation-intro"><span class="creation-icon">' + ICONS.sparkle + '</span><div><h2>Ready to create</h2><p class="hint">Review the intent that will be saved. Nothing executes until you explicitly choose Execute.</p></div></div>' +
-      '<div class="local-choice"><div><strong>' + COMPONENTS.esc(strategyInfo[0]) + '</strong><p>' + COMPONENTS.esc(strategyInfo[1]) + '</p></div><span class="badge ok">' + COMPONENTS.esc(d.strategy === 'local' ? 'Local · free' : 'Strategy · ' + strategyInfo[0]) + '</span></div>' +
-      '<dl class="detail-list creation-review"><div><dt>Title</dt><dd>' + COMPONENTS.esc(title || '—') + '</dd></div><div><dt>Output</dt><dd>' + COMPONENTS.esc(d.outputIntent === 'tiktok' ? 'TikTok' : 'YouTube Shorts') + '</dd></div><div><dt>Generation strategy</dt><dd>' + COMPONENTS.esc(strategyInfo[0]) + '</dd></div><div><dt>Target duration</dt><dd>' + d.duration + ' seconds</dd></div><div><dt>Scenes</dt><dd>' + d.scenes + ' visual beats</dd></div><div><dt>Brief</dt><dd>' + COMPONENTS.esc(d.brief.trim() || title || '—') + '</dd></div></dl>' +
-      '<p class="truth-note">Creation saves durable intent only. The resulting Production will appear in the Command Center with an explicit Execute action.</p>' +
+      '<div class="local-choice"><div><strong>' + COMPONENTS.esc(strategyInfo[0]) + '</strong><p>' + COMPONENTS.esc(strategyInfo[1]) + '</p></div><span class="badge ' + (d.strategy === 'local' ? 'ok' : 'warn') + '">' + COMPONENTS.esc(d.strategy === 'local' ? 'Free · local tools' : 'Uses paid API') + '</span></div>' +
+      '<dl class="detail-list creation-review"><div><dt>Title</dt><dd>' + COMPONENTS.esc(title || '—') + '</dd></div><div><dt>Output</dt><dd>' + COMPONENTS.esc(d.outputIntent === 'tiktok' ? 'TikTok' : 'YouTube Shorts') + '</dd></div><div><dt>Production path</dt><dd>' + COMPONENTS.esc(strategyInfo[0]) + '</dd></div><div><dt>Target duration</dt><dd>' + d.duration + ' seconds</dd></div><div><dt>Scenes</dt><dd>' + d.scenes + ' visual beats</dd></div><div><dt>Brief</dt><dd>' + COMPONENTS.esc(d.brief.trim() || title || '—') + '</dd></div></dl>' +
+      '<p class="truth-note">Creation saves the plan only — nothing runs until you choose Execute in the Command Center.</p>' +
       (d.error ? '<p class="inline-error" role="alert">' + COMPONENTS.esc(d.error) + '</p>' : '') +
-      '<div class="creation-actions"><button class="btn" data-create-step="back">Back</button><button class="btn btn-primary" data-create-submit>' + ICONS.create + ' Create Production</button></div>';
+      '<div class="creation-actions"><button class="btn" data-create-step="back">Back</button><button class="btn btn-primary" data-create-submit>' + ICONS.create + ' Create Video</button></div>';
   },
 
   renderSuccess: function () {
     var created = VIEWS.create.data.created;
     var strategy = created.generation_strategy || "local";
     var strategyInfo = {
-      local: ['Local AI-assisted creation selected', 'Execution will plan with your configured AI provider, source real still imagery, and render locally through ImageMotion and FFmpeg.', 'Local · AI-assisted'],
-      alibaba_image_local_video: ['Alibaba Image → Local Video selected', 'Alibaba will generate the scene images; the existing local engine assembles and renders the final video.', 'Alibaba image · local video'],
-      alibaba_video: ['Alibaba Video selected', 'Alibaba will generate actual motion-video scene clips; the existing local engine finalizes the video. Unavailability fails truthfully — never a silent still-image substitute.', 'Alibaba motion video']
-    }[strategy] || ['Local AI-assisted creation selected', 'Execution will plan with your configured AI provider, source real still imagery, and render locally through ImageMotion and FFmpeg.', 'Local · AI-assisted'];
-    return '<div class="creation-success"><div class="success-mark">' + ICONS.check + '</div><p class="eyebrow">Production intent saved</p><h2>' + COMPONENTS.esc(created.title) + '</h2><p class="page-sub">Your Single Video Production is durable and ready for an explicit local execution command.</p><div class="local-choice"><div><strong>' + COMPONENTS.esc(strategyInfo[0]) + '</strong><p>' + COMPONENTS.esc(strategyInfo[1]) + '</p></div><span class="badge ok">' + COMPONENTS.esc(strategyInfo[2]) + '</span></div><div class="creation-actions"><a class="btn btn-primary" href="#/productions/' + encodeURIComponent(created.production_id) + '">Open Production</a><a class="btn" href="#/productions">Command Center</a></div></div>';
+      local: ['Local path selected', 'AVM will plan the story, source real imagery, and render the video locally.', 'Free · local tools'],
+      alibaba_image_local_video: ['Alibaba Image → Local Video selected', 'Alibaba will generate the scene images; AVM assembles and renders the final video locally.', 'Uses paid API'],
+      alibaba_video: ['Alibaba Video selected', 'Alibaba will generate actual motion-video scene clips; AVM finalizes the video. Unavailability fails loudly — never a silent still-image substitute.', 'Uses paid API']
+    }[strategy] || ['Local path selected', 'AVM will plan the story, source real imagery, and render the video locally.', 'Free · local tools'];
+    return '<div class="creation-success"><div class="success-mark">' + ICONS.check + '</div><p class="eyebrow">Production intent saved</p><h2>' + COMPONENTS.esc(created.title) + '</h2><p class="page-sub">Your production is saved and ready — nothing runs until you choose Execute.</p><div class="local-choice"><div><strong>' + COMPONENTS.esc(strategyInfo[0]) + '</strong><p>' + COMPONENTS.esc(strategyInfo[1]) + '</p></div><span class="badge ' + (strategy === 'local' ? 'ok' : 'warn') + '">' + COMPONENTS.esc(strategyInfo[2]) + '</span></div><div class="creation-actions"><a class="btn btn-primary" href="#/productions/' + encodeURIComponent(created.production_id) + '">Produce now</a><a class="btn" href="#/productions">Command Center</a></div></div>';
   },
 
   mount: function () {
@@ -107,7 +107,7 @@ VIEWS.create = {
     });
     var submit = document.querySelector('[data-create-submit]');
     if (submit) submit.addEventListener('click', function () {
-      if (!API.live) { d.error = 'The local engine is offline. Start it with: python -m app.web.server, then try again.'; App.refresh(); return; }
+      if (!API.live) { d.error = 'The local AVM engine is offline. Start it on this machine, then try again.'; App.refresh(); return; }
       submit.disabled = true;
       API.createProduction({
         mode: 'single_video', creation_method: 'local', title: d.title.trim(),
