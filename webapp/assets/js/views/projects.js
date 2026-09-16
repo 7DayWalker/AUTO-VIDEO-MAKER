@@ -12,5 +12,17 @@ VIEWS.projects = {
     return '<div class="page-head"><div><p class="eyebrow">Execution outputs</p><h1 class="page-title">Projects</h1><p class="page-sub">Review existing project artifacts and publication records. Binding is shown only when the authoritative manifest provides it.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/create">' + ICONS.create + ' Create Video</a></div></div>' +
       (!API.live ? '<p class="demo-notice"><span class="sample-tag">Demo data</span> Real projects are unavailable while the engine is offline.</p>' : '') +
       '<div class="grid grid-3">' + projects.map(COMPONENTS.projectCard).join("") + '</div>';
+  },
+  mount: function () {
+    /* Real-output hover preview: the video element is only rendered for
+       manifest-backed finals (see COMPONENTS.projectCard/mediaThumb). */
+    document.querySelectorAll(".project-card .pc-thumb-media").forEach(function (v) {
+      var card = v.closest(".project-card");
+      if (!card) return;
+      card.addEventListener("mouseenter", function () {
+        var pr = v.play(); if (pr && pr.catch) pr.catch(function () { /* first frame stays */ });
+      });
+      card.addEventListener("mouseleave", function () { try { v.pause(); v.currentTime = 0; } catch (e) { /* ignore */ } });
+    });
   }
 };

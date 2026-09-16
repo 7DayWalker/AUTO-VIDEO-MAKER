@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Designed interface artwork: branching production paths">
+  <!-- UI ART ASSET — designed interface art, not production output. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d121e"/>
+      <stop offset="1" stop-color="#121a2b"/>
+    </linearGradient>
+    <radialGradient id="orb" cx="0.3" cy="0.6" r="0.55">
+      <stop offset="0" stop-color="#4f8cff" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#4f8cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb2" cx="0.85" cy="0.25" r="0.45">
+      <stop offset="0" stop-color="#8b7cff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#8b7cff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="10"/></filter>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="matrix" values="0 0 0 0 0.62  0 0 0 0 0.70  0 0 0 0 0.82  0 0 0 0.06 0"/></filter>
+    <radialGradient id="vig" cx="0.5" cy="0.5" r="0.8"><stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.5"/></radialGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <rect width="640" height="360" fill="url(#orb)"/>
+  <rect width="640" height="360" fill="url(#orb2)"/>
+  <!-- branching paths from one origin -->
+  <g fill="none" stroke-width="2.5" stroke-linecap="round">
+    <path d="M120 180 C 220 180 240 90 340 90 S 480 80 540 60" stroke="#6ba0ff" opacity="0.95"/>
+    <path d="M120 180 C 230 180 260 180 360 180 S 490 176 548 172" stroke="#8b7cff" opacity="0.9"/>
+    <path d="M120 180 C 220 180 250 272 350 272 S 480 284 536 300" stroke="#4f8cff" opacity="0.75"/>
+    <path d="M120 180 C 230 180 260 180 360 180" stroke="#cfe0ff" stroke-width="3.5" opacity="0.25" filter="url(#soft)"/>
+  </g>
+  <!-- nodes -->
+  <g>
+    <circle cx="120" cy="180" r="13" fill="#16202f" stroke="#9cc2ff" stroke-width="2.5"/>
+    <circle cx="120" cy="180" r="4.5" fill="#cfe0ff"/>
+    <circle cx="540" cy="60" r="8" fill="#16202f" stroke="#6ba0ff" stroke-width="2"/>
+    <circle cx="548" cy="172" r="8" fill="#16202f" stroke="#8b7cff" stroke-width="2"/>
+    <circle cx="536" cy="300" r="8" fill="#16202f" stroke="#4f8cff" stroke-width="2"/>
+    <circle cx="345" cy="90" r="3.4" fill="#9cc2ff" opacity="0.9"/>
+    <circle cx="360" cy="180" r="3.4" fill="#c9bfff" opacity="0.9"/>
+    <circle cx="352" cy="272" r="3.4" fill="#6ba0ff" opacity="0.8"/>
+  </g>
+  <!-- faint grid -->
+  <g stroke="#2a3a5c" stroke-width="0.6" opacity="0.35">
+    <path d="M0 60 H640 M0 300 H640 M60 0 V360 M580 0 V360"/>
+  </g>
+  <rect width="640" height="360" filter="url(#grain)"/>
+  <rect width="640" height="360" fill="url(#vig)"/>
+</svg>

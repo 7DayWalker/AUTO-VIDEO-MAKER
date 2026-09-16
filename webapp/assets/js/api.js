@@ -76,6 +76,25 @@ window.API = (function () {
         "/scenes/" + encodeURIComponent(sceneId) + "/media";
     },
 
+    /* ---- Visual Asset Library (additive, read-only, manifest-backed) ---- */
+
+    /** Asset index for one project, straight from the durable asset manifest. */
+    getProjectAssets(projectId) {
+      return jsonFetch("/api/projects/" + encodeURIComponent(projectId) + "/assets");
+    },
+
+    /** Safe same-origin stored-asset delivery URL (project-dir confined). */
+    assetMediaUrl(projectId, sceneId) {
+      return "/api/projects/" + encodeURIComponent(projectId) +
+        "/assets/" + encodeURIComponent(sceneId) + "/media";
+    },
+
+    /** Explicit on-demand SHA-256 re-verification of one stored asset. */
+    verifyProjectAsset(projectId, sceneId) {
+      return jsonFetch("/api/projects/" + encodeURIComponent(projectId) +
+        "/assets/" + encodeURIComponent(sceneId) + "/verify");
+    },
+
     /** Explicit publish request — only ever called from the confirm dialog. */
     publishTiktok(projectId, privacyLevel) {
       return jsonFetch(

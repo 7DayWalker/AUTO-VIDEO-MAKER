@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 280" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Designed interface artwork: a quiet studio before the first take">
+  <!-- UI ART ASSET — designed interface art, not production output. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0c1119"/>
+      <stop offset="1" stop-color="#101827"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="1.05" r="0.7">
+      <stop offset="0" stop-color="#4f8cff" stop-opacity="0.28"/>
+      <stop offset="0.6" stop-color="#4f8cff" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#4f8cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.16" cy="0.2" r="0.4">
+      <stop offset="0" stop-color="#8b7cff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#8b7cff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="8"/></filter>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="matrix" values="0 0 0 0 0.62  0 0 0 0 0.70  0 0 0 0 0.82  0 0 0 0.05 0"/></filter>
+    <radialGradient id="vig" cx="0.5" cy="0.5" r="0.85"><stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.45"/></radialGradient>
+  </defs>
+  <rect width="1200" height="280" fill="url(#bg)"/>
+  <rect width="1200" height="280" fill="url(#glow2)"/>
+  <rect width="1200" height="280" fill="url(#glow)"/>
+  <!-- horizon line -->
+  <path d="M0 232 H1200" stroke="#2a3a5c" stroke-width="1.4" opacity="0.8"/>
+  <path d="M0 232 H1200" stroke="#6ba0ff" stroke-width="2" opacity="0.25" filter="url(#soft)"/>
+  <!-- resting camera silhouette -->
+  <g fill="#0a0e15" opacity="0.95">
+    <rect x="540" y="182" width="120" height="50" rx="10"/>
+    <rect x="576" y="164" width="34" height="22" rx="6"/>
+    <path d="M660 192 l36 -18 v66 l-36 -18 Z"/>
+    <rect x="586" y="232" width="10" height="20"/>
+    <rect x="524" y="232" width="10" height="20"/>
+  </g>
+  <circle cx="566" cy="207" r="14" fill="#101827" stroke="#3a4c6e" stroke-width="2"/>
+  <circle cx="566" cy="207" r="5" fill="#1c2a40"/>
+  <circle cx="646" cy="172" r="3" fill="#f87171" opacity="0.85"/>
+  <!-- faint stars -->
+  <g fill="#cfe0ff">
+    <circle cx="180" cy="70" r="1.8" opacity="0.6"/>
+    <circle cx="420" cy="44" r="1.4" opacity="0.5"/>
+    <circle cx="860" cy="60" r="1.8" opacity="0.6"/>
+    <circle cx="1040" cy="96" r="1.4" opacity="0.45"/>
+  </g>
+  <rect width="1200" height="280" filter="url(#grain)"/>
+  <rect width="1200" height="280" fill="url(#vig)"/>
+</svg>

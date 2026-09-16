@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Designed interface artwork: a cinema-lit studio horizon">
+  <!-- UI ART ASSET (webapp/assets/img/ui/*): designed interface art for the
+       Creator Home shell. Not production output; never bound to a
+       production/project id; never served from a media endpoint. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b0f14"/>
+      <stop offset="0.55" stop-color="#0e1420"/>
+      <stop offset="1" stop-color="#131c2b"/>
+    </linearGradient>
+    <radialGradient id="auroraA" cx="0.3" cy="0.25" r="0.55">
+      <stop offset="0" stop-color="#4f8cff" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#4f8cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="auroraB" cx="0.72" cy="0.18" r="0.5">
+      <stop offset="0" stop-color="#8b7cff" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#8b7cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="horizon" cx="0.5" cy="1.02" r="0.75">
+      <stop offset="0" stop-color="#5d94ff" stop-opacity="0.30"/>
+      <stop offset="0.55" stop-color="#2a3a5c" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#0b0f14" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="beam" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#9cc2ff" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#9cc2ff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.62  0 0 0 0 0.70  0 0 0 0 0.82  0 0 0 0.05 0"/>
+    </filter>
+    <radialGradient id="vig" cx="0.5" cy="0.45" r="0.85">
+      <stop offset="0.6" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.55"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <rect width="1600" height="900" fill="url(#auroraA)"/>
+  <rect width="1600" height="900" fill="url(#auroraB)"/>
+  <!-- projector beams -->
+  <g opacity="0.5">
+    <path d="M620 900 L760 210 L840 210 L900 900 Z" fill="url(#beam)" filter="url(#soft)"/>
+    <path d="M1080 900 L1010 260 L1060 250 L1220 900 Z" fill="url(#beam)" opacity="0.6" filter="url(#soft)"/>
+    <path d="M300 900 L430 330 L470 340 L520 900 Z" fill="url(#beam)" opacity="0.45" filter="url(#soft)"/>
+  </g>
+  <!-- distant skyline / studio silhouette -->
+  <g fill="#0a0e15" opacity="0.92">
+    <path d="M0 760 h90 v-60 h46 v60 h70 v-110 h40 v-26 h14 v26 h40 v110 h96 v-70 h120 v70 h86 v-150 h34 v-30 h16 v30 h34 v150 h110 v-92 h150 v92 h92 v-130 h44 v130 h120 v-58 h150 v58 h96 v-96 h50 v96 h90 v140 H0 Z"/>
+  </g>
+  <g fill="#101927">
+    <rect x="150" y="700" width="26" height="60" rx="3"/>
+    <rect x="640" y="640" width="20" height="120" rx="3"/>
+    <rect x="1180" y="672" width="24" height="88" rx="3"/>
+  </g>
+  <!-- rim lights on the horizon -->
+  <ellipse cx="800" cy="880" rx="900" ry="180" fill="url(#horizon)"/>
+  <circle cx="240" cy="180" r="2.4" fill="#cfe0ff" opacity="0.8"/>
+  <circle cx="1320" cy="130" r="2" fill="#cfe0ff" opacity="0.7"/>
+  <circle cx="1120" cy="90" r="1.6" fill="#e4d9ff" opacity="0.7"/>
+  <circle cx="480" cy="120" r="1.8" fill="#cfe0ff" opacity="0.6"/>
+  <rect width="1600" height="900" filter="url(#grain)"/>
+  <rect width="1600" height="900" fill="url(#vig)"/>
+</svg>

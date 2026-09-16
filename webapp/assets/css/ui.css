@@ -684,3 +684,60 @@ textarea.input { resize: vertical; min-height: 90px; }
 
 
 
+
+/* ----- Phase 4: Command Center real-media strip -------------------------
+   Manifest-backed final videos only; rendered by productions.js when the
+   server-derived bound project reports final_video_available. */
+.cc-media-strip {
+  position: relative;
+  display: block;
+  aspect-ratio: 21 / 6;
+  overflow: hidden;
+  background: #0d131d;
+  border-bottom: 1px solid var(--border);
+}
+.cc-media-strip .cc-media {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+.cc-media-label {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 20px 14px 10px;
+  font-size: 12px; color: var(--text-muted);
+  background: linear-gradient(transparent, rgba(8,11,16,.85));
+}
+.cc-media-label svg { width: 15px; height: 15px; color: var(--accent-hover); flex: none; }
+
+/* Projects grid: gentle zoom on the real-output preview. */
+.pc-thumb-media { transition: transform .45s ease; }
+.project-card:hover .pc-thumb-media { transform: scale(1.035); }
+
+/* ----- Phase 5: Visual Asset Library (real manifest-backed assets) ------ */
+.asset-toolbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+.asset-toolbar .field-inline { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 280px; }
+.asset-sel-label { font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); flex: none; }
+.asset-toolbar select { max-width: 620px; }
+.asset-grid { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+.asset-card { overflow: hidden; display: flex; flex-direction: column; }
+.asset-thumb {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  background: linear-gradient(160deg, var(--surface-2), var(--bg-elev));
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.asset-thumb > svg { width: 30px; height: 30px; opacity: .45; }
+.asset-thumb .asset-media { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.asset-thumb.missing > svg { color: var(--danger); opacity: .8; }
+.asset-body { padding: 13px 15px 15px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.asset-title { font-size: 13px; font-weight: 650; }
+.asset-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.asset-src { font-size: 12px; color: var(--text-muted); }
+.asset-sha { font-size: 11px; color: var(--text-faint); word-break: break-all; }
+.asset-actions { margin-top: auto; display: flex; gap: 8px; padding-top: 4px; flex-wrap: wrap; }
+.asset-prov { max-height: 46vh; overflow: auto; }
+.asset-prov dd { word-break: break-all; }

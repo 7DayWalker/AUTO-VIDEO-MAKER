@@ -40,11 +40,15 @@ MIME = {
     ".js": "application/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
     ".json": "application/json",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
     ".mov": "video/quicktime",
     ".m4v": "video/x-m4v",
+    ".mkv": "video/x-matroska",
 }
 
 MEDIA_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v"}
@@ -119,6 +123,25 @@ def _publication_summary(manifest: dict) -> list:
     return out
 
 
+def _binding_production_id(manifest: dict, directory_name: str):
+    """Presentational-only cross-reference: the production id asserted by the
+    manifest's OWN production_binding. Surfaced only when structurally
+    well-formed and self-consistent (binding.project_id == directory name).
+    Full binding validation (production/unit existence) remains the authority
+    of project_detail; this adds no I/O — the manifest is already loaded."""
+    binding = manifest.get("production_binding")
+    if not isinstance(binding, dict):
+        return None
+    if not all(
+        binding.get(field) not in (None, "")
+        for field in ("production_id", "unit_id", "project_id")
+    ):
+        return None
+    if str(binding.get("project_id")) != directory_name:
+        return None
+    return str(binding.get("production_id"))
+
+
 def projects_index() -> list:
     if not PROJECTS_DIR.exists():
         return []
@@ -179,6 +202,7 @@ def projects_index() -> list:
                 and final_path.suffix.lower() in MEDIA_SUFFIXES
             ),
             "publications": _publication_summary(manifest),
+            "binding_production_id": _binding_production_id(manifest, child.name),
             "sample": False,
         })
     return items
@@ -280,6 +304,123 @@ def media_path_for(project_id: str):
     except (ValueError, OSError):
         return None
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Visual Asset Library — additive, read-only surfaces over the durable asset
+# manifest (app/orchestrator/assets.py). Never invents entries, never serves
+# files outside the project directory. SHA-256 re-verification is an explicit
+# on-demand endpoint (/verify), never per-byte-range work on media delivery.
+# ---------------------------------------------------------------------------
+
+def _stored_asset_path(project_dir: Path, stored_rel):
+    """Resolve a project-dir-relative 'stored_as' path; refuse any escape."""
+    if not stored_rel:
+        return None, "no stored path recorded"
+    try:
+        resolved = (Path(project_dir) / str(stored_rel)).resolve(strict=False)
+        resolved.relative_to(Path(project_dir).resolve())
+        if not resolved.is_file():
+            return None, "stored asset file is missing"
+        if resolved.stat().st_size <= 0:
+            return None, "stored asset file is empty"
+        return resolved, None
+    except (OSError, ValueError) as exc:
+        return None, f"unsafe asset path: {type(exc).__name__}"
+
+
+def _project_asset_entry(project_id: str, scene_id: str):
+    from app.orchestrator.assets import load_asset_manifest
+
+    directory = _project_directory_for(project_id)
+    if directory is None:
+        return None, None
+    manifest = load_asset_manifest(directory)
+    entry = (manifest.get("assets") or {}).get(scene_id)
+    return directory, (entry if isinstance(entry, dict) else None)
+
+
+def project_assets_payload(project_id: str):
+    """Read-only asset index for one project, straight from the durable
+    asset manifest. Provenance fields are surfaced verbatim when present."""
+    from app.orchestrator.assets import load_asset_manifest
+
+    directory = _project_directory_for(project_id)
+    if directory is None:
+        return 404, {
+            "error": "PROJECT_NOT_FOUND",
+            "message": f"Project {project_id!r} was not found.",
+        }
+    manifest = load_asset_manifest(directory)
+    assets = manifest.get("assets") or {}
+    items = []
+    for scene_id in sorted(assets):
+        raw = assets.get(scene_id)
+        entry = raw if isinstance(raw, dict) else {}
+        _, issue = _stored_asset_path(directory, entry.get("stored_as"))
+        items.append({
+            "scene_id": scene_id,
+            "source_name": entry.get("source_name"),
+            "stored_as": entry.get("stored_as"),
+            "media_type": entry.get("media_type"),
+            "provider": entry.get("provider"),
+            "sha256": entry.get("sha256"),
+            "bytes": entry.get("bytes"),
+            "supplied_by": entry.get("supplied_by"),
+            "source_provider": entry.get("source_provider"),
+            "source_status": entry.get("source_status"),
+            "source_metadata": entry.get("source_metadata"),
+            "file_present": issue is None,
+            "file_issue": issue,
+        })
+    return 200, _redact_secrets({
+        "project_id": directory.name,
+        "manifest_version": manifest.get("version"),
+        "asset_count": len(items),
+        "assets": items,
+        "sample": False,
+    })
+
+
+def asset_media_path_for(project_id: str, scene_id: str):
+    """Root-confined stored asset file for one scene, or (None, error-code)."""
+    directory, entry = _project_asset_entry(project_id, scene_id)
+    if directory is None:
+        return None, "PROJECT_NOT_FOUND"
+    if entry is None:
+        return None, "ASSET_NOT_FOUND"
+    path, _reason = _stored_asset_path(directory, entry.get("stored_as"))
+    if path is None:
+        return None, "ASSET_FILE_UNAVAILABLE"
+    if path.suffix.lower() not in MIME:
+        return None, "ASSET_TYPE_UNSUPPORTED"
+    return path, None
+
+
+def asset_verify_payload(project_id: str, scene_id: str):
+    """Explicit on-demand SHA-256 re-verification of one stored asset."""
+    from app.orchestrator.assets import verify_stored_asset
+
+    directory, entry = _project_asset_entry(project_id, scene_id)
+    if directory is None:
+        return 404, {
+            "error": "PROJECT_NOT_FOUND",
+            "message": f"Project {project_id!r} was not found.",
+        }
+    if entry is None:
+        return 404, {
+            "error": "ASSET_NOT_FOUND",
+            "message": f"Scene {scene_id!r} has no asset manifest entry.",
+        }
+    reason = verify_stored_asset(directory, entry)
+    return 200, {
+        "project_id": directory.name,
+        "scene_id": scene_id,
+        "verified": reason is None,
+        "reason": reason,
+        "sha256": entry.get("sha256"),
+        "sample": False,
+    }
 
 
 def _safe_project_path(project_dir: Path, raw_path) -> tuple[Path | None, str | None]:
@@ -2037,6 +2178,17 @@ class AVMHandler(BaseHTTPRequestHandler):
             match = re.match(r"^/api/projects/([^/]+)/scenes/([^/]+)/media$", path)
             if match:
                 return self._serve_scene_media(match.group(1), match.group(2))
+            match = re.match(r"^/api/projects/([^/]+)/assets/([^/]+)/media$", path)
+            if match:
+                return self._serve_asset_media(match.group(1), match.group(2))
+            match = re.match(r"^/api/projects/([^/]+)/assets/([^/]+)/verify$", path)
+            if match:
+                status, payload = asset_verify_payload(match.group(1), match.group(2))
+                return self._json(status, payload)
+            match = re.match(r"^/api/projects/([^/]+)/assets$", path)
+            if match:
+                status, payload = project_assets_payload(match.group(1))
+                return self._json(status, payload)
             match = re.match(r"^/api/projects/([^/]+)/?$", path)
             if match:
                 detail = project_detail(match.group(1))
@@ -2081,6 +2233,11 @@ class AVMHandler(BaseHTTPRequestHandler):
                 return self._json(405, {
                     "error": "METHOD_NOT_ALLOWED",
                     "message": "Scene media delivery is GET-only.",
+                })
+            if re.match(r"^/api/projects/[^/]+/assets/[^/]+/(media|verify)$", path):
+                return self._json(405, {
+                    "error": "METHOD_NOT_ALLOWED",
+                    "message": "Asset surfaces are GET-only.",
                 })
             match = re.match(r"^/api/platforms/(youtube|tiktok)/connect$", path)
             if match:
@@ -2182,6 +2339,62 @@ class AVMHandler(BaseHTTPRequestHandler):
             return self._json(status, {
                 "error": error or "SCENE_MEDIA_UNAVAILABLE",
                 "message": "Scene media is unavailable; no file was served.",
+            })
+        size = media.stat().st_size
+        range_header = self.headers.get("Range", "")
+        start, end = 0, size - 1
+        if range_header:
+            if not range_header.startswith("bytes="):
+                return self._json(416, {"error": "INVALID_RANGE", "message": "Unsupported byte range."})
+            value = range_header[6:].split(",", 1)[0].strip()
+            parts = value.split("-", 1)
+            try:
+                if len(parts) != 2 or (not parts[0] and not parts[1]):
+                    raise ValueError
+                if parts[0]:
+                    start = int(parts[0])
+                    end = int(parts[1]) if parts[1] else size - 1
+                else:
+                    suffix_length = int(parts[1])
+                    if suffix_length <= 0:
+                        raise ValueError
+                    start = max(0, size - suffix_length)
+                    end = size - 1
+                if start < 0 or start >= size or end < start:
+                    raise ValueError
+                end = min(end, size - 1)
+            except (TypeError, ValueError):
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+        length = end - start + 1
+        self.send_response(206 if range_header else 200)
+        self.send_header("Content-Type", MIME[media.suffix.lower()])
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if range_header:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with media.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 256, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+    def _serve_asset_media(self, project_id: str, scene_id: str):
+        """Serve only the root-confined, manifest-recorded asset for one scene.
+        Range handling mirrors scene-media delivery; SHA-256 re-verification is
+        the explicit /verify surface, never per-byte-range work here."""
+        media, error = asset_media_path_for(project_id, scene_id)
+        if media is None:
+            return self._json(404, {
+                "error": error or "ASSET_MEDIA_UNAVAILABLE",
+                "message": "Asset media is unavailable; no file was served.",
             })
         size = media.stat().st_size
         range_header = self.headers.get("Range", "")

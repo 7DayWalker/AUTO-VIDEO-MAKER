@@ -7,9 +7,11 @@ window.App = (function () {
 
   const NAV = [
     { section: "Studio" },
-    { id: "productions", route: "#/", label: "Command Center", icon: "sparkle", view: "productions" },
-    { id: "projects",  route: "#/projects",   label: "Projects",  icon: "projects",  view: "projects" },
-    { id: "create",    route: "#/create",     label: "Create Video", icon: "create", view: "create" },
+    { id: "home",        route: "#/",             label: "Creator Home", icon: "home", view: "home" },
+    { id: "create",      route: "#/create",       label: "Create Video", icon: "create", view: "create" },
+    { id: "productions", route: "#/productions",  label: "Command Center", icon: "sparkle", view: "productions" },
+    { id: "projects",    route: "#/projects",     label: "Projects",  icon: "projects",  view: "projects" },
+    { id: "assets",      route: "#/assets",       label: "Asset Library", icon: "layers", view: "assets" },
     { section: "Distribution" },
     { id: "platforms", route: "#/platforms",  label: "Platforms", icon: "platforms", view: "platforms" },
     { id: "activity",  route: "#/activity",   label: "Activity",  icon: "activity",  view: "activity" },
@@ -18,12 +20,13 @@ window.App = (function () {
   ];
 
   const ROUTES = [
-    /* Track 3 Increment 3: the Command Center is the authoritative HOME.
-       #/ renders it; #/productions remains a working deep link to the same
-       view; #/dashboard is a legacy alias that renders the same view —
-       there is no second dashboard surface. */
-    { id: "productions", pattern: /^#\/$/,                      view: function () { return VIEWS.productions; }, params: {} },
-    { id: "create",     pattern: /^#\/create\/?$/,             view: function () { return VIEWS.create; },    params: {} },
+    /* Approved Creator Home routing: #/ renders the studio home — a
+       presentation, navigation, and create-handoff surface only. The
+       Command Center (#/productions, with #/dashboard as a legacy alias)
+       remains the single authoritative production surface; execution is
+       never triggered from Home. */
+    { id: "home",        pattern: /^#\/$/,                     view: function () { return VIEWS.home; },        params: {} },
+    { id: "create",      pattern: /^#\/create\/?$/,            view: function () { return VIEWS.create; },      params: {} },
     { id: "productions", pattern: /^#\/productions\/?$/,       view: function () { return VIEWS.productions; }, params: {} },
     { id: "productions", pattern: /^#\/dashboard\/?$/,         view: function () { return VIEWS.productions; }, params: {} },
     { id: "production", pattern: /^#\/productions\/([^\/]+)\/?$/, view: function () { return VIEWS.productionDetail; },
@@ -31,6 +34,7 @@ window.App = (function () {
     { id: "unit",       pattern: /^#\/productions\/([^\/]+)\/units\/([^\/]+)\/?$/, view: function () { return VIEWS.unitDetail; },
       params: function (m) { return { productionId: decodeURIComponent(m[1]), unitId: decodeURIComponent(m[2]) }; } },
     { id: "projects",   pattern: /^#\/projects\/?$/,           view: function () { return VIEWS.projects; },  params: {} },
+    { id: "assets",     pattern: /^#\/assets\/?$/,             view: function () { return VIEWS.assets; },    params: {} },
     { id: "project",    pattern: /^#\/projects\/([^\/]+)\/?$/, view: function () { return VIEWS.projectDetail; }, params: function (m) { return { id: decodeURIComponent(m[1]) }; } },
     { id: "platforms",  pattern: /^#\/platforms\/?$/,          view: function () { return VIEWS.platforms; }, params: {} },
     { id: "activity",   pattern: /^#\/activity\/?$/,           view: function () { return VIEWS.activity; },  params: {} },

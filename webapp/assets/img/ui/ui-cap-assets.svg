@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Designed interface artwork: a stack of provenance-tracked asset cards">
+  <!-- UI ART ASSET — designed interface art, not production output. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d121e"/>
+      <stop offset="1" stop-color="#111a2b"/>
+    </linearGradient>
+    <radialGradient id="orb" cx="0.7" cy="0.3" r="0.5">
+      <stop offset="0" stop-color="#4f8cff" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#4f8cff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cardg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232f47"/>
+      <stop offset="1" stop-color="#16202f"/>
+    </linearGradient>
+    <linearGradient id="picg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c4a7c"/>
+      <stop offset="1" stop-color="#1b2c47"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="9"/></filter>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="matrix" values="0 0 0 0 0.62  0 0 0 0 0.70  0 0 0 0 0.82  0 0 0 0.06 0"/></filter>
+    <radialGradient id="vig" cx="0.5" cy="0.5" r="0.8"><stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.5"/></radialGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <rect width="640" height="360" fill="url(#orb)"/>
+  <!-- scattered asset cards -->
+  <g>
+    <g transform="rotate(-8 200 190)">
+      <rect x="128" y="118" width="150" height="170" rx="14" fill="url(#cardg)" stroke="#41557a" stroke-width="2"/>
+      <rect x="144" y="134" width="118" height="86" rx="8" fill="url(#picg)"/>
+      <circle cx="172" cy="160" r="10" fill="#f2c14e" opacity="0.85"/>
+      <path d="M144 220 l34 -30 26 22 20 -14 34 26 v12 a8 8 0 0 1 -8 8 h-98 a8 8 0 0 1 -8 -8 Z" fill="#31517f"/>
+      <rect x="144" y="238" width="86" height="7" rx="3.5" fill="#3a4c6e"/>
+      <rect x="144" y="254" width="58" height="7" rx="3.5" fill="#2c3b57"/>
+    </g>
+    <g transform="rotate(5 400 180)">
+      <rect x="330" y="100" width="150" height="170" rx="14" fill="url(#cardg)" stroke="#5d7cb3" stroke-width="2"/>
+      <rect x="346" y="116" width="118" height="86" rx="8" fill="url(#picg)"/>
+      <path d="M346 202 v-30 l40 -34 30 26 48 -40 v78 Z" fill="#31517f"/>
+      <circle cx="436" cy="140" r="9" fill="#9cc2ff" opacity="0.8"/>
+      <rect x="346" y="220" width="92" height="7" rx="3.5" fill="#3a4c6e"/>
+      <rect x="346" y="236" width="64" height="7" rx="3.5" fill="#2c3b57"/>
+      <!-- verified check -->
+      <circle cx="466" cy="256" r="11" fill="#12211a" stroke="#34d399" stroke-width="2"/>
+      <path d="M461 256 l4 4 7 -8" stroke="#34d399" stroke-width="2.2" fill="none" stroke-linecap="round"/>
+    </g>
+  </g>
+  <!-- provenance hash motif -->
+  <g stroke="#6ba0ff" stroke-width="2" stroke-linecap="round" opacity="0.85">
+    <path d="M282 306 v22 M300 306 v22 M272 313 h38 M272 322 h38"/>
+  </g>
+  <rect x="322" y="310" width="120" height="14" rx="7" fill="#16202f" stroke="#2c3b57" stroke-width="1.4"/>
+  <rect x="328" y="315" width="72" height="4" rx="2" fill="#3a4c6e"/>
+  <rect width="640" height="360" filter="url(#grain)"/>
+  <rect width="640" height="360" fill="url(#vig)"/>
+</svg>

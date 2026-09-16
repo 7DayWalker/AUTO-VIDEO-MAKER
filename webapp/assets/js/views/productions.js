@@ -156,7 +156,7 @@ VIEWS.productions = {
     var items;
     try { items = await API.getProductions(); }
     catch (e) { return '<div class="card cc-state-panel error-panel">' + COMPONENTS.emptyState("alert", "Production data unavailable", String(e.message || e) + " — reload the page to try again. Nothing was invented to fill this page.") + '</div>'; }
-    if (!items.length) return '<div class="page-head"><div><p class="eyebrow">Home</p><h1 class="page-title">Command Center</h1><p class="page-sub">Your videos and their production status will live here.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/create">Create Video</a></div></div><div class="card cc-state-panel">' + COMPONENTS.emptyState("sparkle", "No productions yet", "Create your first video — AVM will plan, produce, and render it, and it will appear here with live status.", '<a class="btn btn-primary" href="#/create">Create Video</a>') + '</div>';
+    if (!items.length) return '<div class="page-head"><div><p class="eyebrow">Studio control</p><h1 class="page-title">Command Center</h1><p class="page-sub">Your videos and their production status will live here.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/create">Create Video</a></div></div><div class="card cc-state-panel">' + COMPONENTS.emptyState("sparkle", "No productions yet", "Create your first video — AVM will plan, produce, and render it, and it will appear here with live status.", '<a class="btn btn-primary" href="#/create">Create Video</a>') + '</div>';
     function attentionPriority(p) {
       var counts = p.counts || {};
       if (p.error || !p.counts) return 0;
@@ -168,19 +168,41 @@ VIEWS.productions = {
       return 6;
     }
     items.sort(function (left, right) { return attentionPriority(left) - attentionPriority(right); });
+    /* Real media only: the projects index carries each manifest's own
+       binding_production_id (structurally validated server-side). A media
+       strip renders only when a bound project's manifest reports an
+       available final video — nothing is generated or inferred here. */
+    var finishedByProduction = {};
+    if (API.live) {
+      try {
+        (await API.getProjectsWithFallback()).forEach(function (pr) {
+          if (pr && !pr.error && !pr.sample && pr.final_video_available &&
+              pr.binding_production_id && !finishedByProduction[pr.binding_production_id]) {
+            finishedByProduction[pr.binding_production_id] = pr;
+          }
+        });
+      } catch (e) { /* no cross-reference: cards render without media */ }
+    }
     var cards = items.map(function (p) {
       var counts = p.counts || {};
       var attention = p.error || !p.counts ? "Production data requires inspection." : counts.FAILED ? "Failure requires inspection." : counts.BLOCKED ? "Dependencies require attention." : counts.IN_FLIGHT ? "Execution is active or a remote job is in flight." : counts.INCOMPLETE ? "Work can continue with Resume." : counts.NOT_STARTED ? "Ready for first execution." : "No attention required.";
       var times = CC.timeMeta(p.created_at, p.revised_at);
       var timesHtml = times ? '<p class="cc-times">' + times + '</p>' : "";
       var tone = p.error || !p.counts || counts.FAILED ? "danger" : counts.BLOCKED || counts.INCOMPLETE ? "warn" : counts.IN_FLIGHT ? "info" : "neutral";
-      return '<article class="card production-card attention-' + tone + '">' +
+      var finished = finishedByProduction[p.production_id] || null;
+      var mediaStrip = finished
+        ? '<a class="cc-media-strip" href="#/projects/' + encodeURIComponent(finished.project_id) + '" title="Open the finished video project">' +
+          '<video class="cc-media hv-video" preload="none" muted loop playsinline tabindex="-1" aria-hidden="true" src="' +
+          COMPONENTS.esc(API.mediaUrl(finished.project_id)) + '" onerror="this.closest(\'.cc-media-strip\').remove()"></video>' +
+          '<span class="cc-media-label">' + ICONS.film + '<span>Finished video ready — hover to preview, click to open</span></span></a>'
+        : "";
+      return '<article class="card production-card attention-' + tone + '">' + mediaStrip +
         '<div class="production-card-head"><div><h2 class="production-title">' + COMPONENTS.esc(p.title) + '</h2><p class="mono muted-text">' + COMPONENTS.esc(p.production_id) + ' · plan v' + COMPONENTS.esc(p.plan_version) + ' · ' + COMPONENTS.esc(p.unit_count) + (p.unit_count === 1 ? ' video' : ' videos') + '</p>' + timesHtml + '</div><div>' + CC.routeChip(p.route) + CC.runBadge(p.run) + '</div></div>' +
         '<div class="attention-strip"><span class="attention-dot" aria-hidden="true"></span><span>' + COMPONENTS.esc(attention) + '</span></div>' +
         '<div class="production-card-body"><p class="command-label">Brief</p><p class="command-text">' + COMPONENTS.esc(p.command_text) + '</p><div class="state-counts" aria-label="Six-state unit summary">' + CC.countsRow(counts) + '</div>' + CC.stateBar(counts, p.unit_count) + (p.error ? '<p class="inline-error">' + COMPONENTS.esc(p.error) + '</p>' : '') + '</div>' +
         '<div class="production-card-foot"><a class="btn btn-sm" href="#/productions/' + encodeURIComponent(p.production_id) + '">Inspect production</a><span class="spacer"></span>' + CC.actionButtons(p) + '</div></article>';
     }).join("");
-    return '<div class="page-head"><div><p class="eyebrow">Home</p><h1 class="page-title">Command Center</h1><p class="page-sub">Every production and its live status. Commands are explicit and confirmed — nothing runs without your approval.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/create">Create Video</a></div></div>' +
+    return '<div class="page-head"><div><p class="eyebrow">Studio control</p><h1 class="page-title">Command Center</h1><p class="page-sub">Every production and its live status. Commands are explicit and confirmed — nothing runs without your approval.</p></div><div class="head-actions"><a class="btn btn-primary" href="#/create">Create Video</a></div></div>' +
       '<section class="card cc-hero" aria-label="Create a video"><div class="cc-hero-text"><p class="eyebrow">Create</p><h2>What are we making today?</h2><p class="page-sub">Describe your idea — AVM plans, produces, and renders the video. You approve every command.</p></div><div class="cc-hero-actions"><a class="btn btn-primary btn-lg" href="#/create">Create Video</a><a class="btn" href="#/projects">View Projects</a></div></section>' +
       '<div id="production-command-feedback" aria-live="polite"></div><div class="cc-toolbar"><label class="field-inline"><span class="sr-only">Filter productions</span><input class="input" id="production-filter" type="search" placeholder="Filter productions" autocomplete="off"></label><span class="hint">' + COMPONENTS.esc(items.length + ' production' + (items.length === 1 ? '' : 's')) + '</span></div><div class="grid productions-grid" id="production-cards">' + cards + '</div>';
   },
@@ -189,6 +211,16 @@ VIEWS.productions = {
     if (filter) filter.addEventListener("input", function () {
       var query = filter.value.toLowerCase();
       document.querySelectorAll("#production-cards .production-card").forEach(function (card) { card.hidden = query && card.textContent.toLowerCase().indexOf(query) < 0; });
+    });
+    /* Real-media hover preview (manifest-backed finals only). */
+    document.querySelectorAll("#production-cards .hv-video").forEach(function (v) {
+      var strip = v.closest(".cc-media-strip");
+      if (!strip) return;
+      strip.addEventListener("mouseenter", function () {
+        v.preload = "metadata";
+        var pr = v.play(); if (pr && pr.catch) pr.catch(function () { /* first frame stays */ });
+      });
+      strip.addEventListener("mouseleave", function () { try { v.pause(); v.currentTime = 0; } catch (e) { /* ignore */ } });
     });
     document.querySelectorAll("[data-cc]").forEach(function (button) {
       button.addEventListener("click", function () {

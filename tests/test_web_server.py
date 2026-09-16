@@ -129,3 +129,117 @@ def test_connect_endpoint_routes_only_youtube_tiktok(api_server, monkeypatch):
     monkeypatch.setattr(web, "_start_connect", fake_start)
     status, _ = _post(base + "/api/platforms/tiktok/connect")
     assert status == 202 and started == ["tiktok"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4/5: manifest binding cross-reference + Visual Asset Library surfaces
+# ---------------------------------------------------------------------------
+
+def _write_asset_project(tmp):
+    import hashlib
+
+    proj = tmp / "projects" / "proj_assets"
+    (proj / "assets" / "source").mkdir(parents=True)
+    (proj / "manifest.json").write_text(json.dumps({
+        "project_id": "proj_assets", "topic": "Asset test", "stages": {},
+    }), encoding="utf-8")
+    stored = proj / "assets" / "source" / "scene-001.png"
+    stored.write_bytes(b"\x89PNG\r\n\x1a\n" + b"pixels")
+    digest = hashlib.sha256(stored.read_bytes()).hexdigest()
+    (proj / "assets" / "asset_manifest.json").write_text(json.dumps({
+        "version": 1,
+        "assets": {
+            "scene-001": {
+                "source_name": "hero.png",
+                "stored_as": "assets/source/scene-001.png",
+                "media_type": "image",
+                "provider": "local_asset",
+                "sha256": digest,
+                "bytes": stored.stat().st_size,
+                "source_metadata": {"kind": "stock", "license": "CC0"},
+            }
+        },
+    }), encoding="utf-8")
+    return proj, digest
+
+
+def test_projects_index_exposes_valid_binding_only(api_server):
+    base, tmp = api_server
+    proj = tmp / "projects" / "proj_b"
+    proj.mkdir(parents=True)
+    (proj / "manifest.json").write_text(json.dumps({
+        "project_id": "proj_b", "topic": "B", "stages": {},
+        "production_binding": {
+            "production_id": "prd_x", "unit_id": "unit-001", "project_id": "proj_b",
+        },
+    }), encoding="utf-8")
+    bad = tmp / "projects" / "proj_bad"
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_text(json.dumps({
+        "project_id": "proj_bad", "topic": "Bad", "stages": {},
+        "production_binding": {
+            "production_id": "prd_y", "unit_id": "unit-001", "project_id": "someone_else",
+        },
+    }), encoding="utf-8")
+    status, items = _get(base + "/api/projects")
+    assert status == 200
+    by_id = {i["project_id"]: i for i in items}
+    assert by_id["proj_b"]["binding_production_id"] == "prd_x"
+    assert by_id["proj_bad"]["binding_production_id"] is None
+
+
+def test_project_assets_index_media_and_verify(api_server):
+    base, tmp = api_server
+    _write_asset_project(tmp)
+    status, body = _get(base + "/api/projects/proj_assets/assets")
+    assert status == 200
+    assert body["asset_count"] == 1
+    item = body["assets"][0]
+    assert item["scene_id"] == "scene-001"
+    assert item["file_present"] is True
+    assert item["source_metadata"]["license"] == "CC0"
+
+    import urllib.request
+    with urllib.request.urlopen(
+        base + "/api/projects/proj_assets/assets/scene-001/media"
+    ) as res:
+        assert res.status == 200
+        assert res.headers["Content-Type"] == "image/png"
+        assert res.read().startswith(b"\x89PNG")
+
+    status, body = _get(base + "/api/projects/proj_assets/assets/scene-001/verify")
+    assert status == 200 and body["verified"] is True and body["reason"] is None
+
+
+def test_asset_surfaces_refuse_traversal_and_unknown_scenes(api_server):
+    base, tmp = api_server
+    _write_asset_project(tmp)
+    assert web.asset_media_path_for("../../../.env", "scene-001")[0] is None
+    assert web.asset_media_path_for("proj_assets", "..%2F..%2Fsecret")[0] is None
+    path, error = web.asset_media_path_for("proj_assets", "scene-404")
+    assert path is None and error == "ASSET_NOT_FOUND"
+    try:
+        status, _ = _get(base + "/api/projects/proj_assets/assets/scene-404/verify")
+    except Exception as exc:  # urllib raises HTTPError on non-2xx
+        status = getattr(exc, "code", 0)
+    assert status == 404
+    # A recorded stored_as that escapes the project directory is refused.
+    proj = tmp / "projects" / "proj_assets"
+    manifest_path = proj / "assets" / "asset_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["assets"]["scene-001"]["stored_as"] = "../../../secrets.png"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    path, error = web.asset_media_path_for("proj_assets", "scene-001")
+    assert path is None and error == "ASSET_FILE_UNAVAILABLE"
+
+
+def test_asset_verify_reports_tampering_truthfully(api_server):
+    base, tmp = api_server
+    proj, _ = _write_asset_project(tmp)
+    (proj / "assets" / "source" / "scene-001.png").write_bytes(b"tampered-bytes")
+    status, body = _get(base + "/api/projects/proj_assets/assets/scene-001/verify")
+    assert status == 200
+    assert body["verified"] is False
+    assert "mismatch" in body["reason"].lower()
+    status, body = _get(base + "/api/projects/proj_assets/assets")
+    assert status == 200 and body["assets"][0]["file_present"] is True
