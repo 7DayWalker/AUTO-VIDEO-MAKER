@@ -954,27 +954,48 @@ def test_phase11_ui_source_contract():
 
 
 def test_phase11b_overview_source_contract():
-    """Overview is attention-first and keeps all data-state dimensions distinct."""
-    root = Path(web.__file__).resolve().parents[2]
-    source = (root / "webapp" / "assets" / "js" / "views" / "dashboard.js").read_text(
-        encoding="utf-8"
-    )
+    """Home is the Command Center (Track 3 Increment 3): one authoritative overview.
 
-    assert "API.getProductions()" in source
-    assert "API.getProjects()" in source
-    assert "Production data" in source
-    assert "Live empty" in source
-    assert "Demo samples" in source
-    assert "no productions yet" in source
-    assert "#/create" in source  # empty state guides to the existing creation flow
-    assert "never replaced by demo productions" in source  # truthfulness invariant retained
-    assert source.index("counts.FAILED") < source.index("counts.BLOCKED")
-    assert source.index("counts.BLOCKED") < source.index("counts.IN_FLIGHT")
-    assert source.index("counts.IN_FLIGHT") < source.index("counts.INCOMPLETE")
-    assert "API.productionCommand" not in source
-    assert "malformedProduction" in source
-    assert "malformedProject" in source
-    assert "Manifest unavailable" in source
+    The former Dashboard was consolidated: its unique system-status grid now
+    lives in Settings, its attention-ordering invariant lives on the Command
+    Center cards, and no second Home surface may exist.
+    """
+    root = Path(web.__file__).resolve().parents[2]
+    views = root / "webapp" / "assets" / "js" / "views"
+    home_src = (views / "productions.js").read_text(encoding="utf-8")
+    settings_src = (views / "settings.js").read_text(encoding="utf-8")
+    app_src = (root / "webapp" / "assets" / "js" / "app.js").read_text(encoding="utf-8")
+    index_src = (root / "webapp" / "index.html").read_text(encoding="utf-8")
+
+    # One authoritative Home: #/ renders the Command Center; the Dashboard
+    # surface no longer exists anywhere.
+    assert "VIEWS.dashboard" not in app_src
+    assert "dashboard.js" not in index_src
+    assert not (views / "dashboard.js").exists()
+    assert "No productions yet" in home_src
+    assert "#/create" in home_src  # empty state guides to the existing creation flow
+    assert "never replaced by demo productions" in home_src  # truthfulness invariant retained
+
+    # Attention-first ordering invariant on the authoritative surface
+    # (scoped to the attentionPriority selector itself).
+    attention_selector = home_src[
+        home_src.index("function attentionPriority"):home_src.index("items.sort")
+    ]
+    assert attention_selector.index("counts.FAILED") < attention_selector.index("counts.BLOCKED")
+    assert attention_selector.index("counts.BLOCKED") < attention_selector.index("counts.IN_FLIGHT")
+    assert attention_selector.index("counts.IN_FLIGHT") < attention_selector.index("counts.INCOMPLETE")
+
+    # The former Dashboard system-status diagnostics are preserved in Settings.
+    assert "System status" in settings_src
+    assert "API.getProductions()" in settings_src
+    assert "API.getProjects()" in settings_src
+    assert "Production data" in settings_src
+    assert "Live empty" in settings_src
+    assert "Manifest unavailable" in settings_src
+    assert "malformedProduction" in settings_src
+    assert "malformedProject" in settings_src
+    assert "Local AVM engine responded." in settings_src
+    assert "API.productionCommand" not in settings_src
 
 
 def test_phase11b_publication_summary_uses_durable_record_timestamps():

@@ -7,8 +7,7 @@ window.App = (function () {
 
   const NAV = [
     { section: "Studio" },
-    { id: "dashboard", route: "#/",           label: "Dashboard", icon: "dashboard", view: "dashboard" },
-    { id: "productions", route: "#/productions", label: "Command Center", icon: "sparkle", view: "productions" },
+    { id: "productions", route: "#/", label: "Command Center", icon: "sparkle", view: "productions" },
     { id: "projects",  route: "#/projects",   label: "Projects",  icon: "projects",  view: "projects" },
     { id: "create",    route: "#/create",     label: "Create Video", icon: "create", view: "create" },
     { section: "Distribution" },
@@ -19,9 +18,14 @@ window.App = (function () {
   ];
 
   const ROUTES = [
-    { id: "dashboard",  pattern: /^#\/$/,                      view: function () { return VIEWS.dashboard; }, params: {} },
+    /* Track 3 Increment 3: the Command Center is the authoritative HOME.
+       #/ renders it; #/productions remains a working deep link to the same
+       view; #/dashboard is a legacy alias that renders the same view —
+       there is no second dashboard surface. */
+    { id: "productions", pattern: /^#\/$/,                      view: function () { return VIEWS.productions; }, params: {} },
     { id: "create",     pattern: /^#\/create\/?$/,             view: function () { return VIEWS.create; },    params: {} },
     { id: "productions", pattern: /^#\/productions\/?$/,       view: function () { return VIEWS.productions; }, params: {} },
+    { id: "productions", pattern: /^#\/dashboard\/?$/,         view: function () { return VIEWS.productions; }, params: {} },
     { id: "production", pattern: /^#\/productions\/([^\/]+)\/?$/, view: function () { return VIEWS.productionDetail; },
       params: function (m) { return { id: decodeURIComponent(m[1]) }; } },
     { id: "unit",       pattern: /^#\/productions\/([^\/]+)\/units\/([^\/]+)\/?$/, view: function () { return VIEWS.unitDetail; },

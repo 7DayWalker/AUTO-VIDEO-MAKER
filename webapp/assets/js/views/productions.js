@@ -152,7 +152,7 @@ window.VIEWS = window.VIEWS || {};
 VIEWS.productions = {
   title: "Command Center",
   render: async function () {
-    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "The local AVM engine isn't running, so live production data is unavailable. Start the engine on this machine, then refresh.") + '</div>';
+    if (!API.live) return '<div class="card cc-state-panel offline-panel">' + COMPONENTS.emptyState("sparkle", "Engine offline", "The local AVM engine isn't running — live production data is never replaced by demo productions. Start the engine on this machine, then refresh.") + '</div>';
     var items;
     try { items = await API.getProductions(); }
     catch (e) { return '<div class="card cc-state-panel error-panel">' + COMPONENTS.emptyState("alert", "Production data unavailable", String(e.message || e) + " — reload the page to try again. Nothing was invented to fill this page.") + '</div>'; }
