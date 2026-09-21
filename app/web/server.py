@@ -1282,6 +1282,10 @@ def _unit_progress_dict(item) -> dict:
         "project_id": item.project_id,
         "bound_plan_version": item.bound_plan_version,
         "reason": item.reason,
+        # P0-02: additive disclosure. True when the unit is IN_FLIGHT but its
+        # durable evidence is older than the longest provider-declared polling
+        # window, so no live run can own it. The state itself is unchanged.
+        "stale_in_flight": bool(getattr(item, "stale_in_flight", False)),
     }
 
 
@@ -1291,6 +1295,21 @@ def _state_counts(report) -> dict:
 
     counts = report.counts()
     return {state.value: counts[state] for state in UnitExecutionState}
+
+
+def _stale_in_flight_units(report) -> list:
+    """Unit ids whose IN_FLIGHT evidence is stale/orphaned.
+
+    P0-02: ``counts.IN_FLIGHT`` is derived from durable manifest state while
+    ``run.running`` comes from the process-local run registry, so an interrupted
+    run can leave a unit IN_FLIGHT with no live owner. This names those units
+    instead of letting the two fields silently disagree.
+    """
+    return [
+        item.unit_id
+        for item in getattr(report, "units", ())
+        if getattr(item, "stale_in_flight", False)
+    ]
 
 
 def _blocking_units(unit, progress_by_id: dict) -> list:
@@ -1528,6 +1547,40 @@ def _scene_checkpoint_rows(
             artifact_state = "RECORDED BUT MISSING"
         else:
             artifact_state = "NOT GENERATED"
+        # P2-03 (legacy honesty): records written BEFORE the Batch 1F/1H capture
+        # seam have no provenance block at all, so every actual_* field
+        # legitimately reads as unknown. Their FLAT fields do carry real observed
+        # facts, so those are surfaced in an explicitly labelled legacy block
+        # built ONLY from values actually present.
+        #
+        # Deliberately NOT done here:
+        #  - ``model`` is never promoted to ``actual_model``. On these records it
+        #    is the CONFIGURED provider model (selection), and Batch 1F requires
+        #    actual identity to come from the provider result. It is exposed
+        #    under its own name so it cannot be mistaken for actual.
+        #  - ``generation_cost`` is never reinterpreted as monetary cost: a
+        #    legacy 0 on a billable provider is ambiguous, not a known zero.
+        legacy_evidence = None
+        if not provenance:
+            legacy_facts = {}
+            for key in (
+                "task_id", "job_id", "remote_status", "attempt",
+                "submitted_at", "usage",
+            ):
+                value = checkpoint.get(key)
+                if value is not None and value != "":
+                    legacy_facts[key] = value
+            configured_model = checkpoint.get("model")
+            if isinstance(configured_model, str) and configured_model.strip():
+                legacy_facts["configured_model"] = configured_model
+            if legacy_facts:
+                legacy_evidence = {
+                    "source": (
+                        "pre-Batch-1F checkpoint fields; actual-vs-requested "
+                        "provider/model is not distinguishable on this record"
+                    ),
+                    **legacy_facts,
+                }
         rows.append({
             "scene_id": scene_id,
             "status": checkpoint.get("status"),
@@ -1548,6 +1601,9 @@ def _scene_checkpoint_rows(
             # Batch 1F: actual execution provenance (Batch 1G will present
             # this; None/absent = unknown, never fabricated).
             "provenance": provenance or None,
+            # P2-03: additive, explicitly labelled legacy evidence. Null for any
+            # record that carries a real Batch 1F provenance block.
+            "legacy_evidence": legacy_evidence,
             "actual_provider": provenance.get("provider"),
             "actual_model": provenance.get("model"),
             "request_id": provenance.get("request_id"),
@@ -1583,8 +1639,27 @@ def productions_index_payload():
     """Production overview: intent + freshly derived aggregate progress."""
     from app.production.storage import list_productions
 
+    ids = list_productions(root=PRODUCTIONS_DIR)
+    # P0-01: derive progress for the whole collection with ONE shared projects
+    # scan instead of a per-production full rescan. Semantics are unchanged:
+    # reconcile_project still runs once per bound project, so `counts` /
+    # `complete` / PROJECT_FAILED are identical to the per-id path.
+    derived = {}
+    if ids:
+        try:
+            from app.orchestrator.production_execution import ProductionExecutor
+
+            derived = ProductionExecutor.derive_progress_many(
+                ids, productions_root=PRODUCTIONS_DIR, projects_root=PROJECTS_DIR,
+            )
+        except Exception as exc:
+            logger.warning(
+                "batch progress derivation failed truthfully: %s", exc
+            )
+            derived = {}
+
     items = []
-    for production_id in list_productions(root=PRODUCTIONS_DIR):
+    for production_id in ids:
         try:
             production = _production_or_none(production_id)
         except ValueError as exc:
@@ -1612,9 +1687,12 @@ def productions_index_payload():
             "sample": False,
         }
         try:
-            report = _derive_progress(production_id)
+            report = derived.get(production_id)
+            if report is None:
+                report = _derive_progress(production_id)
             item["counts"] = _state_counts(report)
             item["complete"] = report.complete
+            item["stale_in_flight_units"] = _stale_in_flight_units(report)
         except Exception as exc:
             logger.warning(
                 "progress derivation failed truthfully for %s: %s", production_id, exc
@@ -1665,6 +1743,7 @@ def production_detail_payload(production_id: str):
         "complete": report.complete,
         "units": units,
         "run": dict(_production_runs.get(production.production_id) or {"running": False}),
+        "stale_in_flight_units": _stale_in_flight_units(report),
         "sample": False,
     }
     return 200, _redact_secrets(payload)
@@ -1701,6 +1780,7 @@ def production_progress_payload(production_id: str):
         "complete": report.complete,
         "derived_at": datetime.now().isoformat(),
         "run": dict(_production_runs.get(production_id) or {"running": False}),
+        "stale_in_flight_units": _stale_in_flight_units(report),
         "sample": False,
     }
     return 200, _redact_secrets(payload)

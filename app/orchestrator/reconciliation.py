@@ -336,8 +336,14 @@ def reconcile_project(
     project_dir: Optional[Path] = None,
     *,
     persist: bool = False,
+    manifest_raw: Optional[dict] = None,
 ) -> ReconciliationReport:
-    """Validate a project using physical evidence; optionally repair its manifest."""
+    """Validate a project using physical evidence; optionally repair its manifest.
+
+    ``manifest_raw`` is the already-parsed ``manifest.json`` dict. When supplied
+    (by the P0-01 collection batch read) it is used verbatim so the manifest is
+    not re-read from disk; the reconciliation itself is unchanged.
+    """
     if project_dir is None:
         from app.orchestrator.pipeline import ORCHESTRATOR_OUTPUT_DIR
         project_dir = ORCHESTRATOR_OUTPUT_DIR / project_id
@@ -355,7 +361,11 @@ def reconcile_project(
             reasons=[f"manifest not found: {manifest_path}"],
         )
 
-    manifest = ProjectManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8-sig")))
+    manifest = ProjectManifest.from_dict(
+        manifest_raw
+        if manifest_raw is not None
+        else json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    )
     content = _content_evidence(manifest, project_dir)
     plan = None
     if content.get("status") == ArtifactStatus.VALID.value:

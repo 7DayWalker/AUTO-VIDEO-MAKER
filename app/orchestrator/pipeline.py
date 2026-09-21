@@ -1425,6 +1425,36 @@ class ProductionOrchestrator:
                         
                         scene_paths.append(str(result.file_path))
                         
+                        # P2-03: route the Flow completion through the SAME
+                        # Batch 1F/1H capture seam the local and OpenRouter paths
+                        # already use, so provenance/accounting are persisted for
+                        # Flow-routed scenes instead of being silently absent.
+                        # ``include_provenance=False`` keeps this path's existing
+                        # FLAT checkpoint shape byte-identical (matching the local
+                        # path's choice) while still adding the generic
+                        # provenance/accounting blocks. Flow's own reported
+                        # credits are preserved verbatim via extra_fields — never
+                        # replaced with a fabricated 0 (Batch 1H).
+                        from app.orchestrator.scene_execution import (
+                            completion_checkpoint_update,
+                        )
+
+                        completion = completion_checkpoint_update(
+                            result=result,
+                            validation=validation,
+                            provider_name="google_flow",
+                            sequence=scene.sequence,
+                            audio_facts=result_audio_facts,
+                            include_provenance=False,
+                            extra_fields={
+                                "generation_cost": result.generation_cost,
+                                "generation_started_at": result.generation_started_at,
+                                "generation_completed_at": result.generation_completed_at,
+                                "downloaded_at": result.downloaded_at,
+                            },
+                            checkpoint=self.manifest.scene_checkpoints.get(scene.id),
+                        )
+
                         # Update manifest
                         scene_manifest.add_scene(
                             scene_id=scene.id,
@@ -1437,21 +1467,13 @@ class ProductionOrchestrator:
                             generation_started_at=result.generation_started_at,
                             generation_completed_at=result.generation_completed_at,
                             downloaded_at=result.downloaded_at,
+                            provenance=completion.get("provenance") or {},
+                            accounting=completion.get("accounting") or {},
                         )
                         save_scene_manifest(scene_manifest, project_scenes_dir)
                         self.manifest.scene_checkpoints[scene.id] = {
                             **self.manifest.scene_checkpoints.get(scene.id, {}),
-                            "scene_id": scene.id,
-                            "sequence": scene.sequence,
-                            "status": "completed",
-                            "file_path": str(result.file_path),
-                            "validation": validation,
-                            "audio_facts": result_audio_facts,
-                            "generation_cost": result.generation_cost,
-                            "generation_started_at": result.generation_started_at,
-                            "generation_completed_at": result.generation_completed_at,
-                            "downloaded_at": result.downloaded_at,
-                            "updated_at": datetime.now().isoformat(),
+                            **completion,
                         }
                         self._save_manifest()
                     

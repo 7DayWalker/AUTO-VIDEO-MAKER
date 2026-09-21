@@ -11,10 +11,10 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.content.models import ContentBrief, ProductionPlan
 from app.content.planner import ScenePlanner, create_scene_planner
@@ -73,6 +73,10 @@ class BoundProject:
     directory_id: str
     project_dir: Path
     manifest: ProjectManifest
+    # P0-01: raw parsed manifest.json dict, present only when produced by the
+    # shared collection scan (derive_progress_many). Lets the batch path hand
+    # reconcile_project the exact same bytes without a re-read. Never serialized.
+    manifest_raw: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,12 @@ class UnitProgress:
     project_id: Optional[str] = None
     bound_plan_version: Optional[int] = None
     reason: Optional[str] = None
+    # P0-02: additive, defaults False. True only when the unit is IN_FLIGHT and
+    # its durable in-flight evidence is older than the longest provider-declared
+    # polling window, so no live run can still own it. The six-state vocabulary
+    # is deliberately unchanged — this DISCLOSES staleness instead of silently
+    # reclassifying a state other readers depend on.
+    stale_in_flight: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +181,24 @@ def _atomic_write_text(path: Path, text: str) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(text, encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _parse_stamp(value: object) -> Optional[datetime]:
+    """Parse a naive Core ISO stamp, or None when it is unusable.
+
+    Core timestamps carry no timezone, so they are compared against naive local
+    time exactly as the rest of Core treats them. An unparseable stamp yields
+    None so a staleness claim is never made from a value we could not read.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
 
 
 def _load_json(path: Path) -> dict:
@@ -401,10 +429,9 @@ class ProductionExecutor:
 
     def discover_bindings(self, production: Optional[Production] = None) -> Dict[str, BoundProject]:
         production = production or self.load()
-        known_units = {unit.unit_id for unit in production.units}
-        found: Dict[str, BoundProject] = {}
         if not self.projects_root.is_dir():
-            return found
+            return {}
+        scan: Dict[str, Tuple[Path, ProjectManifest]] = {}
         for project_dir in sorted(self.projects_root.iterdir()):
             if not project_dir.is_dir():
                 continue
@@ -417,6 +444,24 @@ class ProductionExecutor:
                 raise ValueError(
                     f"ambiguous project evidence; manifest cannot be loaded: {manifest_path}: {exc}"
                 ) from exc
+            scan[project_dir.name] = (project_dir, manifest, None)
+        return self.discover_bindings_from_scan(production, scan)
+
+    def discover_bindings_from_scan(
+        self,
+        production: Production,
+        scan: Mapping[str, Tuple[Path, ProjectManifest, Optional[dict]]],
+    ) -> Dict[str, BoundProject]:
+        """Binding verification against a pre-scanned projects tree.
+
+        Identical logic to ``discover_bindings``; it simply reuses the parsed
+        manifests so a collection read does not re-scan the tree per
+        production (P0-01). The same ValueError guards are preserved.
+        """
+        known_units = {unit.unit_id for unit in production.units}
+        found: Dict[str, BoundProject] = {}
+        for directory_name in sorted(scan):
+            project_dir, manifest, manifest_raw = scan[directory_name]
             binding = manifest.production_binding
             if binding is None or binding.production_id != production.production_id:
                 continue
@@ -469,6 +514,7 @@ class ProductionExecutor:
                 directory_id=project_dir.name,
                 project_dir=project_dir,
                 manifest=manifest,
+                manifest_raw=manifest_raw,
             )
         return found
 
@@ -580,57 +626,183 @@ class ProductionExecutor:
         )
 
     @staticmethod
-    def _has_remote_in_flight(manifest: ProjectManifest) -> bool:
-        if any(result.status == StageStatus.RUNNING for result in manifest.stages.values()):
-            return True
+    def _in_flight_evidence(manifest: ProjectManifest) -> Tuple[bool, Optional[str]]:
+        """Durable in-flight evidence: ``(is_in_flight, newest_evidence_stamp)``.
+
+        P0-02 also fixes a vocabulary drift here. Task identity is kind-aware in
+        the read API (server.py ``task_identity_present`` accepts ``job_id`` OR
+        ``task_id``), but this check required ``job_id`` AND ``polling_url`` —
+        both OpenRouter-only fields. Alibaba DashScope persists ``task_id`` with
+        no ``polling_url``, so an Alibaba in-flight job was never detected as
+        in flight. Detection now follows the same kind-aware convention.
+        """
+        in_flight = False
+        newest: Optional[str] = None
+
+        def note(stamp: object) -> None:
+            nonlocal newest
+            if isinstance(stamp, str) and stamp.strip():
+                if newest is None or stamp > newest:
+                    newest = stamp
+
+        for result in manifest.stages.values():
+            if result.status == StageStatus.RUNNING:
+                in_flight = True
+                note(result.started_at)
+
         for checkpoint in manifest.scene_checkpoints.values():
             checkpoint_status = str(checkpoint.get("status", "")).lower()
             if checkpoint_status in {"failed", "completed"}:
                 continue
-            if checkpoint.get("job_id") and checkpoint.get("polling_url"):
-                return True
             evidence = checkpoint.get("checkpoint_evidence") or {}
+            if not isinstance(evidence, dict):
+                evidence = {}
             submission = evidence.get("submission", evidence)
-            if isinstance(submission, dict) and submission.get("state") == "SUBMITTED":
-                return True
-        return False
-
-    def derive_progress(self) -> ProductionExecutionReport:
-        production = self.load()
-        bindings = self.discover_bindings(production)
-        states: Dict[str, UnitProgress] = {}
-        for unit in production.units:
-            bound = bindings.get(unit.unit_id)
-            if bound is None:
-                continue
-            report = self._reconcile(
-                bound.manifest.project_id, bound.project_dir, persist=False
+            has_task_identity = bool(
+                checkpoint.get("job_id")
+                or checkpoint.get("task_id")
+                or evidence.get("job_id")
+                or evidence.get("task_id")
             )
-            if getattr(report, "complete", False):
-                state = UnitExecutionState.COMPLETED
-            elif self._has_remote_in_flight(bound.manifest):
-                state = UnitExecutionState.IN_FLIGHT
-            elif (
-                str(getattr(getattr(report, "verdict", None), "value", ""))
-                == "PROJECT_FAILED"
-                or any(
+            was_submitted = (
+                isinstance(submission, dict) and submission.get("state") == "SUBMITTED"
+            )
+            if has_task_identity or was_submitted:
+                in_flight = True
+                note(checkpoint.get("submitted_at") or checkpoint.get("updated_at"))
+
+        if in_flight and newest is None:
+            # No per-item stamp: fall back to the manifest's own last write so a
+            # staleness decision is still possible rather than unbounded.
+            note(getattr(manifest, "updated_at", None))
+
+        return in_flight, newest
+
+    @staticmethod
+    def _declared_remote_window_seconds() -> float:
+        """Longest provider-DECLARED bounded polling window, in seconds.
+
+        Every remote provider bounds its own polling and then fails truthfully
+        (e.g. alibaba_video ``DEFAULT_POLL_INTERVAL * DEFAULT_POLL_MAX_ATTEMPTS``
+        = 10s x 60 = 600s; openrouter_video 30s x 20 = 600s; alibaba_image
+        2s x 60 = 120s). Evidence older than the LONGEST of those windows cannot
+        belong to a run that is still polling, because that run would already
+        have failed. The horizon is therefore derived from the providers' own
+        declared constants — never an invented threshold.
+        """
+        windows: List[float] = []
+        try:
+            from app.orchestrator.alibaba_video_config import (
+                DEFAULT_POLL_INTERVAL,
+                DEFAULT_POLL_MAX_ATTEMPTS,
+            )
+
+            windows.append(float(DEFAULT_POLL_INTERVAL) * float(DEFAULT_POLL_MAX_ATTEMPTS))
+        except Exception:  # pragma: no cover - defensive import guard
+            pass
+        try:
+            from app.orchestrator.openrouter_video import (
+                OPENROUTER_DEFAULT_POLL_INTERVAL,
+                OPENROUTER_DEFAULT_POLL_MAX_ATTEMPTS,
+            )
+
+            windows.append(
+                float(OPENROUTER_DEFAULT_POLL_INTERVAL)
+                * float(OPENROUTER_DEFAULT_POLL_MAX_ATTEMPTS)
+            )
+        except Exception:  # pragma: no cover - defensive import guard
+            pass
+        try:
+            from app.orchestrator.alibaba_image import (
+                DEFAULT_ALIBABA_IMAGE_POLL_INTERVAL,
+                DEFAULT_ALIBABA_IMAGE_POLL_MAX_ATTEMPTS,
+            )
+
+            windows.append(
+                float(DEFAULT_ALIBABA_IMAGE_POLL_INTERVAL)
+                * float(DEFAULT_ALIBABA_IMAGE_POLL_MAX_ATTEMPTS)
+            )
+        except Exception:  # pragma: no cover - defensive import guard
+            pass
+        return max(windows) if windows else 600.0
+
+    @classmethod
+    def _remote_in_flight_staleness(
+        cls, manifest: ProjectManifest, *, now: Optional[datetime] = None
+    ) -> Tuple[bool, bool, Optional[str]]:
+        """``(in_flight, stale, reason)`` for one bound project's manifest.
+
+        Read-only: it inspects durable evidence and never mutates the manifest,
+        so a GET can never repair or reset a stage.
+        """
+        in_flight, newest = cls._in_flight_evidence(manifest)
+        if not in_flight:
+            return False, False, None
+
+        stamp = _parse_stamp(newest)
+        if stamp is None:
+            # No usable timestamp: staleness cannot be PROVEN, so it is not
+            # claimed. Absence of evidence is reported as unknown, not stale.
+            return True, False, None
+
+        window = cls._declared_remote_window_seconds()
+        age = (now or datetime.now()) - stamp
+        if age > timedelta(seconds=window):
+            return True, True, (
+                f"in-flight evidence is {int(age.total_seconds())}s old, beyond the "
+                f"longest provider-declared polling window ({int(window)}s); no live "
+                "run can still be polling this job, so the state is stale/orphaned "
+                f"(evidence timestamp: {newest})"
+            )
+        return True, False, None
+
+    @classmethod
+    def _has_remote_in_flight(cls, manifest: ProjectManifest) -> bool:
+        return cls._in_flight_evidence(manifest)[0]
+
+    def _unit_progress_from(self, unit, bound: BoundProject, report) -> UnitProgress:
+        """Single-unit state derivation — the exact logic formerly inline in
+        ``derive_progress``. Extracted so the single-production and batch paths
+        share it byte-for-byte."""
+        if getattr(report, "complete", False):
+            state = UnitExecutionState.COMPLETED
+        elif self._has_remote_in_flight(bound.manifest):
+            state = UnitExecutionState.IN_FLIGHT
+        elif (
+            str(getattr(getattr(report, "verdict", None), "value", ""))
+            == "PROJECT_FAILED"
+            or any(
                 result.status == StageStatus.FAILED
                 for result in bound.manifest.stages.values()
-                )
-            ):
-                state = UnitExecutionState.FAILED
-            else:
-                state = UnitExecutionState.INCOMPLETE
-            states[unit.unit_id] = UnitProgress(
-                unit.unit_id,
-                unit.ordinal,
-                state,
-                bound.directory_id,
-                bound.manifest.production_binding.production_plan_version,
             )
+        ):
+            state = UnitExecutionState.FAILED
+        else:
+            state = UnitExecutionState.INCOMPLETE
+        stale = False
+        reason: Optional[str] = None
+        if state == UnitExecutionState.IN_FLIGHT:
+            # P0-02: disclose — do not reclassify. The state stays IN_FLIGHT so
+            # the six-state vocabulary and resume eligibility are untouched; the
+            # staleness is carried alongside it with a human-readable reason.
+            _, stale, reason = self._remote_in_flight_staleness(bound.manifest)
+        return UnitProgress(
+            unit.unit_id,
+            unit.ordinal,
+            state,
+            bound.directory_id,
+            bound.manifest.production_binding.production_plan_version,
+            reason=reason,
+            stale_in_flight=stale,
+        )
 
+    def _finalize_progress(
+        self, production: Production, states: Dict[str, UnitProgress]
+    ) -> ProductionExecutionReport:
+        """Dependency-completion + ordering, shared by both derivation paths."""
         completed = {
-            unit_id for unit_id, progress in states.items()
+            unit_id
+            for unit_id, progress in states.items()
             if progress.state == UnitExecutionState.COMPLETED
         }
         for unit in production.units:
@@ -643,10 +815,130 @@ class ProductionExecutor:
                 UnitExecutionState.BLOCKED if missing else UnitExecutionState.NOT_STARTED,
                 reason=f"waiting for: {', '.join(missing)}" if missing else None,
             )
-        ordered = tuple(states[unit.unit_id] for unit in sorted(production.units, key=lambda u: u.ordinal))
+        ordered = tuple(
+            states[unit.unit_id]
+            for unit in sorted(production.units, key=lambda u: u.ordinal)
+        )
         return ProductionExecutionReport(
             production.production_id, production.plan_version, ordered
         )
+
+    def _derive_progress_report(
+        self, production: Production, bindings: Dict[str, BoundProject]
+    ) -> ProductionExecutionReport:
+        states: Dict[str, UnitProgress] = {}
+        for unit in production.units:
+            bound = bindings.get(unit.unit_id)
+            if bound is None:
+                continue
+            # ``manifest_raw`` is only forwarded when a shared scan supplied it
+            # (the P0-01 batch path). Otherwise the call is byte-identical to the
+            # original, which also keeps injected reconcile stubs — the existing
+            # test seam — working unchanged.
+            if bound.manifest_raw is not None:
+                report = self._reconcile(
+                    bound.manifest.project_id,
+                    bound.project_dir,
+                    persist=False,
+                    manifest_raw=bound.manifest_raw,
+                )
+            else:
+                report = self._reconcile(
+                    bound.manifest.project_id, bound.project_dir, persist=False
+                )
+            states[unit.unit_id] = self._unit_progress_from(unit, bound, report)
+        return self._finalize_progress(production, states)
+
+    def derive_progress(self) -> ProductionExecutionReport:
+        production = self.load()
+        bindings = self.discover_bindings(production)
+        return self._derive_progress_report(production, bindings)
+
+    @staticmethod
+    def derive_progress_many(
+        production_ids: Iterable[str],
+        *,
+        productions_root: Optional[Path] = None,
+        projects_root: Optional[Path] = None,
+        reconcile: Optional[Callable[..., object]] = None,
+    ) -> Dict[str, object]:
+        """Batch progress derivation for the production collection.
+
+        P0-01: per-production ``derive_progress()`` calls ``discover_bindings()``,
+        which re-scans the ENTIRE projects tree (parse + content-hash every
+        project manifest) once per production. With P productions and Q
+        projects that is O(P*Q) manifest parses — the measured ~28 s on
+        ``GET /api/productions``.
+
+        This method performs ONE shared scan of the projects tree, then reuses
+        the exact ``discover_bindings`` per-production binding verification and
+        the exact ``reconcile_project`` call per bound project, so ``counts``,
+        ``complete`` and the ``PROJECT_FAILED`` verdict are byte-identical to
+        the single-production path. No counts-only shortcut; no caching.
+
+        Malformed productions are not pre-validated here: the caller keeps the
+        existing per-row ``_production_or_none`` error handling, and a failed
+        derivation for one id leaves its entry simply absent (the caller adds
+        its own truthful ``counts: None`` / ``error`` row, as today).
+        """
+        from app.orchestrator.reconciliation import reconcile_project
+
+        reconcile_fn = reconcile or reconcile_project
+        ids = list(production_ids)
+        if not ids:
+            return {}
+
+        probe = ProductionExecutor(
+            ids[0], productions_root=productions_root, projects_root=projects_root,
+        )
+
+        # One pass over the projects tree: parse each manifest once and keep
+        # both the validated manifest and its raw dict, so every downstream
+        # consumer sees byte-identical content.
+        manifests_by_dir: Dict[str, Tuple[Path, ProjectManifest, dict]] = {}
+        if probe.projects_root.is_dir():
+            for project_dir in sorted(probe.projects_root.iterdir()):
+                if not project_dir.is_dir():
+                    continue
+                manifest_path = project_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                raw = _load_json(manifest_path)
+                manifest = ProjectManifest.from_dict(raw)
+                manifests_by_dir[project_dir.name] = (project_dir, manifest, raw)
+
+        results: Dict[str, object] = {}
+        for production_id in ids:
+            production = load_production(production_id, root=productions_root)
+            executor = ProductionExecutor(
+                production_id,
+                productions_root=productions_root,
+                projects_root=projects_root,
+                reconcile=reconcile_fn,
+            )
+            bindings = executor.discover_bindings_from_scan(production, manifests_by_dir)
+            states: Dict[str, UnitProgress] = {}
+            for unit in production.units:
+                bound = bindings.get(unit.unit_id)
+                if bound is None:
+                    continue
+                if bound.manifest_raw is not None:
+                    report = reconcile_fn(
+                        bound.manifest.project_id,
+                        bound.project_dir,
+                        persist=False,
+                        manifest_raw=bound.manifest_raw,
+                    )
+                else:
+                    report = reconcile_fn(
+                        bound.manifest.project_id, bound.project_dir, persist=False
+                    )
+                states[unit.unit_id] = executor._unit_progress_from(
+                    unit, bound, report
+                )
+            results[production_id] = executor._finalize_progress(production, states)
+        return results
+
 
     def _config_for_unit(
         self,
