@@ -9,10 +9,12 @@ It never generates, downloads, or submits media.
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
 
 from app.content.models import ProductionPlan
 from app.content.validator import validate_production_plan
@@ -27,6 +29,66 @@ from app.orchestrator.models import (
 from app.voice.validator import validate_audio_file
 from app.assembly.ffmpeg import check_ffprobe_available, probe_media
 from app.config import PROJECT_ROOT
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+# ---------------------------------------------------------------------------
+# Phase 2B — bounded parallel VALIDATION (performance, never semantics)
+#
+# Root cause (measured): ``reconcile_project`` validates every scene video,
+# the voice audio, and the final video through ffprobe SUBPROCESSES.  Run
+# serially, ~150 sequential launches dominated ``GET /api/productions``
+# (~7-9 s dev-warm, 20-25 s under live process-launch overhead) and single
+# production progress time.  Each validation is independent, pure, and
+# read-only, so running them concurrently changes ONLY wall time: the same
+# validations run, on the same inputs, in preserved result order, on every
+# single call.  Nothing is cached, skipped, reordered, or assumed.
+#
+# ``AVM_RECONCILE_MAX_PARALLELISM`` is an operator kill switch, not a state
+# control: values < 1 are clamped, an unreadable value behaves
+# conservatively (serial), and ``=1`` restores the original serial path
+# byte-for-byte.  There is no default-on behavior that changes results.
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_PARALLEL_VALIDATION = 8
+# Measured on the 27-bound-project collection: 4 -> ~2.1-4.0s, 6 -> ~1.8-2.3s,
+# 8 -> ~1.9-2.0s against 7.0-7.6s fully serial.  Six concurrent reconciliations
+# (each fanning out at most eight leaf probes below it) captures the plateau
+# while keeping worst-case transient subprocess fan-out bounded.
+MAX_PARALLEL_RECONCILES = 6
+
+
+def _validation_worker_cap() -> int:
+    raw = str(os.environ.get("AVM_RECONCILE_MAX_PARALLELISM", "")).strip()
+    if not raw:
+        return DEFAULT_MAX_PARALLEL_VALIDATION
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1  # unreadable setting: behave conservatively (serial).
+    return max(1, value)
+
+
+def parallel_map(function: Callable[[_T], _R], items: Iterable[_T], *,
+                 cap: int = DEFAULT_MAX_PARALLEL_VALIDATION) -> List[_R]:
+    """Map ``function`` over ``items``, preserving input order exactly.
+
+    Runs serially when there is nothing to parallelize (0/1 items) or when
+    the effective worker cap is below 2.  Exceptions propagate with the
+    same type and FIRST-IN-ITEM-ORDER identity as the serial loop, so
+    callers' error contracts (e.g. the HTTP 500 mapping in ``web.server``)
+    are unchanged.  ``function`` must be independent per item and must not
+    mutate shared state — validation/reconciliation probes qualify.
+    """
+    materialized = list(items)
+    if len(materialized) < 2:
+        return [function(item) for item in materialized]
+    workers = min(_validation_worker_cap(), cap, len(materialized))
+    if workers < 2:
+        return [function(item) for item in materialized]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(function, materialized))
 
 
 class ArtifactStatus(str, Enum):
@@ -206,13 +268,24 @@ def _scene_evidence(manifest: ProjectManifest, project_dir: Path, plan: Optional
                     placeholders[str(sid)] = True
     except Exception:
         pass  # unreadable scene manifest cannot fabricate a real-generation claim
-    items = []
+    # Phase 2B: resolve every expected scene's candidate path first (pure
+    # path work, same values as the former per-iteration call), then run the
+    # independent ffprobe validations concurrently through the bounded shared
+    # helper.  Results keep exact ``expected`` order, so the produced items,
+    # statuses, and verdict are identical to the serial path; with 0/1 scenes
+    # (or the operator cap at 1) this IS the serial path.
+    scene_dir = _path(project_dir, manifest.scene_manifest_path)
+    resolved: List[tuple] = []
     for scene in expected:
         path = by_name.get(scene.id)
         if path is None:
-            scene_dir = _path(project_dir, manifest.scene_manifest_path)
             path = (scene_dir.parent if scene_dir else project_dir) / f"{scene.id}.mp4"
-        validation = validate_video_file(path, configured_ratio)
+        resolved.append((scene, path))
+    validations = parallel_map(
+        lambda entry: validate_video_file(entry[1], configured_ratio), resolved
+    )
+    items = []
+    for (scene, path), validation in zip(resolved, validations):
         status = ArtifactStatus.VALID.value if validation.get("valid") else (
             ArtifactStatus.MISSING.value if not path.exists() else ArtifactStatus.INVALID.value
         )

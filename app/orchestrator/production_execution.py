@@ -823,18 +823,37 @@ class ProductionExecutor:
             production.production_id, production.plan_version, ordered
         )
 
-    def _derive_progress_report(
+    def _derive_bound_progress(
         self, production: Production, bindings: Dict[str, BoundProject]
-    ) -> ProductionExecutionReport:
-        states: Dict[str, UnitProgress] = {}
-        for unit in production.units:
-            bound = bindings.get(unit.unit_id)
-            if bound is None:
-                continue
-            # ``manifest_raw`` is only forwarded when a shared scan supplied it
-            # (the P0-01 batch path). Otherwise the call is byte-identical to the
-            # original, which also keeps injected reconcile stubs — the existing
-            # test seam — working unchanged.
+    ) -> Dict[str, UnitProgress]:
+        """Reconcile every bound unit, preserving ``production.units`` order.
+
+        Phase 2B: bound units are independent, read-only ``persist=False``
+        reconciliations, so more than one of them runs through the shared
+        bounded ``parallel_map``.  With 0/1 bound units — or with the
+        operator cap set to 1 — the behavior is exactly the original serial
+        loop: same reconcile call shape (raw bytes forwarded only when the
+        shared scan supplied them), same state derivation, same dict
+        insertion order, same exception surface.  Nothing is cached or
+        skipped: every bound unit is fully reconciled on every call.
+        """
+        from app.orchestrator.reconciliation import (
+            MAX_PARALLEL_RECONCILES,
+            parallel_map,
+        )
+
+        pairs = [
+            (unit, bound)
+            for unit in production.units
+            if (bound := bindings.get(unit.unit_id)) is not None
+        ]
+
+        def _one(entry):
+            unit, bound = entry
+            # ``manifest_raw`` is only forwarded when a shared scan supplied
+            # it (the P0-01 batch path).  Otherwise the call is byte-identical
+            # to the original, which also keeps injected reconcile stubs —
+            # the existing test seam — working unchanged.
             if bound.manifest_raw is not None:
                 report = self._reconcile(
                     bound.manifest.project_id,
@@ -846,13 +865,43 @@ class ProductionExecutor:
                 report = self._reconcile(
                     bound.manifest.project_id, bound.project_dir, persist=False
                 )
-            states[unit.unit_id] = self._unit_progress_from(unit, bound, report)
+            return unit.unit_id, self._unit_progress_from(unit, bound, report)
+
+        states: Dict[str, UnitProgress] = {}
+        for unit_id, progress in parallel_map(
+            _one, pairs, cap=MAX_PARALLEL_RECONCILES
+        ):
+            states[unit_id] = progress
+        return states
+
+    def _derive_progress_report(
+        self, production: Production, bindings: Dict[str, BoundProject]
+    ) -> ProductionExecutionReport:
+        states = self._derive_bound_progress(production, bindings)
         return self._finalize_progress(production, states)
 
     def derive_progress(self) -> ProductionExecutionReport:
         production = self.load()
         bindings = self.discover_bindings(production)
         return self._derive_progress_report(production, bindings)
+
+    def derive_progress_with_bindings(
+        self, production: Optional[Production] = None
+    ) -> Tuple[ProductionExecutionReport, Dict[str, BoundProject]]:
+        """ONE shared scan serving both consumers (Phase 2B).
+
+        ``derive_progress()`` followed by a separate ``discover_bindings()``
+        re-scanned and re-verified the ENTIRE projects tree twice per
+        request (unit detail did exactly that).  This method performs one
+        scan and derives the report from the very same bindings, so every
+        reported value is identical to the two-call sequence — and strictly
+        more self-consistent, because report and bindings observe one disk
+        view instead of two.  Still fresh, uncached, full validation.
+        """
+        production = production or self.load()
+        bindings = self.discover_bindings(production)
+        report = self._derive_progress_report(production, bindings)
+        return report, bindings
 
     @staticmethod
     def derive_progress_many(
@@ -908,6 +957,15 @@ class ProductionExecutor:
                 manifests_by_dir[project_dir.name] = (project_dir, manifest, raw)
 
         results: Dict[str, object] = {}
+        # Phase 2B restructure: the SERIAL binding-verification pass over all
+        # productions runs first, in production order (malformed evidence
+        # raises from the identical call sites, exactly as before).  Only the
+        # independent, read-only persist=False reconciliations are then
+        # flattened into ONE bounded parallel pass across the whole
+        # collection — still exactly one full reconciliation per bound
+        # project per request, nothing cached or skipped.
+        prepared: List[Tuple[str, "ProductionExecutor", Production]] = []
+        jobs: List[Tuple[str, "ProductionExecutor", ProductionUnit, BoundProject]] = []
         for production_id in ids:
             production = load_production(production_id, root=productions_root)
             executor = ProductionExecutor(
@@ -917,26 +975,53 @@ class ProductionExecutor:
                 reconcile=reconcile_fn,
             )
             bindings = executor.discover_bindings_from_scan(production, manifests_by_dir)
-            states: Dict[str, UnitProgress] = {}
+            prepared.append((production_id, executor, production))
             for unit in production.units:
                 bound = bindings.get(unit.unit_id)
-                if bound is None:
-                    continue
-                if bound.manifest_raw is not None:
-                    report = reconcile_fn(
-                        bound.manifest.project_id,
-                        bound.project_dir,
-                        persist=False,
-                        manifest_raw=bound.manifest_raw,
-                    )
-                else:
-                    report = reconcile_fn(
-                        bound.manifest.project_id, bound.project_dir, persist=False
-                    )
-                states[unit.unit_id] = executor._unit_progress_from(
-                    unit, bound, report
+                if bound is not None:
+                    jobs.append((production_id, executor, unit, bound))
+
+        def _run_job(job):
+            production_id, executor, unit, bound = job
+            # ``manifest_raw`` is only forwarded when the shared scan supplied
+            # it (the P0-01 path); the call shape stays byte-identical to the
+            # original, which also keeps injected reconcile stubs — the
+            # existing test seam — working unchanged.
+            if bound.manifest_raw is not None:
+                report = executor._reconcile(
+                    bound.manifest.project_id,
+                    bound.project_dir,
+                    persist=False,
+                    manifest_raw=bound.manifest_raw,
                 )
-            results[production_id] = executor._finalize_progress(production, states)
+            else:
+                report = executor._reconcile(
+                    bound.manifest.project_id, bound.project_dir, persist=False
+                )
+            return production_id, unit.unit_id, executor._unit_progress_from(
+                unit, bound, report
+            )
+
+        from app.orchestrator.reconciliation import (
+            MAX_PARALLEL_RECONCILES,
+            parallel_map,
+        )
+
+        states_by_production: Dict[str, Dict[str, UnitProgress]] = {
+            production_id: {} for production_id, _, _ in prepared
+        }
+        # parallel_map returns in job order, and jobs were produced in
+        # (production order, production.units order), so each states dict
+        # keeps the exact insertion order of the former serial loops.
+        for production_id, unit_id, progress in parallel_map(
+            _run_job, jobs, cap=MAX_PARALLEL_RECONCILES
+        ):
+            states_by_production[production_id][unit_id] = progress
+
+        for production_id, executor, production in prepared:
+            results[production_id] = executor._finalize_progress(
+                production, states_by_production[production_id]
+            )
         return results
 
 

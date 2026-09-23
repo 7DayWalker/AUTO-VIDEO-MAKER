@@ -1805,8 +1805,12 @@ def unit_detail_payload(production_id: str, unit_id: str):
         }
     try:
         executor = _production_executor(production_id)
-        report = executor.derive_progress()
-        bindings = executor.discover_bindings(production)
+        # Phase 2B: ONE shared scan serves both the progress report and the
+        # bound-project snapshot below.  Previously derive_progress() and
+        # discover_bindings() scanned the entire projects tree twice per
+        # request and could observe two different disk views; every payload
+        # field is derived from the same values as before, once.
+        report, bindings = executor.derive_progress_with_bindings(production)
     except Exception as exc:
         return 500, _executor_error(exc)
     progress_by_id = {
@@ -2001,6 +2005,7 @@ def production_command_payload(
                            "re-executes completed units. Nothing was done.",
             }
 
+    started_at = datetime.now().isoformat()
     with _production_runs_lock:
         run = _production_runs.get(production_id)
         if run and run.get("running"):
@@ -2016,7 +2021,7 @@ def production_command_payload(
             "running": True,
             "action": action,
             "unit_id": unit_id,
-            "started_at": datetime.now().isoformat(),
+            "started_at": started_at,
             "finished_at": None,
             "complete": False,
             "error": None,
@@ -2040,7 +2045,22 @@ def production_command_payload(
                     "error": f"{type(exc).__name__}: {_browser_safe_diagnostic(exc)}",
                 })
 
-    threading.Thread(target=worker, daemon=True).start()
+    thread = threading.Thread(target=worker, daemon=True)
+    try:
+        thread.start()
+    except Exception as exc:  # noqa: BLE001 - the worker thread never existed
+        # Phase 2B correctness guard: if the OS/runtime refuses the thread
+        # spawn, the just-registered "running" entry must NOT survive — an
+        # uncleaned entry would pin every later execute/resume to a false
+        # 409 EXECUTION_ALREADY_RUNNING until the process restarts.  The
+        # failure surfaces through the existing 500 EXECUTOR_ERROR contract;
+        # nothing was executed.
+        logger.exception("Production execution worker could not start: %s", production_id)
+        with _production_runs_lock:
+            entry = _production_runs.get(production_id)
+            if entry is not None and entry.get("started_at") == started_at:
+                _production_runs.pop(production_id, None)
+        return 500, _executor_error(exc)
     scope = f"unit {unit_id}" if unit_id else f"production {production_id}"
     message = (
         f"{action.capitalize()} command accepted for {scope}. The Phase 10 "

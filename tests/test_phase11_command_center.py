@@ -128,6 +128,11 @@ class FakeExecutor:
     def discover_bindings(self, production=None):
         return self.bindings
 
+    def derive_progress_with_bindings(self, production=None):
+        # Mirrors the real executor's Phase 2B single-scan surface with the
+        # same values the previous two-call server flow produced.
+        return self.derive_progress(), self.discover_bindings(production)
+
     def execute(self, *, unit_id=None):
         self.execute_calls.append(unit_id)
         self.executed.set()
