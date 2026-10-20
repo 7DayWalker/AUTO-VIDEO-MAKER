@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 640" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Designed interface artwork: an episodic film strip with a continuity line">
+  <!-- UI ART ASSET — designed interface art, not production output. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161008"/>
+      <stop offset="1" stop-color="#1d1409"/>
+    </linearGradient>
+    <radialGradient id="orb" cx="0.4" cy="0.24" r="0.5">
+      <stop offset="0" stop-color="#eda43c" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#eda43c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb2" cx="0.75" cy="0.8" r="0.45">
+      <stop offset="0" stop-color="#d8862f" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#d8862f" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="strip" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c2010"/>
+      <stop offset="1" stop-color="#201709"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="10"/></filter>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="matrix" values="0 0 0 0 0.88  0 0 0 0 0.72  0 0 0 0 0.52  0 0 0 0.06 0"/></filter>
+    <radialGradient id="vig" cx="0.5" cy="0.45" r="0.85"><stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.5"/></radialGradient>
+  </defs>
+  <rect width="480" height="640" fill="url(#bg)"/>
+  <rect width="480" height="640" fill="url(#orb)"/>
+  <rect width="480" height="640" fill="url(#orb2)"/>
+  <!-- vertical film strip -->
+  <g>
+    <rect x="176" y="72" width="128" height="496" rx="14" fill="url(#strip)" stroke="#55401f" stroke-width="2"/>
+    <g fill="#4d3a1e">
+      <rect x="186" y="88" width="12" height="18" rx="3"/><rect x="282" y="88" width="12" height="18" rx="3"/>
+      <rect x="186" y="204" width="12" height="18" rx="3"/><rect x="282" y="204" width="12" height="18" rx="3"/>
+      <rect x="186" y="320" width="12" height="18" rx="3"/><rect x="282" y="320" width="12" height="18" rx="3"/>
+      <rect x="186" y="436" width="12" height="18" rx="3"/><rect x="282" y="436" width="12" height="18" rx="3"/>
+      <rect x="186" y="530" width="12" height="18" rx="3"/><rect x="282" y="530" width="12" height="18" rx="3"/>
+    </g>
+    <g stroke="#b98a4a" stroke-width="1.6">
+      <rect x="206" y="106" width="68" height="80" rx="8" fill="#241a0d"/>
+      <rect x="206" y="222" width="68" height="80" rx="8" fill="#241a0d"/>
+      <rect x="206" y="338" width="68" height="80" rx="8" fill="#241a0d" stroke="#ffd9a0" stroke-width="2"/>
+      <rect x="206" y="454" width="68" height="80" rx="8" fill="#241a0d"/>
+    </g>
+    <path d="M232 366 l18 12 -18 12 Z" fill="#ffe9c4"/>
+  </g>
+  <!-- continuity line linking episodes -->
+  <path d="M340 146 C 388 190 388 320 340 378 C 300 424 340 470 340 494" fill="none" stroke="#d8862f" stroke-width="2.4" stroke-linecap="round" opacity="0.9"/>
+  <path d="M340 146 C 388 190 388 320 340 378" fill="none" stroke="#f5d9a6" stroke-width="4" opacity="0.2" filter="url(#soft)"/>
+  <circle cx="340" cy="146" r="7" fill="#241a0d" stroke="#f5d9a6" stroke-width="2"/>
+  <circle cx="340" cy="378" r="7" fill="#241a0d" stroke="#f5d9a6" stroke-width="2"/>
+  <circle cx="340" cy="494" r="7" fill="#241a0d" stroke="#f7b955" stroke-width="2"/>
+  <g stroke="#4d3a1e" stroke-width="1.4" stroke-dasharray="3 5">
+    <path d="M278 146 H330 M278 378 H330"/>
+  </g>
+  <rect width="480" height="640" filter="url(#grain)"/>
+  <rect width="480" height="640" fill="url(#vig)"/>
+</svg>

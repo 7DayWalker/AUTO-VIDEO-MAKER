@@ -114,5 +114,11 @@ class BaseLLMProvider(ABC):
             max_tokens=max_tokens,
         )
     
+    def supports_multimodal(self) -> bool:
+        return False
+
+    def generate_multimodal(self, prompt: str, system_prompt=None, *, video=None, images=None, video_bytes=None, response_schema=None, temperature: float = 0.7, max_tokens: int = 4096):
+        raise NotImplementedError(f"Provider {self.name} does not support generate_multimodal")
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(model={self.model})"

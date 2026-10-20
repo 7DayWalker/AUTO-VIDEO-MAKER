@@ -33,6 +33,7 @@ from app.orchestrator.models import (
 from app.assembly.audio_contract import (
     AudioMediaFacts,
     DEFAULT_AUDIO_POLICY,
+    audio_policy_requires_narration,
     normalize_audio_policy,
 )
 from app.assembly.ffmpeg import probe_media, resolve_ffmpeg
@@ -233,9 +234,38 @@ class ProductionOrchestrator:
             else:
                 logger.info("Stage CONTENT: Already completed, skipping")
             
-            # Stage 2: Voice
-            if not self.manifest.is_stage_completed(PipelineStage.VOICE):
-                self._execute_voice_stage()
+            # Stage 2: Voice (narrator/TTS) — CONDITIONAL.
+            #
+            # V1 AUDIO POLICY FIX: AVM no longer treats every production as a
+            # narrated production.  Whether narrator/TTS audio is generated is
+            # decided by the EFFECTIVE AUDIO POLICY compiled from the
+            # production's explicit audio intent — never by the mere existence
+            # of ``Scene.narration`` text (a plan may keep narration for
+            # storyboarding, dialogue, or captions without TTS being required),
+            # never by the route, and never by a provider/model name.
+            #
+            #   narration              -> TTS runs
+            #   native                 -> TTS MUST NOT run
+            #   native_plus_narration  -> TTS runs
+            #   none                   -> TTS MUST NOT run
+            narration_required = audio_policy_requires_narration(
+                self.config.audio_policy
+            )
+            voice_result = self.manifest.get_stage_result(PipelineStage.VOICE)
+            if voice_result is not None and voice_result.status == StageStatus.SKIPPED:
+                # Truthful prior state (this run or a resumed one): VOICE was
+                # intentionally not required.  A skipped stage is never
+                # re-run into TTS and never reported as a failure.
+                logger.info(
+                    "Stage VOICE: intentionally not required (%s)",
+                    (voice_result.metadata or {}).get("skip_reason")
+                    or "effective audio policy does not require narration",
+                )
+            elif not self.manifest.is_stage_completed(PipelineStage.VOICE):
+                if narration_required:
+                    self._execute_voice_stage()
+                else:
+                    self._skip_voice_stage()
             else:
                 logger.info("Stage VOICE: Already completed, skipping")
             
@@ -243,7 +273,12 @@ class ProductionOrchestrator:
             # scenes pending so no Flow connection, Create click, or credit use
             # can occur during provider validation/resume.
             if self.config.voice_only:
-                logger.info("Voice-only mode complete; downstream stages not run")
+                logger.info(
+                    "Voice-only mode complete; downstream stages not run%s",
+                    ""
+                    if narration_required
+                    else " (VOICE intentionally not required by audio policy)",
+                )
                 return self.manifest
 
             # Stage 3: Scenes
@@ -331,6 +366,20 @@ class ProductionOrchestrator:
                 "video_codec": validation.get("video_codec"),
                 "audio_codec": validation.get("audio_codec"),
                 "ffprobe": "passed",
+                # AUDIO PREVIEW (additive): the accepted artifact's real audio
+                # stream facts, recorded from the acceptance probe that ALREADY
+                # ran.  ``audio_codec`` alone cannot distinguish "no audio
+                # stream" from "stream present, codec unreported", so the
+                # presence/count/rate/channel facts are persisted explicitly
+                # and the read-only audio surface never re-probes or infers.
+                "audio_stream": {
+                    "has_audio": validation.get("has_audio"),
+                    "audio_stream_count": validation.get("audio_stream_count"),
+                    "audio_codec": validation.get("audio_codec"),
+                    "sample_rate": validation.get("audio_sample_rate"),
+                    "channels": validation.get("audio_channels"),
+                    "duration": validation.get("audio_stream_duration"),
+                },
             },
         ))
         self._save_manifest()
@@ -373,6 +422,13 @@ class ProductionOrchestrator:
             project_id=project_id,
             topic=self.config.topic,
             production_binding=production_binding,
+            # G3: route-compilation evidence, captured exactly once, at the
+            # moment this project is created — never re-derived and never
+            # overwritten on resume (see RouteCompilationRecord).  None means
+            # no production route was compiled for this run (a direct engine
+            # invocation) or that the project predates the evidence seam; it
+            # is never back-inferred.
+            route_compilation=self.config.route_compilation,
             flow_project_url=self.config.flow_project_url,
             content_config=self.config.to_content_brief_dict(),
             voice_config=self.config.to_voice_config_dict(),
@@ -512,6 +568,22 @@ class ProductionOrchestrator:
         self.config.audio_policy = normalize_audio_policy(
             persisted_audio_policy or DEFAULT_AUDIO_POLICY
         )
+        # V1 AUDIO POLICY FIX: the requested-intent evidence is restored too, so
+        # a resumed project keeps explaining WHY its policy is what it is.
+        # Legacy manifests (no snapshot) keep None = UNKNOWN, which is never
+        # back-inferred; their effective policy stays the historical
+        # narration_only default above, so resumed legacy productions keep their
+        # verified narrated behavior byte-for-byte.
+        persisted_audio_intent = (self.manifest.assembly_config or {}).get(
+            "audio_intent"
+        )
+        if persisted_audio_intent:
+            self.config.audio_intent = persisted_audio_intent
+        persisted_intent_source = (self.manifest.assembly_config or {}).get(
+            "audio_intent_source"
+        )
+        if persisted_intent_source:
+            self.config.audio_intent_source = persisted_intent_source
         
         logger.info(f"Resumed project: {project_id}")
         logger.info(f"Current stage: {self.manifest.current_stage.value}")
@@ -678,6 +750,45 @@ class ProductionOrchestrator:
             self._save_manifest()
             raise StageFailedError("content", str(e))
     
+    def _skip_voice_stage(self) -> None:
+        """Record VOICE as intentionally NOT REQUIRED — never as a failure.
+
+        V1 AUDIO POLICY FIX.  When the effective audio policy does not require
+        narration (audio intent ``native`` or ``none``), narrator/TTS
+        generation must not run at all: no provider is constructed, no TTS
+        request is made, and no narrator artifact is claimed.
+
+        The stage is persisted with the EXISTING ``StageStatus.SKIPPED``
+        vocabulary (no new stage-state framework), so the manifest keeps all
+        three outcomes distinguishable:
+
+        - VOICE executed successfully      -> ``completed`` + artifacts
+        - VOICE intentionally not required -> ``skipped`` + skip_reason evidence
+        - VOICE failed                     -> ``failed`` + error
+
+        Nothing here reads or rewrites ``Scene.narration``: the plan keeps its
+        narration text for creative planning, storyboarding, dialogue, or
+        captions.  Any narrator artifact left over from an earlier, differently
+        configured run is deliberately NOT deleted (non-destructive), and the
+        effective policy suppresses it at assembly anyway.
+        """
+        policy = normalize_audio_policy(self.config.audio_policy)
+        intent = self.config.audio_intent or "not_declared"
+        reason = (
+            "Narrator/TTS intentionally not required: audio intent="
+            f"{intent}, effective audio policy={policy.value}"
+        )
+        logger.info("")
+        logger.info("=" * 40)
+        logger.info("Stage 2: VOICE GENERATION — SKIPPED (not required)")
+        logger.info("=" * 40)
+        logger.info("%s", reason)
+        self.manifest.set_stage_result(StageResult.skipped(
+            PipelineStage.VOICE,
+            reason=reason,
+        ))
+        self._save_manifest()
+
     def _execute_voice_stage(self) -> None:
         """Execute voice generation stage."""
         logger.info("")
@@ -1037,7 +1148,11 @@ class ProductionOrchestrator:
             # Phase 8: Flow participates in the uniform scene execution
             # boundary; its browser lifecycle stays provider-owned behind the
             # wants_resume hook.
-            from app.orchestrator.scene_execution import invoke_scene_generation, provider_wants_resume
+            from app.orchestrator.scene_execution import (
+                invoke_scene_generation,
+                preserve_checkpoint_evidence,
+                provider_wants_resume,
+            )
 
             logger.info("Connecting to Chrome for Flow generation...")
 
@@ -1262,6 +1377,17 @@ class ProductionOrchestrator:
                         account_checkpoint_credit(scene_id)
 
                         checkpoint_status = current.get("status", "pending")
+                        # Batch 1F/1H: add_scene() REPLACES the entry, so the
+                        # evidence this seam already captured must be carried
+                        # forward explicitly. A submitted/generating transition
+                        # on a re-entered scene used to persist the entry with
+                        # an empty evidence block, and a later abort or failure
+                        # then stranded a previously completed Flow scene with
+                        # null provenance/accounting in the manifest while the
+                        # operational checkpoint still held them.
+                        carried = preserve_checkpoint_evidence(
+                            current, scene_manifest.get_scene(scene.id),
+                        )
                         scene_manifest.add_scene(
                             scene_id=scene.id,
                             sequence=scene.sequence,
@@ -1278,6 +1404,7 @@ class ProductionOrchestrator:
                             checkpoint_evidence=current.get("checkpoint_evidence", {}),
                             file_path=current.get("file_path"),
                             validation=current.get("validation", {}),
+                            **carried,
                         )
                         save_scene_manifest(scene_manifest, project_scenes_dir)
                         self._save_manifest()
@@ -1887,6 +2014,7 @@ class ProductionOrchestrator:
             build_scene_request,
             completion_checkpoint_update,
             invoke_scene_generation,
+            preserve_checkpoint_evidence,
             validate_scene_artifact,
         )
 
@@ -2037,6 +2165,16 @@ class ProductionOrchestrator:
                 current.update(update)
                 self.manifest.scene_checkpoints[update["scene_id"]] = current
 
+                # Batch 1F/1H: ``SceneManifest.add_scene`` REPLACES the entry,
+                # so the provenance/accounting already captured for this scene
+                # must be carried forward explicitly. Without it an in-flight
+                # transition — or a render that fails after this callback —
+                # persisted a completed scene with an EMPTY evidence block, and
+                # the skip-if-complete guard below then prevented the completion
+                # seam from ever recording it again. This only preserves what
+                # this same seam already captured from a provider result; it
+                # never promotes routing or configuration values, so a scene
+                # with no recorded evidence stays unknown.
                 scene_manifest.add_scene(
                     scene_id=scene.id,
                     sequence=scene.sequence,
@@ -2053,6 +2191,9 @@ class ProductionOrchestrator:
                     },
                     file_path=current.get("file_path"),
                     validation=current.get("validation", {}),
+                    **preserve_checkpoint_evidence(
+                        current, scene_manifest.get_scene(scene.id),
+                    ),
                 )
                 save_scene_manifest(scene_manifest, project_scenes_dir)
                 self._save_manifest()
@@ -2091,6 +2232,32 @@ class ProductionOrchestrator:
             )
 
             scene_paths.append(str(result.file_path))
+            # NATIVE VS SYNTHETIC AUDIO EVIDENCE: persist the provider-DECLARED
+            # audio facts through this seam, exactly as the Flow (line ~1545)
+            # and OpenRouter (line ~2462) completion paths already do.
+            #
+            # Local providers state the synthetic identity on the result
+            # (ImageMotion's required silent AAC is ``is_synthetic=True``;
+            # LocalAsset marks it false only when the SOURCE asset really
+            # carried audio).  Without this, only the raw probe facts survive
+            # into the checkpoint, and those are built by ``validate_video_file``
+            # through ``AudioMediaFacts``, whose ``is_synthetic`` field defaults
+            # to ``False``.  A technically valid silent AAC stream was therefore
+            # persisted as if it were *established genuine native audio*, and
+            # every later reader (``has_native_audio``, native-audio
+            # observation, the audio evidence surface) inherited that lie.
+            #
+            # Deliberately strict: the marker is persisted ONLY when a provider
+            # actually declared it.  When ``result.audio_facts`` is absent nothing
+            # is written here, so synthetic identity stays unknown and is never
+            # fabricated from a model default or a codec name.
+            result_audio_facts = (
+                result.audio_facts.model_dump()
+                if result.audio_facts is not None
+                else None
+            )
+            if result_audio_facts is not None:
+                validation = {**validation, "audio_facts": result_audio_facts}
             # Batch 1H: truthful per-family cost accounting. The historical
             # "generation_cost" field keeps its Google-Flow-credits semantics:
             # the known non-billable local family consumes 0 credits, while
@@ -2110,6 +2277,12 @@ class ProductionOrchestrator:
                 validation=validation,
                 provider_name=chosen_provider,
                 sequence=scene.sequence,
+                # NATIVE VS SYNTHETIC AUDIO EVIDENCE: same additive argument the
+                # Flow and OpenRouter paths already pass, so the declared
+                # synthetic identity lands in ``checkpoint["audio_facts"]`` — the
+                # location every downstream reader checks FIRST.  ``None`` keeps
+                # the key absent, which means unknown, never "not synthetic".
+                audio_facts=result_audio_facts,
                 extra_fields={
                     "generation_cost": generation_cost,
                     # Phase 6C: TRUE SOURCE asset provenance (project-owned
@@ -2210,6 +2383,7 @@ class ProductionOrchestrator:
             build_scene_request,
             completion_checkpoint_update,
             invoke_scene_generation,
+            preserve_checkpoint_evidence,
             remote_job_identity,
             validate_scene_artifact,
         )
@@ -2266,6 +2440,16 @@ class ProductionOrchestrator:
                     checkpoint_evidence=evidence,
                     file_path=current.get("file_path"),
                     validation=current.get("validation", {}),
+                    # Batch 1F/1H: same replacement hazard as the Flow pass. A
+                    # generating/SUBMITTED transition on a re-entered scene used
+                    # to persist an empty evidence block, so a job that then
+                    # failed left a previously completed OpenRouter scene with
+                    # null provenance/accounting in the manifest while the
+                    # operational checkpoint still held them. Pure preservation:
+                    # only what the evidence seam already wrote is carried.
+                    **preserve_checkpoint_evidence(
+                        current, scene_manifest.get_scene(scene.id),
+                    ),
                 )
                 save_scene_manifest(scene_manifest, project_scenes_dir)
                 self._save_manifest()
@@ -2485,12 +2669,28 @@ class ProductionOrchestrator:
             self._save_manifest()
             return
         
-        # Verify voice timing available
+        # Verify voice timing available.
+        #
+        # V1 AUDIO POLICY FIX: V1 captions are NARRATOR captions derived from
+        # voice timing (``generate_srt_from_timing``).  When narration is
+        # intentionally not required there is no TTS run and therefore no
+        # timing file — that is a TRUTHFUL SKIP, never a failure, and it must
+        # never block the production from completing.  The narrator/subtitle
+        # distinction is preserved: nothing here invents a caption source.
         if not self.manifest.voice_timing_path:
-            logger.warning("Voice timing not available, skipping captions")
+            policy = normalize_audio_policy(self.config.audio_policy)
+            if audio_policy_requires_narration(policy):
+                reason = "Voice timing not available"
+            else:
+                reason = (
+                    "Narration intentionally not required "
+                    f"(effective audio policy={policy.value}); "
+                    "no narrator timing exists to derive captions from"
+                )
+            logger.warning("Captions skipped: %s", reason)
             self.manifest.set_stage_result(StageResult.skipped(
                 PipelineStage.CAPTIONS,
-                reason="Voice timing not available",
+                reason=reason,
             ))
             self._save_manifest()
             return
@@ -2719,6 +2919,34 @@ class ProductionOrchestrator:
             # Update manifest
             self.manifest.final_video_path = result.output_path
             
+            # V1 AUDIO POLICY FIX: auditable audio evidence on the assembly
+            # stage.  Every value below is an ALREADY-ESTABLISHED fact — the
+            # persisted requested intent, the compiled effective policy, the
+            # VOICE stage's own recorded state, and per-scene media facts
+            # inspected from the real artifacts.  Nothing is inferred here, and
+            # no provider/model claim is made: whether native audio actually
+            # reached the final file is disclosed by the acceptance gate's
+            # ffprobe facts (``has_audio`` / ``audio_codec``) and by the
+            # assembly warnings carried on this same stage result.
+            voice_stage = self.manifest.get_stage_result(PipelineStage.VOICE)
+            scenes_with_native_audio = sorted(
+                scene.id
+                for scene in assembly_scenes
+                if scene.audio_facts and scene.audio_facts.has_native_audio
+            )
+            audio_evidence = {
+                "audio_intent": assembly_config.get("audio_intent"),
+                "audio_intent_source": assembly_config.get("audio_intent_source"),
+                "audio_policy": audio_policy.value,
+                "voice_stage_status": (
+                    voice_stage.status.value if voice_stage is not None else None
+                ),
+                "narration_track_present": bool(self.manifest.voice_audio_path),
+                "scenes_with_native_audio": scenes_with_native_audio,
+                "native_audio_present": bool(scenes_with_native_audio),
+            }
+            logger.info("Audio evidence: %s", audio_evidence)
+
             self.manifest.set_stage_result(StageResult.completed(
                 stage=PipelineStage.ASSEMBLY,
                 output_path=result.output_path,
@@ -2729,6 +2957,7 @@ class ProductionOrchestrator:
                     "width": result.width,
                     "height": result.height,
                     "file_size": result.file_size,
+                    "audio": audio_evidence,
                 },
                 started_at=started_at,
             ))

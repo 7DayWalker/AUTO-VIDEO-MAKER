@@ -16,7 +16,10 @@ from app.assembly.config import (
     ensure_assembly_directories,
 )
 from app.assembly.models import AssemblyProject, AssemblyResult, MediaInfo
-from app.assembly.audio_contract import select_audio_inputs
+from app.assembly.audio_contract import (
+    audio_selection_warnings,
+    select_audio_inputs,
+)
 from app.assembly.validator import validate_project
 from app.assembly.ffmpeg import check_ffmpeg_available, check_ffprobe_available, probe_media
 from app.assembly.video import normalize_video, concatenate_videos
@@ -149,10 +152,9 @@ def assemble_project(
             narration=voiceover_path,
             music=music_path,
         )
-        if selection.fallback_used:
-            warnings.append(
-                "Native audio was unavailable; native_only fell back to narration."
-            )
+        # Native eligibility came from actual media facts above; the disclosure
+        # below is single-sourced so assembly and the mixer never diverge.
+        warnings.extend(audio_selection_warnings(selection))
         logger.info(
             "Audio policy=%s native=%s narration=%s music=%s",
             selection.policy.value,

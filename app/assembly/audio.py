@@ -20,6 +20,7 @@ from app.assembly.config import (
 from app.assembly.audio_contract import (
     AudioPolicy,
     DEFAULT_AUDIO_POLICY,
+    audio_selection_warnings,
     select_audio_inputs,
 )
 from app.assembly.ffmpeg import run_ffmpeg, probe_media
@@ -73,10 +74,9 @@ def mix_audio(
         narration=voiceover_path,
         music=music_path,
     )
-    if selection.fallback_used:
-        warnings.append(
-            "Native audio was unavailable; native_only fell back to narration."
-        )
+    # Truthful, single-sourced disclosure. A native intent with no native audio
+    # is reported as SILENCE; the mixer never substitutes narrator/TTS audio.
+    warnings.extend(audio_selection_warnings(selection))
 
     # Build FFmpeg command. Stream 0 is always the video carrier. Audio is
     # never inherited by default: every selected input is mapped through an

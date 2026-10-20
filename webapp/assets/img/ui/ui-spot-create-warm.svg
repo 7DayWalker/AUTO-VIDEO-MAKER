@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Designed interface artwork: a lit film frame">
+  <!-- UI ART ASSET — designed interface art, not production output. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#171009"/>
+      <stop offset="1" stop-color="#1e1509"/>
+    </linearGradient>
+    <radialGradient id="orb" cx="0.62" cy="0.38" r="0.5">
+      <stop offset="0" stop-color="#eda43c" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#eda43c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb2" cx="0.25" cy="0.75" r="0.45">
+      <stop offset="0" stop-color="#d8862f" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#d8862f" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="frameg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#382815"/>
+      <stop offset="1" stop-color="#241a0d"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="matrix" values="0 0 0 0 0.88  0 0 0 0 0.72  0 0 0 0 0.52  0 0 0 0.06 0"/></filter>
+    <radialGradient id="vig" cx="0.5" cy="0.5" r="0.8"><stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.5"/></radialGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <rect width="640" height="360" fill="url(#orb)"/>
+  <rect width="640" height="360" fill="url(#orb2)"/>
+  <!-- light beam from top-right -->
+  <path d="M640 0 L360 0 L120 360 L300 360 Z" fill="#ffd9a0" opacity="0.07" filter="url(#soft)"/>
+  <!-- floating film frames -->
+  <g>
+    <rect x="196" y="96" width="248" height="150" rx="12" fill="url(#frameg)" stroke="#4d3a1e" stroke-width="1.5" opacity="0.85" transform="rotate(-4 320 171)"/>
+    <rect x="216" y="112" width="248" height="150" rx="12" fill="url(#frameg)" stroke="#b98a4a" stroke-width="1.5" transform="rotate(2 340 187)"/>
+    <circle cx="340" cy="187" r="26" fill="none" stroke="#ffd9a0" stroke-width="2" opacity="0.9"/>
+    <path d="M332 175 l22 12 -22 12 Z" fill="#ffe9c4" opacity="0.95"/>
+    <g stroke="#4d3a1e" stroke-width="2" opacity="0.8">
+      <path d="M228 124 h16 M228 136 h16 M228 148 h16 M228 250 h16 M228 238 h16"/>
+      <path d="M436 124 h16 M436 136 h16 M436 148 h16 M436 250 h16 M436 238 h16"/>
+    </g>
+  </g>
+  <!-- sparks -->
+  <circle cx="520" cy="80" r="2.6" fill="#ffe9c4" opacity="0.9"/>
+  <circle cx="96" cy="120" r="2" fill="#f5d9a6" opacity="0.8"/>
+  <circle cx="556" cy="270" r="1.8" fill="#ffe9c4" opacity="0.7"/>
+  <rect width="640" height="360" filter="url(#grain)"/>
+  <rect width="640" height="360" fill="url(#vig)"/>
+</svg>

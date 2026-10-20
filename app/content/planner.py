@@ -7,7 +7,7 @@ High-level orchestration for content planning.
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from app.content.models import ContentBrief, ProductionPlan, ContentGenerationResult
 from app.content.generator import ContentGenerator
@@ -33,6 +33,8 @@ class ScenePlanner:
         provider: BaseLLMProvider = None,
         output_dir: Path = None,
         mock_mode: bool = False,
+        canonical_model_id: Optional[str] = None,
+        resolution_trace: Sequence[Dict[str, Any]] = (),
     ):
         if mock_mode:
             self.provider = MockLLMProvider()
@@ -43,7 +45,19 @@ class ScenePlanner:
             self.provider = MockLLMProvider()
         
         self.output_dir = output_dir or CONTENT_OUTPUT_DIR
-        self.generator = ContentGenerator(self.provider)
+        # Step 6 (additive): model-centric AI Brain identity. ``create_scene_planner``
+        # (the provider-first path) never supplies these, so mock/legacy planning
+        # keeps canonical_model_id = None (UNKNOWN) and is never given a
+        # fabricated model identity.
+        self.canonical_model_id = canonical_model_id
+        self.resolution_trace: Tuple[Dict[str, Any], ...] = tuple(
+            resolution_trace or ()
+        )
+        self.generator = ContentGenerator(
+            self.provider,
+            canonical_model_id=canonical_model_id,
+            resolution_trace=self.resolution_trace,
+        )
     
     def plan(self, brief: ContentBrief) -> ContentGenerationResult:
         """
@@ -158,3 +172,31 @@ def create_scene_planner(*, mock_mode: bool = False, output_dir: Path = None) ->
     if not provider.is_available():
         raise RuntimeError(f"content provider unavailable: {provider.name}")
     return ScenePlanner(provider=provider, output_dir=output_dir)
+
+
+def planner_from_resolved_model(resolved, *, output_dir: Path = None) -> ScenePlanner:
+    """Step 6: build a planner from a ``ResolvedModelProvider``.
+
+    ONE canonical connector between the model-bound resolver and the AI Brain
+    execution boundary, so the four identities can never be lost or collapsed
+    by an ad-hoc caller:
+
+        canonical model identity -> resolved.canonical_model_id
+        provider identity        -> resolved.provider (FINAL successful binding)
+        provider model identity  -> resolved.provider_instance.model (wire id)
+        request identity         -> supplied later by the provider response
+
+    ``resolved.attempted`` holds only the FAILED bindings, so it is exactly the
+    intra-model PROVIDER-fallback evidence (never a model substitution).
+
+    Dormant by design: no production path calls this yet and it performs no
+    network activity. Provider-first planning (``create_scene_planner``) and
+    every existing caller are unchanged.
+    """
+    return ScenePlanner(
+        provider=resolved.provider_instance,
+        output_dir=output_dir,
+        canonical_model_id=resolved.canonical_model_id,
+        resolution_trace=tuple(resolved.attempted or ()),
+    )
+

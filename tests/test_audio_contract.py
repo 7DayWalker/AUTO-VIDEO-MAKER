@@ -146,8 +146,16 @@ def test_image_motion_required_silence_is_not_native_audio(tmp_path):
         ("narration_only", Path("native.mp4"), Path("voice.m4a"), False, True),
         ("narration_only", Path("native.mp4"), None, True, False),
         ("native_only", Path("native.mp4"), Path("voice.m4a"), True, False),
-        ("native_only", None, Path("voice.m4a"), False, True),
+        # V1 AUDIO POLICY FIX: ``native_only`` with no native audio selects
+        # NOTHING.  The explicit intent wins, so narrator/TTS audio is never
+        # silently substituted (the previous behavior fell back to narration).
+        ("native_only", None, Path("voice.m4a"), False, False),
         ("native_plus_narration", Path("native.mp4"), Path("voice.m4a"), True, True),
+        # ``native_plus_narration`` without native audio still uses narration
+        # alone — that is the intended combination semantics, not a violation.
+        ("native_plus_narration", None, Path("voice.m4a"), False, True),
+        # Explicit silence: no native audio, no narration, no music.
+        ("none", Path("native.mp4"), Path("voice.m4a"), False, False),
     ],
 )
 def test_audio_policy_selects_explicit_inputs(
@@ -157,13 +165,21 @@ def test_audio_policy_selects_explicit_inputs(
         policy,
         scene_native_audio=native,
         narration=narration,
-        music=None,
+        music=Path("music.m4a"),
     )
 
     assert bool(selection.scene_native_audio) is expected_native
     assert bool(selection.narration) is expected_narration
     assert selection.policy.value == policy
-    assert selection.fallback_used is (policy == "native_only" and native is None and narration is not None)
+    # ``none`` suppresses the additive music capability too, so the final
+    # artifact cannot carry an audio stream.
+    assert bool(selection.music) is (policy != "none")
+    # Native unavailability is disclosed truthfully, and no policy silently
+    # falls back from native to narrator audio any more.
+    assert selection.native_unavailable is (
+        policy in {"native_only", "native_plus_narration"} and native is None
+    )
+    assert selection.fallback_used is False
 
 
 def test_audio_policy_defaults_legacy_projects_to_narration_only():
@@ -199,7 +215,14 @@ def test_final_audio_has_one_stream_and_stays_within_video_duration(tmp_path, po
     assert float(probe_streams(Path(result.output_path))["format"]["duration"]) <= 2.2
 
 
-def test_native_only_falls_back_to_narration_when_scene_has_no_audio(tmp_path):
+def test_native_only_without_native_audio_is_silent_and_never_uses_narration(tmp_path):
+    """V1 AUDIO POLICY FIX (was: native_only fell back to narration).
+
+    A ``native`` intent with no native audio in the real scene media must
+    produce a video with NO audio stream.  A narrator track that happens to
+    exist on disk is never substituted, because that would silently violate the
+    explicit audio intent.
+    """
     scene = make_video(tmp_path / "silent.mp4", duration=2.0, with_audio=False)
     voice = make_audio(tmp_path / "voice.m4a", duration=2.0)
     result = assemble_project(
@@ -214,9 +237,13 @@ def test_native_only_falls_back_to_narration_when_scene_has_no_audio(tmp_path):
     )
 
     assert result.success is True, result.errors
-    assert any("fell back to narration" in warning for warning in result.warnings)
+    assert any(
+        "forbids a narrator/TTS fallback" in warning for warning in result.warnings
+    ), result.warnings
+    assert not any("fell back to narration" in warning for warning in result.warnings)
     streams = probe_streams(Path(result.output_path))["streams"]
-    assert len([stream for stream in streams if stream["codec_type"] == "audio"]) == 1
+    assert len([stream for stream in streams if stream["codec_type"] == "audio"]) == 0
+    assert len([stream for stream in streams if stream["codec_type"] == "video"]) == 1
 
 
 def test_mixed_audio_and_no_audio_scenes_have_deterministic_concat_topology(tmp_path):

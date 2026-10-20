@@ -130,6 +130,14 @@ class RouteDefinition(BaseModel):
     ``route_version`` is the smallest viable fingerprint: when the meaning or
     compilation of a route changes materially in a future batch, its version
     increments so persisted productions remain explainable.
+
+    DURABLE EVIDENCE: the route identity and this version are what Core
+    actually compiled for execution; they are persisted per unit in
+    ``ProjectManifest.route_compilation`` (see
+    ``app.orchestrator.production_execution.apply_production_route`` ->
+    ``RouteCompilation.to_record``), captured once when the unit's project is
+    initialized.  That record is ROUTE evidence only — never provider/model
+    provenance, media strategy, engine, or accounting.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -23,6 +23,7 @@ This module contains NO execution logic and invokes NO providers.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Dict, List, Optional
 
@@ -111,10 +112,63 @@ _PLAN_REFERENCE_STATUSES = ("unresolved", "resolved")
 _UNIT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _PRODUCTION_ID_PATTERN = re.compile(r"^prd_\d{8}_[a-z0-9]+(?:_[a-z0-9]+)*_\d{3}$")
 
+AUDIO_INTENT_NONE = "none"
+AUDIO_INTENT_NARRATION = "narration"
+AUDIO_INTENT_NATIVE = "native"
+AUDIO_INTENT_NATIVE_PLUS_NARRATION = "native_plus_narration"
+AUDIO_INTENTS = (
+    AUDIO_INTENT_NARRATION,
+    AUDIO_INTENT_NATIVE,
+    AUDIO_INTENT_NATIVE_PLUS_NARRATION,
+    AUDIO_INTENT_NONE,
+)
+DEFAULT_AUDIO_INTENT = AUDIO_INTENT_NARRATION
+
+
+def normalize_audio_intent(value: Optional[str]) -> str:
+    """Normalize a persisted audio-intent value to the canonical vocabulary."""
+    if value is None:
+        return DEFAULT_AUDIO_INTENT
+    normalized = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "": DEFAULT_AUDIO_INTENT,
+        "no_audio": AUDIO_INTENT_NONE,
+        "none": AUDIO_INTENT_NONE,
+        "voice": AUDIO_INTENT_NARRATION,
+        "voiced": AUDIO_INTENT_NARRATION,
+        "narration": AUDIO_INTENT_NARRATION,
+        "native_audio": AUDIO_INTENT_NATIVE,
+        "native": AUDIO_INTENT_NATIVE,
+        "native_plus_voice": AUDIO_INTENT_NATIVE_PLUS_NARRATION,
+        "native_plus_narration": AUDIO_INTENT_NATIVE_PLUS_NARRATION,
+    }
+    intent = aliases.get(normalized)
+    if intent is not None:
+        return intent
+    if normalized in AUDIO_INTENTS:
+        return normalized
+    raise ValueError(
+        "audio_intent must be one of: "
+        + ", ".join(AUDIO_INTENTS)
+        + f" (got {value!r})"
+    )
+
 
 def _relative_path_segments(location: str) -> List[str]:
     """Return forward-slash segments of a relative reference location."""
     return [segment for segment in location.replace("\\", "/").split("/") if segment]
+
+
+def _is_relative_path(value: str) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    if value.startswith(("/", "\\", "~")):
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return False
+    if ".." in _relative_path_segments(value):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +268,378 @@ class EpisodeMetadata(BaseModel):
     episode_number: Optional[int] = Field(default=None, ge=1)
     episode_title: Optional[str] = Field(default=None, min_length=1)
     continuity_refs: List[str] = Field(default_factory=list)
+
+
+class SourceAsset(BaseModel):
+    """A persisted source media asset owned by a production."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str = Field(pattern=r"^src-\d{3}$")
+    original_filename: str = Field(min_length=1)
+    stored_path: str = Field(min_length=1)
+    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    duration: float = Field(gt=0.0)
+    width: Optional[int] = Field(default=None, ge=1)
+    height: Optional[int] = Field(default=None, ge=1)
+    video_codec: Optional[str] = None
+    audio_codec: Optional[str] = None
+    mime: Optional[str] = None
+    file_size: Optional[int] = Field(default=None, ge=0)
+    ingested_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_relative_path(self) -> "SourceAsset":
+        if not _is_relative_path(self.stored_path):
+            raise ValueError("stored_path must be a relative path under the production root")
+        return self
+
+
+class TranscriptSegment(BaseModel):
+    """One transcript segment emitted by a transcription provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+    words: Optional[List[Dict[str, Any]]] = Field(default=None)
+
+    @model_validator(mode="after")
+    def _validate_time_bounds(self) -> "TranscriptSegment":
+        if self.end <= self.start:
+            raise ValueError("transcript end must be greater than start")
+        if not math.isfinite(self.start) or not math.isfinite(self.end):
+            raise ValueError("transcript timestamps must be finite")
+        return self
+
+
+class SourceTranscript(BaseModel):
+    """Persisted transcript sidecar for one source asset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str = Field(pattern=r"^src-\d{3}$")
+    language: Optional[str] = None
+    segments: List[TranscriptSegment] = Field(default_factory=list)
+    provider: str = Field(min_length=1)
+    provider_version: Optional[str] = None
+    created_at: str = Field(min_length=1)
+    transcript_path: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_relative_path(self) -> "SourceTranscript":
+        if not _is_relative_path(self.transcript_path):
+            raise ValueError("transcript_path must be relative to the production root")
+        return self
+
+
+class SourceSegment(BaseModel):
+    """Operator-selected source range that references transcript segments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    segment_id: str = Field(pattern=r"^seg-\d{3}$")
+    asset_id: str = Field(pattern=r"^src-\d{3}$")
+    start_seconds: float = Field(ge=0.0)
+    end_seconds: float = Field(gt=0.0)
+    title: Optional[str] = Field(default=None, min_length=1)
+    premise: Optional[str] = Field(default=None, min_length=1)
+    transcript_segment_ids: List[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_segment(self) -> "SourceSegment":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("segment end_seconds must be greater than start_seconds")
+        if not math.isfinite(self.start_seconds) or not math.isfinite(self.end_seconds):
+            raise ValueError("segment timestamps must be finite")
+        if any(ref < 0 for ref in self.transcript_segment_ids):
+            raise ValueError("transcript_segment_ids must be non-negative integers")
+        return self
+
+
+class SourceLineage(BaseModel):
+    """Persisted bridge: a ProductionUnit derived from selected source segments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unit_id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9_\-]*$")
+    asset_id: str = Field(pattern=r"^src-\d{3}$")
+    source_segment_ids: List[str] = Field(default_factory=list)
+    source_path: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_lineage(self) -> "SourceLineage":
+        if not self.source_segment_ids:
+            raise ValueError("source_segment_ids cannot be empty")
+        seen: set[str] = set()
+        for segment_id in self.source_segment_ids:
+            if not isinstance(segment_id, str) or not re.fullmatch(r"^seg-\d{3}$", segment_id):
+                raise ValueError("source_segment_ids must be seg-NNN strings")
+            if segment_id in seen:
+                raise ValueError(f"duplicate source segment id: {segment_id}")
+            seen.add(segment_id)
+        if self.source_path is not None and not _is_relative_path(self.source_path):
+            raise ValueError("source_path must be a relative path when supplied")
+        return self
+
+
+def derive_source_lineage(
+    production: "Production",
+    unit_id: str,
+    *,
+    asset_id: str,
+    source_segment_ids: List[str],
+) -> "SourceLineage":
+    """Validate a unit-to-source segment derivation against the production asset set."""
+    if production.source_assets is None:
+        raise ValueError(f"production '{production.production_id}' has no source assets")
+    unit = next((entry for entry in production.units if entry.unit_id == unit_id), None)
+    if unit is None:
+        raise ValueError(f"unit '{unit_id}' is not part of production '{production.production_id}'")
+    asset = next((entry for entry in production.source_assets if entry.asset_id == asset_id), None)
+    if asset is None:
+        raise ValueError(f"source asset '{asset_id}' is not in production '{production.production_id}'")
+    lineage = SourceLineage(
+        unit_id=unit_id,
+        asset_id=asset_id,
+        source_segment_ids=list(source_segment_ids),
+        source_path=asset.stored_path,
+    )
+    if unit.source_lineage is not None and unit.source_lineage.asset_id != asset_id:
+        raise ValueError(f"unit '{unit_id}' already has lineage for a different source asset")
+    return lineage
+
+
+def _next_available_unit_id(production: "Production") -> str:
+    """Generate the next canonical unit id for the production without randomization."""
+    used = {unit.unit_id for unit in production.units}
+    for index in range(1, 10000):
+        candidate = f"unit-{index:03d}"
+        if candidate not in used:
+            return candidate
+    raise ValueError(f"production '{production.production_id}' has no available unit_id")
+
+
+def derive_production_unit_from_segment(
+    production: "Production",
+    source_asset: "SourceAsset",
+    source_segment: "SourceSegment",
+    *,
+    unit_id: Optional[str] = None,
+    title: Optional[str] = None,
+    premise: Optional[str] = None,
+    unit_type: str = "standalone_video",
+    ordinal: Optional[int] = None,
+    content_intent: Optional[Dict[str, Any]] = None,
+    provider_intent: Optional[str] = None,
+) -> "ProductionUnit":
+    """Create a canonical ProductionUnit derived from an operator-selected SourceSegment.
+
+    This is the model-level derivation seam. It validates explicit production/asset/
+    segment ownership, constructs a normal ProductionUnit, derives the canonical
+    SourceLineage, and returns the unit without creating a second execution model.
+    """
+    if not isinstance(production, Production):
+        raise TypeError("production must be a Production")
+    if not isinstance(source_asset, SourceAsset):
+        raise TypeError("source_asset must be a SourceAsset")
+    if not isinstance(source_segment, SourceSegment):
+        raise TypeError("source_segment must be a SourceSegment")
+
+    if production.source_assets is None:
+        raise ValueError(f"production '{production.production_id}' has no source assets")
+
+    asset = next(
+        (entry for entry in production.source_assets if entry.asset_id == source_asset.asset_id),
+        None,
+    )
+    if asset is None:
+        raise ValueError(
+            f"source asset '{source_asset.asset_id}' is not in production '{production.production_id}'"
+        )
+    if asset.asset_id != source_asset.asset_id:
+        raise ValueError(
+            f"source asset mismatch: production asset '{asset.asset_id}' != '{source_asset.asset_id}'"
+        )
+
+    if source_segment.asset_id != source_asset.asset_id:
+        raise ValueError(
+            "source segment asset_id must match the provided source asset: "
+            f"segment {source_segment.asset_id!r} vs asset {source_asset.asset_id!r}"
+        )
+
+    if source_segment.start_seconds < 0 or not math.isfinite(source_segment.start_seconds):
+        raise ValueError("source segment start_seconds must be finite and non-negative")
+    if source_segment.end_seconds <= source_segment.start_seconds:
+        raise ValueError("source segment end_seconds must be greater than start_seconds")
+    if not math.isfinite(source_segment.end_seconds):
+        raise ValueError("source segment end_seconds must be finite")
+    if source_segment.end_seconds > source_asset.duration:
+        raise ValueError(
+            "source segment extends beyond the source asset duration "
+            f"({source_segment.end_seconds} > {source_asset.duration})"
+        )
+
+    existing = next(
+        (
+            unit
+            for unit in production.units
+            if unit.source_lineage is not None
+            and unit.source_lineage.asset_id == source_asset.asset_id
+            and source_segment.segment_id in set(unit.source_lineage.source_segment_ids)
+        ),
+        None,
+    )
+    if existing is not None:
+        return existing
+
+    if unit_id is None:
+        unit_id = _next_available_unit_id(production)
+    if any(unit.unit_id == unit_id for unit in production.units):
+        raise ValueError(f"unit_id '{unit_id}' is already in use for production '{production.production_id}'")
+    if ordinal is None:
+        ordinal = max((unit.ordinal for unit in production.units), default=0) + 1
+
+    candidate = ProductionUnit(
+        unit_id=unit_id,
+        ordinal=ordinal,
+        unit_type=unit_type,
+        title=(title or source_segment.title or f"Derived from {source_asset.asset_id}"),
+        premise=(premise or source_segment.premise or f"Derived from {source_segment.segment_id}"),
+        content_intent=content_intent or {},
+        provider_intent=provider_intent,
+    )
+    candidate_units = [*production.units, candidate]
+    candidate_production = production.model_copy(update={"units": candidate_units})
+    lineage = derive_source_lineage(
+        candidate_production,
+        candidate.unit_id,
+        asset_id=source_asset.asset_id,
+        source_segment_ids=[source_segment.segment_id],
+    )
+    return candidate.model_copy(update={"source_lineage": lineage})
+
+
+class NarrationSourceRef(BaseModel):
+    """Source-grounded evidence used to justify a single narrated beat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str = Field(pattern=r"^src-\d{3}$")
+    start_seconds: float = Field(ge=0.0)
+    end_seconds: float = Field(gt=0.0)
+    transcript_segment_ids: List[int] = Field(default_factory=list)
+    source_segment_id: Optional[str] = Field(default=None, pattern=r"^seg-\d{3}$")
+    excerpt: Optional[str] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_ref(self) -> "NarrationSourceRef":
+        if not math.isfinite(self.start_seconds) or not math.isfinite(self.end_seconds):
+            raise ValueError("source reference timestamps must be finite")
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("source reference end_seconds must be greater than start_seconds")
+        return self
+
+
+class NarrativeBeat(BaseModel):
+    """One ordered narrative beat in the condensed narration plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order: int = Field(ge=1)
+    title: str = Field(min_length=1)
+    narration_text: str = Field(min_length=1)
+    summary: Optional[str] = Field(default=None, min_length=1)
+    source_refs: List[NarrationSourceRef] = Field(default_factory=list)
+    transcript_refs: List[str] = Field(default_factory=list)
+    source_segment_ids: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_beat(self) -> "NarrativeBeat":
+        if not self.source_refs:
+            raise ValueError("a narrative beat must include at least one grounded source reference")
+        for ref in self.source_refs:
+            if ref.asset_id is None:
+                raise ValueError("narrative beat source refs require asset_id")
+        return self
+
+
+class NarrationAudioArtifact(BaseModel):
+    """Persisted synthesized narration audio metadata for a grounded narration artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    narration_id: str = Field(pattern=r"^narr-[a-z0-9_-]+$")
+    production_id: str = Field(min_length=1)
+    unit_id: str = Field(min_length=1)
+    audio_path: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    voice: str = Field(min_length=1)
+    format: str = Field(min_length=1)
+    duration_seconds: float = Field(gt=0.0)
+    file_size: int = Field(ge=1)
+    sample_rate: Optional[int] = Field(default=None, ge=1)
+    channels: Optional[int] = Field(default=None, ge=1)
+    codec: Optional[str] = None
+    status: str = Field(default="completed")
+    generated_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_audio_path(self) -> "NarrationAudioArtifact":
+        if not _is_relative_path(self.audio_path):
+            raise ValueError("audio_path must be relative to the production root")
+        if self.status not in {"pending", "completed", "failed"}:
+            raise ValueError("audio status must be one of: pending, completed, failed")
+        return self
+
+
+class NarrationArtifact(BaseModel):
+    """Unit-scoped, source-grounded planned narration artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    narration_id: str = Field(pattern=r"^narr-[a-z0-9_-]+$")
+    production_id: str = Field(min_length=1)
+    unit_id: str = Field(min_length=1)
+    source_asset_id: str = Field(pattern=r"^src-\d{3}$")
+    target_duration_seconds: float = Field(gt=0.0)
+    status: str = Field(default="draft")
+    narration_text: str = Field(min_length=1)
+    summary: Optional[str] = Field(default=None, min_length=1)
+    beats: List[NarrativeBeat] = Field(default_factory=list)
+    source_refs: List[NarrationSourceRef] = Field(default_factory=list)
+    transcript_refs: List[str] = Field(default_factory=list)
+    generated_at: str = Field(min_length=1)
+    revised_at: Optional[str] = None
+    audio_artifact_path: Optional[str] = Field(default=None, min_length=1)
+    audio_duration_seconds: Optional[float] = Field(default=None, gt=0.0)
+    audio_provider: Optional[str] = None
+    audio_voice: Optional[str] = None
+    audio_format: Optional[str] = None
+    audio_status: Optional[str] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_artifact(self) -> "NarrationArtifact":
+        if self.status not in {"draft", "grounded", "approved", "rejected"}:
+            raise ValueError("status must be one of: draft, grounded, approved, rejected")
+        if self.audio_status is not None and self.audio_status not in {"pending", "completed", "failed"}:
+            raise ValueError("audio_status must be one of: pending, completed, failed")
+        if self.audio_artifact_path is not None and not _is_relative_path(self.audio_artifact_path):
+            raise ValueError("audio_artifact_path must be relative to the production root")
+        if not self.beats:
+            raise ValueError("a narration artifact requires at least one narrative beat")
+        if not self.source_refs:
+            raise ValueError("a narration artifact requires at least one grounded source reference")
+        orders = [beat.order for beat in self.beats]
+        if orders != sorted(orders):
+            raise ValueError("narrative beats must be ordered deterministically")
+        for beat in self.beats:
+            if not any(ref.asset_id == self.source_asset_id for ref in beat.source_refs):
+                raise ValueError(
+                    f"beat '{beat.title}' must reference the canonical source asset '{self.source_asset_id}'"
+                )
+        return self
 
 
 class PlanReference(BaseModel):
@@ -322,6 +748,7 @@ class ProductionUnit(BaseModel):
     )
     bible_refs: List[str] = Field(default_factory=list)
     dependencies: List[str] = Field(default_factory=list)
+    source_lineage: Optional["SourceLineage"] = Field(default=None)
     plan_reference: Optional[PlanReference] = None
 
     @model_validator(mode="after")
@@ -372,6 +799,10 @@ class Production(BaseModel):
     bible: Optional[ProductionBible] = Field(
         default=None, description="OPTIONAL shared creative context (A2)"
     )
+    audio_intent: Optional[str] = Field(
+        default=None,
+        description="Optional audio intent normalized to the canonical production vocabulary.",
+    )
     generation_strategy: str = Field(
         default=DEFAULT_GENERATION_STRATEGY,
         description=(
@@ -400,6 +831,8 @@ class Production(BaseModel):
         ),
     )
     units: List[ProductionUnit] = Field(min_length=1)
+    source_assets: Optional[List["SourceAsset"]] = Field(default=None)
+    source_lineage: Optional[List["SourceLineage"]] = Field(default=None)
     created_at: str = Field(min_length=1)
     revised_at: Optional[str] = None
     revision_notes: List[str] = Field(default_factory=list)
@@ -420,6 +853,9 @@ class Production(BaseModel):
                 + ", ".join(KNOWN_ROUTES)
                 + f" (got {self.route!r})"
             )
+
+        if self.audio_intent is not None:
+            self.audio_intent = normalize_audio_intent(self.audio_intent)
 
         # Generation strategy is an explicit user selection persisted with the
         # production intent; unknown values fail loudly (never rerouted).

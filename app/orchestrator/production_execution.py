@@ -14,17 +14,28 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.content.models import ContentBrief, ProductionPlan
 from app.content.planner import ScenePlanner, create_scene_planner
 from app.content.validator import validate_production_plan
+from app.assembly.audio_contract import AudioPolicy
 from app.orchestrator.models import (
     OrchestratorConfig,
     ProjectManifest,
+    RouteCompilationRecord,
     StageStatus,
 )
-from app.production.models import Production, ProductionUnit
+from app.production.models import (
+    AUDIO_INTENT_NATIVE,
+    AUDIO_INTENT_NATIVE_PLUS_NARRATION,
+    AUDIO_INTENT_NONE,
+    AUDIO_INTENT_NARRATION,
+    DEFAULT_AUDIO_INTENT,
+    Production,
+    ProductionUnit,
+    normalize_audio_intent,
+)
 from app.production.routes import (
     ROUTE_FULL_AI_VIDEO,
     ROUTE_GOOGLE_FLOW,
@@ -300,6 +311,12 @@ class RouteCompilation:
     configuration.  This record is evidence of what the route compiled into
     (identity, version, source, surface, legacy overlays) so a production
     stays explainable after execution.
+
+    G3 (V1 should-fix): this in-memory result is now also frozen into a
+    persisted evidence record — :meth:`to_record` — which the pipeline writes
+    once into ``ProjectManifest.route_compilation`` when it initializes the
+    unit's project.  Before that, the compiled decision existed ONLY in a log
+    line, so nothing durable explained which route Core had compiled.
     """
 
     route_id: str
@@ -310,6 +327,113 @@ class RouteCompilation:
     legacy_strategy: Optional[str]
     requires_native_motion: bool
     overlays_applied: Tuple[str, ...]
+
+    def to_record(self) -> RouteCompilationRecord:
+        """Freeze this compilation into the persisted evidence record.
+
+        Carries ONLY values that are already authoritative outputs of the
+        route-compilation seam:
+
+        - ``route_id`` / ``route_version`` (what compiled, against which
+          registry version);
+        - ``route_source`` (resolution precedence evidence: explicit route vs
+          legacy strategy), which is what keeps the COMPILED result
+          distinguishable from the user's INTENT;
+        - ``execution_surface`` (the surface the route compiled onto);
+        - ``legacy_strategy`` (the compatibility-bridge input actually used);
+        - ``overlays_applied`` (the execution-config KEYS the bridge mutated,
+          never their values).
+
+        Deliberately NOT carried: ``label`` (registry display text) and the
+        registry requirement booleans — both are fully derivable from
+        ``route_id`` + ``route_version`` and the requirements are not yet
+        enforced, so persisting them would overstate the evidence.  Provider,
+        model, media-source values, engine, audio, cost and accounting never
+        enter this record: route evidence is not provenance and not accounting.
+        """
+        return RouteCompilationRecord(
+            route_id=self.route_id,
+            route_version=self.route_version,
+            route_source=self.source,
+            execution_surface=self.execution_surface,
+            legacy_strategy=self.legacy_strategy,
+            overlays_applied=self.overlays_applied,
+        )
+
+
+# ---------------------------------------------------------------------------
+# V1 AUDIO POLICY FIX — production AUDIO INTENT -> effective audio policy
+# ---------------------------------------------------------------------------
+
+#: The ONE place the production-level intent vocabulary
+#: (``app.production.models.AUDIO_INTENTS``) meets the assembly-level policy
+#: vocabulary (``app.assembly.audio_contract.AudioPolicy``).  Total by
+#: construction, so no other module re-derives an audio decision.
+AUDIO_INTENT_TO_POLICY = {
+    AUDIO_INTENT_NARRATION: AudioPolicy.NARRATION_ONLY,
+    AUDIO_INTENT_NATIVE: AudioPolicy.NATIVE_ONLY,
+    AUDIO_INTENT_NATIVE_PLUS_NARRATION: AudioPolicy.NATIVE_PLUS_NARRATION,
+    AUDIO_INTENT_NONE: AudioPolicy.NONE,
+}
+
+#: How the effective intent was established (evidence, never inference).
+AUDIO_SOURCE_EXPLICIT = "explicit_audio_intent"
+AUDIO_SOURCE_DEFAULT = "backward_compatible_default"
+
+
+@dataclass(frozen=True)
+class AudioCompilation:
+    """The compiled audio decision for one unit's execution.
+
+    ``intent`` is the EFFECTIVE intent (always one of ``AUDIO_INTENTS``);
+    ``declared`` is the raw persisted value (``None`` when the production did
+    not declare one); ``source`` keeps an explicit choice distinguishable from
+    the backward-compatible default in durable evidence.
+    """
+
+    intent: str
+    policy: AudioPolicy
+    source: str
+    declared: Optional[str]
+
+
+def compile_audio_policy(production: Production) -> AudioCompilation:
+    """Compile the production's AUDIO INTENT into its effective audio policy.
+
+    Deterministic and total.  Deliberately NOT derived from:
+
+    - ``Scene.narration`` text — a plan may carry narration/script text for
+      storyboarding, dialogue, or captions without TTS being required.  The
+      mere existence of narration text NEVER triggers narrator generation.
+    - the Production Route — ROUTE ≠ AUDIO.  There is no ``if route ==
+      full_ai_video: use native audio`` style hack anywhere in AVM.
+    - a provider or model NAME — whether native audio actually exists is a
+      MEDIA FACT established from the real artifact (``AudioMediaFacts`` /
+      ``has_native_audio`` / ``is_synthetic``) inside assembly.  An unknown
+      capability stays unknown; it is never fabricated, and "native audio
+      unavailable" is NEVER read as "therefore generate narration".
+
+    An undeclared intent (``None`` — a historical production, or a creation
+    request from a client that does not send the field yet) resolves to the
+    documented backward-compatible default (``DEFAULT_AUDIO_INTENT``) and is
+    recorded as such, so evidence always distinguishes EXPLICIT from ASSUMED.
+    An unknown declared value fails loudly (``normalize_audio_intent``).
+    """
+    declared = production.audio_intent
+    normalized_declared = (
+        str(declared).strip().lower() if declared and str(declared).strip() else None
+    )
+    intent = normalize_audio_intent(normalized_declared)
+    return AudioCompilation(
+        intent=intent,
+        policy=AUDIO_INTENT_TO_POLICY[intent],
+        source=(
+            AUDIO_SOURCE_EXPLICIT
+            if normalized_declared
+            else AUDIO_SOURCE_DEFAULT
+        ),
+        declared=normalized_declared,
+    )
 
 
 def apply_production_route(
@@ -389,6 +513,42 @@ def apply_production_route(
     )
 
 
+def _planner_evidence_blocks(result) -> Dict[str, Any]:
+    """Step 6: project one AI Brain result onto the EXISTING evidence authority.
+
+    Returns the additive ``plan_meta.json`` keys ``planner_provenance`` and
+    ``planner_accounting``, or an empty dict when no LLM provider produced this
+    plan (so nothing is recorded for a non-execution).
+
+    This is NOT a second evidence system: the projection lives in
+    ``app.orchestrator.planner_evidence`` and reuses the video engine's
+    authoritative ``build_operation_accounting`` /
+    ``summarize_accounting_attempts`` plus the established provenance key
+    vocabulary. The only additive concept is ``canonical_model_id``.
+
+    The import is lazy for exactly the reason this module already imports
+    ``pipeline`` and ``reconciliation`` lazily: it keeps the orchestrator
+    package import cycle-free.
+    """
+    if not result.provider:
+        return {}
+    from app.orchestrator.planner_evidence import (
+        build_planner_accounting,
+        build_planner_provenance,
+    )
+
+    identity = dict(
+        canonical_model_id=result.canonical_model_id,
+        provider=result.provider,
+        model=result.model,
+        verification=result.verification,
+    )
+    return {
+        "planner_provenance": build_planner_provenance(**identity),
+        "planner_accounting": build_planner_accounting(**identity),
+    }
+
+
 class ProductionExecutor:
     """Re-entrant production-level composer around the existing engine."""
 
@@ -418,6 +578,47 @@ class ProductionExecutor:
 
     def _default_planner(self) -> ScenePlanner:
         return create_scene_planner(mock_mode=self.base_config.mock_mode)
+
+    def _planner_for(self, production: Production) -> ScenePlanner:
+        """Step 8: pick the planner from durable Production intent.
+
+        ONE narrow seam between the model-centric AI Brain and the existing
+        plan-backed execution path.  Precedence is fixed and total:
+
+        1. ``mock_mode`` always wins - the offline fixture planner stays
+           authoritative and a mock run is never attributed to a real
+           provider/model, so no canonical resolution happens at all.
+        2. An already-pinned/reusable unit plan never reaches this method:
+           ``resolve_plan`` returns the recorded artifacts before planner
+           selection, so plan authority is untouched.
+        3. An explicitly declared ``canonical_model_id`` activates the
+           model-bound resolver.  The lookup stays strictly inside that
+           canonical model (registry-declared bindings only); resolver
+           exceptions propagate truthfully and are never converted into a
+           provider-first default.
+        4. An absent/null/empty/whitespace id keeps the existing
+           provider-first factory exactly as before - no canonical default
+           is invented.
+
+        Imports are local on purpose: the AI Brain modules stay out of this
+        module's import graph until a production actually declares a model.
+        """
+        if self.base_config.mock_mode:
+            return self._planner_factory()
+
+        declared = production.command.explicit_constraints.get("canonical_model_id")
+        if not isinstance(declared, str) or not declared.strip():
+            return self._planner_factory()
+
+        from app.content.model_resolver import resolve_model
+        from app.content.planner import planner_from_resolved_model
+
+        return planner_from_resolved_model(
+            resolve_model(
+                declared.strip(),
+                try_next_on_failure=True,
+            )
+        )
 
     def load(self) -> Production:
         return load_production(self.production_id, root=self.productions_root)
@@ -571,7 +772,7 @@ class ProductionExecutor:
             constraints = resolve_planning_constraints_for_production(production)
         if constraints is not None:
             brief = brief.model_copy(update={"planning_constraints": constraints})
-        result = self._planner_factory().plan(brief)
+        result = self._planner_for(production).plan(brief)
         if not result.success or result.plan is None:
             raise RuntimeError(result.error or f"plan generation failed for {unit.unit_id}")
         validation = validate_production_plan(result.plan, brief)
@@ -599,6 +800,22 @@ class ProductionExecutor:
             # warnings (e.g. the duration-preserving scene-duration schema
             # normalization). Additive provenance; never execution state.
             "planner_warnings": list(result.warnings or []),
+            # Step 6 (additive): model-centric AI Brain execution evidence,
+            # projected onto the ESTABLISHED provenance/accounting vocabulary
+            # (the same keys the video engine's build_scene_provenance /
+            # build_scene_accounting own) plus the one additive
+            # ``canonical_model_id``. This is the SAME evidence chain, not a
+            # second authority: the flat planner_provider/planner_model fields
+            # above keep their existing meaning (provider wire identity) and
+            # are never renamed or reinterpreted.
+            #
+            # Recorded only when an LLM provider actually produced this plan.
+            # ``canonical_model_id`` stays None (UNKNOWN) on the legacy
+            # provider-first path, for mock and for local execution, and is
+            # never inferred from the provider model id. Absent request_id,
+            # usage and cost stay unknown — never zero-filled, never invented.
+            **_planner_evidence_blocks(result),
+
             # Batch 1E: generic capability-aware planning evidence — recorded
             # ONLY when constraints were actually applied.  Generic shape;
             # never provider/model identity; never execution state.
@@ -1062,6 +1279,17 @@ class ProductionExecutor:
         compilation = apply_production_route(
             config, effective_route=effective, plan=artifacts.plan
         )
+        # G3 (V1 should-fix): persist the compiled-route decision as
+        # first-class execution evidence.  The record rides on the config as a
+        # ONE-WAY carrier and is captured once by the pipeline when it
+        # initializes this unit's project
+        # (ProjectManifest.route_compilation -> manifest.json).  It records
+        # only the route Core compiled (identity, registry version, resolution
+        # source, execution surface, legacy overlay keys) — never a
+        # provider/model, media-source value, engine, audio or accounting fact,
+        # and it never touches the persisted production intent.  Resume does
+        # not rewrite an existing record.
+        config.route_compilation = compilation.to_record()
         logger.info(
             "Route compiled: %s (v%s, %s; source=%s; surface=%s%s)",
             compilation.route_id,
@@ -1072,6 +1300,27 @@ class ProductionExecutor:
             f"; overlays={list(compilation.overlays_applied)}"
             if compilation.overlays_applied
             else "",
+        )
+        # V1 AUDIO POLICY FIX: compile the production's explicit AUDIO INTENT
+        # into the effective execution policy at THIS seam.  It is deliberately
+        # separate from route compilation (ROUTE ≠ AUDIO — ``apply_production_route``
+        # reads and writes no audio policy), and it is never re-derived later
+        # from ``Scene.narration`` text, a provider name, or media facts.
+        #
+        # ``config.audio_policy`` is what the pipeline consults to decide
+        # whether the VOICE/TTS stage runs at all, and what assembly maps into
+        # the final artifact.  ``config.audio_intent`` (+ its source) is the
+        # requested-intent evidence persisted into the assembly config snapshot.
+        audio = compile_audio_policy(production)
+        config.audio_intent = audio.intent
+        config.audio_intent_source = audio.source
+        config.audio_policy = audio.policy
+        logger.info(
+            "Audio compiled: intent=%s policy=%s source=%s declared=%s",
+            audio.intent,
+            audio.policy.value,
+            audio.source,
+            audio.declared or "not_declared",
         )
         routes_to_flow = config.visual_mode == "google_flow" or (
             config.visual_mode == "hybrid"
@@ -1145,6 +1394,10 @@ class ProductionExecutor:
 
 
 __all__ = [
+    "AUDIO_INTENT_TO_POLICY",
+    "AUDIO_SOURCE_DEFAULT",
+    "AUDIO_SOURCE_EXPLICIT",
+    "AudioCompilation",
     "BoundProject",
     "ProductionExecutionReport",
     "ProductionExecutor",
@@ -1154,6 +1407,7 @@ __all__ = [
     "UnitProgress",
     "apply_generation_strategy",
     "apply_production_route",
+    "compile_audio_policy",
     "translate_provider_intent",
     "unit_to_content_brief",
 ]

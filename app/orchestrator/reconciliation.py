@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, TypeVar
 
 from app.content.models import ProductionPlan
 from app.content.validator import validate_production_plan
@@ -27,6 +27,11 @@ from app.orchestrator.models import (
     StageStatus,
 )
 from app.voice.validator import validate_audio_file
+from app.assembly.audio_contract import (
+    AudioPolicy,
+    audio_policy_requires_narration,
+    normalize_audio_policy,
+)
 from app.assembly.ffmpeg import check_ffprobe_available, probe_media
 from app.config import PROJECT_ROOT
 
@@ -170,6 +175,210 @@ def _path(project_dir: Path, value: Optional[str]) -> Optional[Path]:
     return PROJECT_ROOT / path
 
 
+def _effective_audio_policy(manifest: ProjectManifest) -> AudioPolicy:
+    """The persisted effective audio policy for this project.
+
+    Read from the ``assembly_config`` snapshot the pipeline wrote (authoritative
+    on resume).  A legacy manifest with no snapshot resolves through
+    ``normalize_audio_policy`` to the historical ``narration_only`` default, so
+    pre-existing projects keep their verified narrated behavior.
+    """
+    return normalize_audio_policy((manifest.assembly_config or {}).get("audio_policy"))
+
+
+def _narration_required(manifest: ProjectManifest) -> bool:
+    """Whether this project's effective policy requires narrator/TTS audio.
+
+    V1 AUDIO POLICY FIX: narration is required by the compiled audio policy —
+    never by the presence of ``Scene.narration`` text in the plan.
+    """
+    return audio_policy_requires_narration(_effective_audio_policy(manifest))
+
+
+#: Synthetic-identity states for one scene's recorded audio, as distinguished by
+#: ``scene_audio_provenance``.  ``ABSENT`` means no audio evidence exists at all;
+#: ``UNKNOWN`` means an audio stream WAS recorded but its synthetic identity was
+#: never established.  Those are different answers and are never collapsed.
+AUDIO_PROVENANCE_NATIVE = "native"
+AUDIO_PROVENANCE_SYNTHETIC = "synthetic"
+AUDIO_PROVENANCE_UNKNOWN = "unknown"
+AUDIO_PROVENANCE_ABSENT = "absent"
+
+
+def _declared_scene_audio_facts(
+    checkpoint: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Audio facts a provider/execution seam DECLARED, or None.
+
+    Only ``checkpoint["audio_facts"]`` counts as declared: it is written by the
+    completion seam from ``SceneGenerationResult.audio_facts``, i.e. from the
+    provider's own statement about the stream it produced.  The copy inside
+    ``checkpoint["validation"]["audio_facts"]`` is a bare FFprobe description
+    built through ``AudioMediaFacts``, whose ``is_synthetic`` field defaults to
+    ``False``; treating that default as an established fact would turn an
+    unattributed silent stream into claimed genuine native audio.
+    """
+    declared = checkpoint.get("audio_facts")
+    return declared if isinstance(declared, dict) else None
+
+
+def scene_audio_provenance(manifest: ProjectManifest) -> Dict[str, str]:
+    """Per-scene synthetic identity exactly as persisted. Never inferred.
+
+    ``scene_id -> state`` where state is one of:
+
+    - ``native``: the provider declared audio it produced is not synthetic;
+    - ``synthetic``: the provider declared the stream is synthetic (for example
+      ImageMotion's required silent AAC topology track);
+    - ``unknown``: an audio stream was recorded, but no provider declaration
+      established its synthetic identity — the usual shape of historical
+      checkpoints, which stay uncertain instead of being backfilled;
+    - ``absent``: no audio evidence for the scene at all.
+
+    This is a read-only discriminator over evidence the execution seams already
+    wrote.  It never probes media, never defaults a missing marker, and never
+    derives anything from a provider or model name, a codec, or plan text.
+    """
+    provenance: Dict[str, str] = {}
+    for scene_id, checkpoint in (manifest.scene_checkpoints or {}).items():
+        if not isinstance(checkpoint, dict):
+            continue
+        declared = _declared_scene_audio_facts(checkpoint)
+        facts = declared
+        if facts is None:
+            validation = checkpoint.get("validation")
+            candidate = (
+                validation.get("audio_facts") if isinstance(validation, dict) else None
+            )
+            facts = candidate if isinstance(candidate, dict) else None
+
+        if facts is None or not bool(facts.get("has_audio")):
+            # No recorded audio evidence for this scene at all.
+            provenance[str(scene_id)] = AUDIO_PROVENANCE_ABSENT
+            continue
+        if declared is None:
+            # An audio stream was recorded, but only through an unattributed
+            # probe: its synthetic identity was never established.
+            provenance[str(scene_id)] = AUDIO_PROVENANCE_UNKNOWN
+            continue
+        marker = declared.get("is_synthetic")
+        if not isinstance(marker, bool):
+            provenance[str(scene_id)] = AUDIO_PROVENANCE_UNKNOWN
+        elif marker:
+            provenance[str(scene_id)] = AUDIO_PROVENANCE_SYNTHETIC
+        else:
+            provenance[str(scene_id)] = AUDIO_PROVENANCE_NATIVE
+    return provenance
+
+
+def summarize_audio_provenance(provenance: Mapping[str, str]) -> Dict[str, Any]:
+    """Group scene ids by synthetic identity, plus one aggregate label.
+
+    The aggregate prefers an established answer, then reports ``mixed``,
+    ``unknown`` and ``absent`` distinctly, so a caller can tell "we know it is
+    silence" apart from "we were never told".
+    """
+    grouped: Dict[str, List[str]] = {
+        AUDIO_PROVENANCE_NATIVE: [],
+        AUDIO_PROVENANCE_SYNTHETIC: [],
+        AUDIO_PROVENANCE_UNKNOWN: [],
+        AUDIO_PROVENANCE_ABSENT: [],
+    }
+    for scene_id, state in (provenance or {}).items():
+        grouped.setdefault(state, []).append(str(scene_id))
+    for ids in grouped.values():
+        ids.sort()
+
+    established = bool(grouped[AUDIO_PROVENANCE_NATIVE])
+    synthetic = bool(grouped[AUDIO_PROVENANCE_SYNTHETIC])
+    uncertain = bool(grouped[AUDIO_PROVENANCE_UNKNOWN])
+    if established and synthetic:
+        aggregate = "mixed"
+    elif established:
+        aggregate = AUDIO_PROVENANCE_NATIVE
+    elif synthetic and uncertain:
+        aggregate = AUDIO_PROVENANCE_UNKNOWN
+    elif synthetic:
+        aggregate = AUDIO_PROVENANCE_SYNTHETIC
+    elif uncertain:
+        aggregate = AUDIO_PROVENANCE_UNKNOWN
+    else:
+        aggregate = AUDIO_PROVENANCE_ABSENT
+
+    return {
+        "scenes_by_state": grouped,
+        "aggregate": aggregate,
+        "established_native": grouped[AUDIO_PROVENANCE_NATIVE],
+        "established_synthetic": grouped[AUDIO_PROVENANCE_SYNTHETIC],
+        "unverified": grouped[AUDIO_PROVENANCE_UNKNOWN],
+    }
+
+
+def native_audio_observed(manifest: ProjectManifest) -> bool:
+    """Public read-only accessor for the persisted native-audio evidence.
+
+    AUDIO PREVIEW reuses this single implementation instead of re-deriving
+    native-audio truth elsewhere; the leading-underscore name stays the
+    internal one used by reconciliation itself, so behavior is unchanged.
+    """
+    return _native_audio_observed(manifest)
+
+
+def _native_audio_observed(manifest: ProjectManifest) -> bool:
+    """Whether any scene's RECORDED media facts establish valid native audio.
+
+    Reads only evidence the scene stage already persisted (``audio_facts`` on the
+    operational checkpoint, or inside its validation block).  Synthetic topology
+    silence is explicitly NOT native audio (``is_synthetic``), and absence of
+    evidence stays absence — it is never assumed from a provider or model name.
+    """
+    for checkpoint in (manifest.scene_checkpoints or {}).values():
+        if not isinstance(checkpoint, dict):
+            continue
+        facts = checkpoint.get("audio_facts")
+        if not isinstance(facts, dict):
+            validation = checkpoint.get("validation")
+            facts = (
+                validation.get("audio_facts") if isinstance(validation, dict) else None
+            )
+        if not isinstance(facts, dict):
+            continue
+        if bool(facts.get("has_audio")) and not bool(facts.get("is_synthetic")):
+            return True
+    return False
+
+
+def final_audio_required(manifest: ProjectManifest) -> bool:
+    """Public read-only view of the policy-derived final-audio requirement.
+
+    The AUDIO PREVIEW surface needs this when it must fall back to persisted
+    acceptance facts instead of a live probe.  It reuses the SINGLE existing
+    derivation (effective policy + observed native evidence) rather than
+    restating it, so a read can never disagree with what acceptance enforced.
+    """
+    return _final_audio_required(manifest)
+
+
+def _final_audio_required(manifest: ProjectManifest) -> bool:
+    """Whether the final artifact is REQUIRED to carry an audio stream.
+
+    Policy-derived, so an intentional silence is never reported as a defect:
+
+    - ``none``                 -> no audio stream is required (explicit silence);
+    - ``native_only``          -> required only when the real scene media
+      actually established native audio; with no native audio, SILENCE is the
+      correct result (a narrator/TTS fallback is forbidden by intent);
+    - ``narration_only`` /
+      ``native_plus_narration``-> an audio stream is required.
+    """
+    policy = _effective_audio_policy(manifest)
+    if policy == AudioPolicy.NONE:
+        return False
+    if policy == AudioPolicy.NATIVE_ONLY:
+        return _native_audio_observed(manifest)
+    return True
+
+
 def _content_evidence(manifest: ProjectManifest, project_dir: Path) -> Dict[str, Any]:
     path = _path(project_dir, manifest.content_plan_path)
     result: Dict[str, Any] = {"status": ArtifactStatus.MISSING.value, "path": str(path) if path else None}
@@ -201,6 +410,23 @@ def _voice_evidence(manifest: ProjectManifest, project_dir: Path, scene_count: i
         "path": str(audio_path) if audio_path else None,
         "timing_path": str(timing_path) if timing_path else None,
     }
+    if not _narration_required(manifest):
+        # V1 AUDIO POLICY FIX: the effective audio policy (compiled from the
+        # production's explicit audio intent) does not require narrator/TTS
+        # audio, so its absence is NOT a defect and must never be reported as
+        # MISSING — that would strand a correctly silent production in
+        # perpetual reconciliation.  Truthful NOT_REQUIRED, short-circuited
+        # BEFORE any file probe: a leftover narrator artifact from an earlier,
+        # differently configured run is never promoted into evidence that this
+        # project required narration.
+        result.update({
+            "status": ArtifactStatus.NOT_REQUIRED.value,
+            "audio_policy": _effective_audio_policy(manifest).value,
+            "reason": (
+                "effective audio policy does not require narrator/TTS audio"
+            ),
+        })
+        return result
     if not audio_path or not audio_path.exists() or not timing_path or not timing_path.exists():
         return result
     audio = validate_audio_file(audio_path)
@@ -308,6 +534,18 @@ def _scene_evidence(manifest: ProjectManifest, project_dir: Path, plan: Optional
     }
 
 
+def final_media_evidence(manifest: ProjectManifest, project_dir: Path) -> Dict[str, Any]:
+    """Public read-only view of the FINAL assembled media artifact evidence.
+
+    This is the existing authoritative final-media inspection seam (one
+    FFprobe pass over the accepted artifact plus the policy-derived audio
+    requirement).  The AUDIO PREVIEW surface reuses it verbatim rather than
+    re-implementing media inspection; nothing here probes, repairs, generates,
+    or persists anything.
+    """
+    return _assembly_evidence(manifest, project_dir)
+
+
 def _assembly_evidence(manifest: ProjectManifest, project_dir: Path) -> Dict[str, Any]:
     path = _path(project_dir, manifest.final_video_path)
     expected_width = int(manifest.assembly_config.get("resolution_width", 1080))
@@ -321,9 +559,14 @@ def _assembly_evidence(manifest: ProjectManifest, project_dir: Path) -> Dict[str
     try:
         info = probe_media(path)
         errors = []
+        # V1 AUDIO POLICY FIX: whether an audio stream is REQUIRED is a policy
+        # fact, not a constant.  An intentionally silent final artifact
+        # (audio intent ``none``, or ``native`` with no native audio in the
+        # real scene media) is CORRECT and must not be reported invalid.
+        audio_required = _final_audio_required(manifest)
         if not info.has_video:
             errors.append("no video stream")
-        if not info.has_audio:
+        if audio_required and not info.has_audio:
             errors.append("no audio stream")
         if info.duration <= 0:
             errors.append("duration is not positive")
@@ -341,6 +584,23 @@ def _assembly_evidence(manifest: ProjectManifest, project_dir: Path) -> Dict[str
             "audio_codec": info.audio_codec,
             "has_video": info.has_video,
             "has_audio": info.has_audio,
+            # Policy-derived expectation, persisted so the audio decision stays
+            # auditable from evidence alone (an absent stream is only a defect
+            # when the effective policy required one).
+            "audio_required": audio_required,
+            "audio_policy": _effective_audio_policy(manifest).value,
+            # AUDIO PREVIEW (additive, zero new inspection): the remaining
+            # stream facts of the FIRST audio stream come from the SAME
+            # ffprobe call already made above.  They are recorded here so the
+            # read-only audio evidence surface never has to re-probe or guess.
+            # Nothing is invented: unprobed values stay null, and the reads are
+            # deliberately tolerant (``getattr``) so a probe result that simply
+            # does not carry an optional fact can never invalidate otherwise
+            # correct final-media evidence.
+            "audio_stream_count": getattr(info, "audio_stream_count", None),
+            "audio_sample_rate": getattr(info, "sample_rate", None),
+            "audio_channels": getattr(info, "channels", None),
+            "audio_stream_duration": getattr(info, "audio_duration", None),
             "errors": errors,
         }
         evidence.update({"status": ArtifactStatus.VALID.value if not errors else ArtifactStatus.INVALID.value, "validation": validation})
@@ -445,7 +705,14 @@ def reconcile_project(
         plan = ProductionPlan.model_validate(json.loads(Path(content["path"]).read_text(encoding="utf-8")))
     voice = _voice_evidence(manifest, project_dir, len(plan.scenes) if plan else 0)
     scenes = _scene_evidence(manifest, project_dir, plan)
-    captions_required = bool(manifest.assembly_config.get("enable_captions", True))
+    # V1 AUDIO POLICY FIX: in V1 captions are NARRATOR captions derived from
+    # voice timing.  When the effective audio policy does not require narration
+    # there is no timing to derive them from, so they are NOT REQUIRED (the
+    # captions stage records SKIPPED) and the production can still complete.
+    # This never weakens the requirement for a narrated production.
+    captions_required = bool(
+        manifest.assembly_config.get("enable_captions", True)
+    ) and _narration_required(manifest)
     caption_path = _path(project_dir, manifest.captions_path)
     if not captions_required:
         captions = {"status": ArtifactStatus.NOT_REQUIRED.value, "path": str(caption_path) if caption_path else None}
@@ -457,7 +724,14 @@ def reconcile_project(
     assembly = _assembly_evidence(manifest, project_dir)
     required_ok = (
         content.get("status") == ArtifactStatus.VALID.value
-        and voice.get("status") == ArtifactStatus.VALID.value
+        # V1 AUDIO POLICY FIX: narrator audio is required only when the
+        # effective audio policy requires narration.  A production whose intent
+        # is ``native`` or ``none`` completes with voice NOT_REQUIRED — it is
+        # never forced back into TTS by the acceptance oracle.
+        and voice.get("status") in {
+            ArtifactStatus.VALID.value,
+            ArtifactStatus.NOT_REQUIRED.value,
+        }
         and scenes.get("status") == ArtifactStatus.VALID.value
         and captions.get("status") in {ArtifactStatus.VALID.value, ArtifactStatus.NOT_REQUIRED.value}
         and assembly.get("status") == ArtifactStatus.VALID.value

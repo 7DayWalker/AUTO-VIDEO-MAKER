@@ -515,6 +515,44 @@ def build_scene_accounting(
     return accounting
 
 
+def preserve_checkpoint_evidence(
+    checkpoint: Optional[Mapping[str, Any]],
+    prior_entry: Any = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Return the provenance/accounting that a replacing write must keep.
+
+    ``SceneManifest.add_scene()`` REPLACES a scene entry, so any checkpoint
+    writer that derives a manifest entry from an operational checkpoint has to
+    pass the already-captured evidence through explicitly, or a mere lifecycle
+    transition (``generation_submitted`` / ``generating`` / ``completed`` ->
+    ``failed``) silently deletes it.
+
+    Resolution order (first present wins):
+
+    1. evidence on the accumulated operational checkpoint - either retained
+       from this scene's own previous :func:`completion_checkpoint_update`,
+       or fresher evidence a provider reported in this very update;
+    2. evidence already persisted on the scene-manifest entry being replaced;
+    3. ``{}`` - genuinely unknown, and it stays unknown.
+
+    This is pure preservation. It reads only fields the evidence seam itself
+    wrote, never the routing map, ``scene_config``, or a configured model, so
+    it cannot promote a CONFIGURED value to ACTUAL and cannot backfill a
+    legacy record.
+    """
+    current = checkpoint or {}
+    prior_provenance = getattr(prior_entry, "provenance", None)
+    prior_accounting = getattr(prior_entry, "accounting", None)
+    return {
+        "provenance": (
+            current.get("provenance") or prior_provenance or {}
+        ),
+        "accounting": (
+            current.get("accounting") or prior_accounting or {}
+        ),
+    }
+
+
 def completion_checkpoint_update(
     *,
     result: SceneGenerationResult,

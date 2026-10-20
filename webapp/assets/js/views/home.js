@@ -13,10 +13,10 @@
      from create.js with mode "single_video".
 
    UI ART POLICY: files under webapp/assets/img/ui/ are designed
-   interface assets (ui-*.svg). They are decorative product art —
-   never production output, never bound to a production/project
-   id, never served from a media endpoint. Every usage carries
-   data-ui-art="true".
+   interface assets (ui-*.svg, including the -warm projector-tone
+   variants). They are decorative product art — never production
+   output, never bound to a production/project id, never served
+   from a media endpoint. Every usage carries data-ui-art="true".
    ============================================================ */
 window.VIEWS = window.VIEWS || {};
 
@@ -44,6 +44,33 @@ VIEWS.home = (function () {
     free:   { duration: 30, outputIntent: "youtube_shorts", strategy: "local" }
   };
 
+  /* Inspirational example ideas — static product copy, NEVER production
+     records. Used by the rotating placeholder and the "Try" chips. */
+  var IDEAS = [
+    "A cyberpunk chase through Tokyo, told in one vertical minute",
+    "The founder's story behind a small coffee roastery",
+    "A fantasy trailer: the last dragon wakes beneath the mountain",
+    "How deep-sea creatures survive crushing pressure",
+    "A rainy-night neo-noir detective phone call"
+  ];
+  var rotateTimer = null;
+  var rotationIndex = 0;
+
+  /* Rotating placeholder — presentation only. It writes the placeholder
+     ATTRIBUTE, never the textarea value; it pauses while the composer holds
+     user text or focus; it never starts at all under prefers-reduced-motion
+     (the static first idea stays). Self-cleans when the view unmounts. */
+  function startRotation() {
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    rotateTimer = setInterval(function () {
+      var ta = document.getElementById("home-brief");
+      if (!ta) { clearInterval(rotateTimer); rotateTimer = null; return; }
+      if (ta.value.trim() || document.activeElement === ta) return;
+      rotationIndex = (rotationIndex + 1) % IDEAS.length;
+      ta.setAttribute("placeholder", IDEAS[rotationIndex]);
+    }, 4200);
+  }
+
   function uiArt(file, alt, cls) {
     return '<img class="' + (cls || "") + '" data-ui-art="true" src="' + ART + file +
       '" alt="' + C.esc(alt || "") + '" loading="lazy" draggable="false">';
@@ -60,7 +87,7 @@ VIEWS.home = (function () {
   function ambient() {
     return '<div class="home-ambient" aria-hidden="true">' +
       '<div class="amb-aurora amb-a1"></div><div class="amb-aurora amb-a2"></div>' +
-      '<img class="amb-art" data-ui-art="true" src="' + ART + 'ui-stage-hero.svg" alt="">' +
+      '<img class="amb-art" data-ui-art="true" src="' + ART + 'ui-stage-hero-warm.svg" alt="">' +
       "</div>";
   }
 
@@ -83,14 +110,14 @@ VIEWS.home = (function () {
     }
     var capCards =
       '<article class="spot-card cap"><button type="button" class="spot-inner" data-home="focus-prompt">' +
-        '<span class="spot-media">' + uiArt("ui-spot-create.svg", "", "spot-art") + '</span>' +
+        '<span class="spot-media">' + uiArt("ui-spot-create-warm.svg", "", "spot-art") + '</span>' +
         '<span class="spot-body"><span class="spot-title">Start your next film</span>' +
         '<span class="spot-sub">Describe it below — planning, sourcing, and rendering stay local-first.</span></span>' +
       "</button></article>" +
-      '<a class="spot-card cap" href="#/create"><div class="spot-media">' + uiArt("ui-spot-paths.svg", "", "spot-art") + '</div>' +
+      '<a class="spot-card cap" href="#/create"><div class="spot-media">' + uiArt("ui-spot-paths-warm.svg", "", "spot-art") + '</div>' +
         '<div class="spot-body"><div class="spot-title">Three production paths</div>' +
         '<div class="spot-sub">Local &amp; free, or Alibaba imagery / motion-video. You approve every command.</div></div></a>' +
-      '<a class="spot-card cap" href="#/platforms"><div class="spot-media">' + uiArt("ui-spot-publish.svg", "", "spot-art") + '</div>' +
+      '<a class="spot-card cap" href="#/platforms"><div class="spot-media">' + uiArt("ui-spot-publish-warm.svg", "", "spot-art") + '</div>' +
         '<div class="spot-body"><div class="spot-title">Publish when you decide</div>' +
         '<div class="spot-sub">YouTube &amp; TikTok · ' + C.esc(String(connectedCount)) + " connected. Publishing is always explicit.</div></div></a>";
     return '<section class="home-sec spot-sec" aria-label="Studio spotlight"><div class="rail-wrap"><div class="rail">' +
@@ -126,11 +153,11 @@ VIEWS.home = (function () {
       '<div class="hero-chips">' + engineChip +
         '<span class="hero-chip">Local-first studio</span>' +
         '<span class="hero-chip">You approve every command</span></div>' +
-      '<h1 class="hero-title">Turn one idea into a finished&nbsp;film.</h1>' +
+      '<h1 class="hero-title">Turn one idea into a<br /><em class="hero-em">finished film.</em></h1>' +
       '<p class="hero-deck">AVM plans the story, sources real imagery, renders the video, and publishes only when you say so — every step confirmed by you.</p>' +
       '<form class="pi" id="home-prompt" autocomplete="off">' +
         '<label class="sr-only" for="home-brief">Describe your video</label>' +
-        '<textarea id="home-brief" maxlength="500" rows="3" placeholder="Describe your film — what should it show, explain, or make people feel?">' + C.esc(d.brief) + "</textarea>" +
+        '<textarea id="home-brief" maxlength="500" rows="3" placeholder="' + C.esc(IDEAS[0]) + '">' + C.esc(d.brief) + "</textarea>" +
         '<div class="pi-toolbar">' + pills +
           '<button type="submit" class="pi-send" aria-label="Continue to Create Video" title="Continue to Create Video">' + ICONS.send + "</button>" +
         "</div>" +
@@ -146,7 +173,30 @@ VIEWS.home = (function () {
         '<a class="shortcut-chip" href="#/assets">' + ICONS.layers + "Browse asset library</a>" +
         '<a class="shortcut-chip" href="#/productions">' + ICONS.resume + "Resume attention</a>" +
       "</div>" +
+      tryRow() +
+      pipeline() +
       "</section>";
+  }
+
+  /* --- Inspirational "Try" ideas: populate the composer ONLY. They never
+     submit and never create anything — clearly labelled examples. -------- */
+  function tryRow() {
+    return '<div class="try-row" aria-label="Example ideas">' +
+      '<span class="try-label">Try</span>' +
+      IDEAS.slice(0, 3).map(function (idea) {
+        return '<button type="button" class="idea-chip" data-idea="' + C.esc(idea) + '">' + C.esc(idea) + "</button>";
+      }).join("") +
+      "</div>";
+  }
+
+  /* --- Explanatory pipeline strip: product language, never live state. --- */
+  function pipeline() {
+    var steps = ["Idea", "Story", "Scenes", "Audio", "Assembly", "Finished film"];
+    return '<div class="pipeline">' +
+      steps.map(function (s) {
+        return '<span class="pipeline-step">' + C.esc(s) + "</span>";
+      }).join('<span class="pipeline-arrow" aria-hidden="true">&rarr;</span>') +
+      "</div>";
   }
 
   /* --- Z4 production shapes ------------------------------------------- */
@@ -160,13 +210,13 @@ VIEWS.home = (function () {
     return '<section class="home-sec reveal" aria-label="Ways to produce">' +
       secHead("The studio", "Three ways to produce") +
       '<div class="mode-grid">' +
-      card("ui-mode-single.svg", "Single Film", "ok", "Live",
+      card("ui-mode-single-warm.svg", "Single Film", "ok", "Live",
         "One brief &rarr; one finished video. Planning, sourcing, and rendering run through the confirmed Command Center path.",
         '<button type="button" class="btn btn-primary btn-sm" data-home="focus-prompt">Start a Single Film</button>') +
-      card("ui-mode-multi.svg", "Multiple Independent", "info", "Execution-ready",
+      card("ui-mode-multi-warm.svg", "Multiple Independent", "info", "Execution-ready",
         "One production carrying several standalone videos as units. Multi-unit productions are managed and executed in the Command Center.",
         '<a class="btn btn-sm" href="#/productions">See in Command Center</a>') +
-      card("ui-mode-series.svg", "Series & Episodic", "muted", "Roadmap · V1 integration",
+      card("ui-mode-series-warm.svg", "Series & Episodic", "muted", "Roadmap · V1 integration",
         "Episodes with shared context and continuity on the same consolidated Production/Unit path — documented in the AVM master roadmap.",
         '<span class="hint">Creation UI lands with the consolidated mode workflow.</span>') +
       "</div></section>";
@@ -237,7 +287,7 @@ VIEWS.home = (function () {
   }
 
   function quietBand() {
-    return '<div class="quiet-band"><div class="quiet-art">' + uiArt("ui-band-quiet.svg", "", "quiet-img") + "</div>" +
+    return '<div class="quiet-band"><div class="quiet-art">' + uiArt("ui-band-quiet-warm.svg", "", "quiet-img") + "</div>" +
       '<div class="quiet-body"><h3 class="quiet-title">Your studio is quiet.</h3>' +
       '<p class="quiet-copy">Make the first film — describe it above and AVM will plan, source, and render it. Nothing runs until you confirm it.</p>' +
       '<button type="button" class="btn btn-primary" data-home="focus-prompt">Write the first brief</button></div></div>';
@@ -247,20 +297,43 @@ VIEWS.home = (function () {
     var body;
     if (!API.live) {
       body = '<div class="demo-notice">Showing labelled samples — the local engine is offline. Real previews appear when the engine is running.</div>' +
-        '<div class="rail-wrap"><div class="rail">' + projects.slice(0, 6).map(studioCard).join("") + "</div></div>";
+        '<div class="studio-grid">' + projects.slice(0, 5).map(studioCard).join("") + "</div>";
     } else if (!projects.length) {
       body = quietBand();
     } else {
       /* "Finished films" means finished: only projects whose authoritative
          manifest reports an available final video. Drafts/failed stages stay
-         visible in Projects, never mislabelled here. */
+         visible in Projects, never mislabelled here. Asymmetric editorial
+         grid: the lead film spans the full width; the rest pair beneath it. */
       var finished = projects.filter(function (p) { return !p.error && p.final_video_available; });
       body = finished.length
-        ? '<div class="rail-wrap"><div class="rail">' + finished.slice(0, 8).map(studioCard).join("") + "</div></div>"
+        ? '<div class="studio-grid">' + finished.slice(0, 7).map(studioCard).join("") + "</div>"
         : quietBand();
     }
     return '<section class="home-sec reveal" aria-label="Finished work">' +
       secHead("From your studio", "Finished films", "#/projects", "All projects") + body + "</section>";
+  }
+
+  /* --- Capability: the invisible crew (truthful, presentation-only) ------- */
+  function crew() {
+    function tile(icon, role, note) {
+      return '<li class="crew-item"><span class="crew-icon" aria-hidden="true">' + (ICONS[icon] || "") +
+        '</span><div><h3 class="crew-role">' + C.esc(role) + '</h3><p class="crew-note">' + C.esc(note) + "</p></div></li>";
+    }
+    return '<section class="home-sec crew-sec reveal" aria-label="How AVM produces your film">' +
+      '<div class="crew-band">' +
+        '<div class="crew-intro"><p class="crew-kicker">The craft, handled</p>' +
+          '<h2 class="crew-title">A full production crew, working invisibly.</h2>' +
+          '<p class="crew-copy">Every finished film is the work of AVM\u2019s real pipeline — planning, sourcing, rendering, sound, assembly, and evidence checks run quietly underneath. You stay in the director\u2019s chair.</p></div>' +
+        '<ul class="crew-grid">' +
+          tile("sparkle", "Story & Planning", "Your brief becomes a scene-by-scene production plan — beats, pacing, and sourcing decided before anything renders.") +
+          tile("clapper", "Scene Direction", "A consistent look is held across every scene. An unavailable generation path fails loudly — never a silent substitute.") +
+          tile("layers", "Media Orchestration", "Generated imagery, motion clips, and uploads are coordinated into one coherent visual language.") +
+          tile("mic", "Narration & Score", "Voice, music, and sound design are planned and mixed — intentional silence included.") +
+          tile("film", "Edit & Assembly", "Scenes are cut, paced, and finalized to your target length by the assembly engine.") +
+          tile("check", "Continuity & QA", "Execution evidence is checked against the plan before anything is called finished.") +
+        "</ul>" +
+      "</div></section>";
   }
 
   /* --- Z7 distribution strip --------------------------------------------- */
@@ -308,13 +381,18 @@ VIEWS.home = (function () {
       C.PLATFORMS.forEach(function (pf) {
         if (connections && connections[pf.id] && connections[pf.id].status === "CONNECTED") connectedCount++;
       });
-      return '<div class="home-view">' + ambient() + spotlightRail(projects, connectedCount) +
-        hero() + modes() + continuity(productions) + studioRail(projects) +
+      return '<div class="home-view">' + ambient() + hero() +
+        spotlightRail(projects, connectedCount) + modes() +
+        continuity(productions) + studioRail(projects) + crew() +
         distStrip(connections) + foot() + "</div>";
     },
 
     mount: function () {
       var d = VIEWS.home.data;
+
+      /* Placeholder-rotation lifecycle: clear any timer a previous render
+         left behind (the router swaps innerHTML without unmount hooks). */
+      if (rotateTimer) { clearInterval(rotateTimer); rotateTimer = null; }
 
       /* Scroll reveal (neutralized under reduced motion via CSS). */
       var revealEls = document.querySelectorAll(".home-view .reveal");
@@ -400,11 +478,28 @@ VIEWS.home = (function () {
         });
       }
 
+      /* "Try" example ideas — fill the composer only. Never submit, never
+         create: the single creation path still runs through Create Video. */
+      document.querySelectorAll(".home-view [data-idea]").forEach(function (chip) {
+        chip.addEventListener("click", function () {
+          var ta = document.getElementById("home-brief");
+          if (!ta) return;
+          ta.value = chip.getAttribute("data-idea") || "";
+          d.brief = ta.value;
+          var err = document.getElementById("home-prompt-error");
+          if (err) err.hidden = true;
+          ta.focus();
+          try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { /* ignore */ }
+        });
+      });
+
       var form = document.getElementById("home-prompt");
       if (form) form.addEventListener("submit", function (event) {
         event.preventDefault();
         VIEWS.home.handoff();
       });
+
+      startRotation();
     },
 
     /* Re-apply selected state after a preset (pills are static HTML). */

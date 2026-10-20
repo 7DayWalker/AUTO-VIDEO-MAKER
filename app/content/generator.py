@@ -8,7 +8,7 @@ import json
 import re
 import time
 import logging
-from typing import List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from app.content.models import (
     ContentBrief,
@@ -16,6 +16,7 @@ from app.content.models import (
     ContentGenerationResult,
     generate_project_id,
 )
+from app.content.execution_evidence import normalize_llm_verification
 from app.content.providers.base import BaseLLMProvider
 from app.content.prompts.scene_planner import get_combined_generation_prompt
 from app.content.validator import validate_production_plan
@@ -357,11 +358,53 @@ class ContentGenerator:
         provider: BaseLLMProvider,
         max_retries: int = MAX_RETRY_ATTEMPTS,
         retry_delay: float = RETRY_DELAY,
+        canonical_model_id: Optional[str] = None,
+        resolution_trace: Sequence[Dict[str, Any]] = (),
     ):
+        """
+        Args:
+            provider: LLM provider instance to use.
+            max_retries: Maximum retry attempts.
+            retry_delay: Delay between retries in seconds.
+            canonical_model_id: Step 6 (additive) — the user-facing CANONICAL
+                model identity from the model registry (e.g.
+                ``qwen-3.8-flash``) when this generator was built from a
+                resolved model. None = UNKNOWN (legacy provider-first path,
+                mock, local); it is NEVER inferred from ``provider.model``,
+                which remains the provider wire model.
+            resolution_trace: Step 6 (additive) — the resolver's failed-attempt
+                evidence for intra-model PROVIDER fallback. Empty for a
+                single-binding resolution (no fallback occurred).
+        """
         self.provider = provider
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.canonical_model_id = (
+            canonical_model_id.strip()
+            if isinstance(canonical_model_id, str) and canonical_model_id.strip()
+            else None
+        )
+        self.resolution_trace: Tuple[Dict[str, Any], ...] = tuple(
+            resolution_trace or ()
+        )
     
+    def _execution_evidence(self, response) -> Dict[str, Any]:
+        """Step 6: raw AI Brain execution evidence for one provider response.
+
+        Combines the provider-reported facts (normalized onto the established
+        ``verification`` vocabulary) with the resolver's resolution trace, so
+        the persistence seam can project ONE authoritative
+        provenance/accounting pair from ONE evidence object.
+
+        Never includes raw response bodies, prompts or credentials.
+        """
+        evidence = normalize_llm_verification(response)
+        if self.resolution_trace:
+            evidence["resolution_trace"] = [
+                dict(entry) for entry in self.resolution_trace
+            ]
+        return evidence
+
     def generate(self, brief: ContentBrief) -> ContentGenerationResult:
         """
         Generate a production plan from a content brief.
@@ -430,6 +473,8 @@ class ContentGenerator:
                             provider=self.provider.name,
                             model=self.provider.model,
                             attempts=attempts,
+                            canonical_model_id=self.canonical_model_id,
+                            verification=self._execution_evidence(response),
                         )
                 
                 # Success
@@ -440,6 +485,8 @@ class ContentGenerator:
                     model=self.provider.model,
                     attempts=attempts,
                     warnings=list(normalization_warnings) + list(validation.warnings),
+                    canonical_model_id=self.canonical_model_id,
+                    verification=self._execution_evidence(response),
                 )
                 
             except LLMAuthenticationError as e:
@@ -450,6 +497,7 @@ class ContentGenerator:
                     provider=self.provider.name,
                     model=self.provider.model,
                     attempts=attempts,
+                    canonical_model_id=self.canonical_model_id,
                 )
             
             except LLMQuotaError as e:
@@ -460,6 +508,7 @@ class ContentGenerator:
                     provider=self.provider.name,
                     model=self.provider.model,
                     attempts=attempts,
+                    canonical_model_id=self.canonical_model_id,
                 )
             
             except (LLMResponseError, json.JSONDecodeError) as e:
@@ -490,6 +539,7 @@ class ContentGenerator:
                     provider=self.provider.name,
                     model=self.provider.model,
                     attempts=attempts,
+                    canonical_model_id=self.canonical_model_id,
                 )
         
         # All retries exhausted
@@ -498,6 +548,7 @@ class ContentGenerator:
             provider=self.provider.name,
             model=self.provider.model,
             attempts=attempts,
+            canonical_model_id=self.canonical_model_id,
         )
     
     def _parse_response(

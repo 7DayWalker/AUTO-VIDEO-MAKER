@@ -600,10 +600,14 @@ Examples:
         "--audio-policy",
         type=str,
         default="narration_only",
-        choices=["narration_only", "native_only", "native_plus_narration"],
+        choices=["narration_only", "native_only", "native_plus_narration", "none"],
         help=(
             "Explicit final-audio policy: narration_only (legacy default), "
-            "native_only, or native_plus_narration. Persisted per project."
+            "native_only, native_plus_narration, or none (no audio stream). "
+            "Persisted per project. native_only NEVER falls back to narrator "
+            "audio: with no native audio in the real scene media the output is "
+            "silence. Productions created through the intent layer compile this "
+            "from their declared audio_intent instead."
         ),
     )
     assembly_group.add_argument(

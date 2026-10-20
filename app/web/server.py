@@ -26,6 +26,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app.config import PROJECT_ROOT
+from app.assembly.audio_contract import (
+    AudioPolicy,
+    audio_policy_requires_narration,
+    normalize_audio_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +94,335 @@ def connections_payload() -> dict:
     payload["instagram"] = {"status": "COMING SOON", "sample": False}
     payload["facebook"] = {"status": "COMING SOON", "sample": False}
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 2C — READ-ONLY LOCAL CONFIGURATION READINESS (GET /api/capabilities)
+#
+# Smallest honest answer to "is the selected generation path locally
+# configured?" BEFORE execution reaches a generation stage. Every fact is a
+# projection of the SAME configuration sources/predicates the executor itself
+# consults (no parallel configuration system):
+#   planner        -> app.content.providers.get_default_provider().is_available()
+#   tts            -> app.voice.config.TTS_PROVIDER + SUPPORTED_PROVIDERS
+#   image_source   -> app.orchestrator.visual_sources availability()
+#   alibaba_video  -> ALIBABA_API_KEY presence (the gateway's real gate)
+#   openrouter_video -> resolve_openrouter_video_api_key() (bool only)
+#
+# Guarantees this surface makes: NONE about provider uptime, connectivity,
+# quota, balance, or execution success. "ready" means LOCALLY CONFIGURED —
+# never "provider available". It never contacts a provider, never opens a
+# network connection, never runs a subprocess, never reads credentials into
+# the response, and never touches production/project state (GET read-only).
+# production_routes below is a PRESENTATION projection of these facts only —
+# it is not route resolution and must never replace it.
+# ---------------------------------------------------------------------------
+
+
+def _canonical_models_projection() -> dict:
+    """AVM Step 7 — MODEL-FIRST projection of the canonical model registry.
+
+    The user-facing AI Brain vocabulary is the CANONICAL MODEL owned by
+    ``app/content/model_registry.py`` (Step 1). This projection lets a client
+    render ``models.map(...)`` for an arbitrary registry — N canonical models,
+    N providers, N bindings — without duplicating the registry and without ever
+    hardcoding a model or provider.
+
+    Deliberate omissions (model-first product rule + secret discipline):
+
+    * NO provider identity and NO ``provider_model_id``: bindings are COUNTED,
+      never named, so this projection can never be turned into a provider
+      selector. Provider identity stays internal execution evidence and reaches
+      a UI only through persisted execution evidence (``_plan_evidence``).
+    * NO ``config_keys`` (environment variable names) and NO credential values.
+    * NO cost/price: AVM has no authoritative AI Brain pricing (Step 6 records
+      ``billing_status=unknown``, ``cost=None``), so none is projected.
+    * NO ranking/recommendation of any kind — registry order is preserved.
+
+    Readiness reuses the SAME configuration-only predicate the executor itself
+    consults (``BaseLLMProvider.is_available()``, which every provider
+    implements as a local configuration check), so ``status`` uses the existing
+    seam vocabulary and "ready" still means LOCALLY CONFIGURED — never
+    "provider available". No network call, no subprocess, no provider request.
+
+    A registry/probe failure degrades to an honest empty list with
+    ``status="unknown"``; a model is NEVER fabricated to fill the gap.
+    """
+    projection: dict = {
+        "note": (
+            "Canonical AI Brain models from AVM's model registry. The user "
+            "selects a canonical model; provider bindings are internal "
+            "execution detail and are deliberately not exposed here. "
+            "'ready' means LOCALLY CONFIGURED, never 'provider available'."
+        ),
+        "source": "app.content.model_registry",
+        "status": "ready",
+        "models": [],
+    }
+    try:
+        from app.content import provider_registry
+        from app.content.model_registry import list_models
+    except Exception as exc:  # noqa: BLE001 - readiness must never crash
+        logger.warning("capability model registry import failed: %s", exc)
+        projection["status"] = "unknown"
+        return projection
+
+    try:
+        canonical_models = list_models()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("capability model registry read failed: %s", exc)
+        projection["status"] = "unknown"
+        return projection
+
+    for canonical in canonical_models:
+        capabilities = getattr(canonical, "capabilities", None)
+        entry = {
+            "id": canonical.id,
+            "display_name": canonical.display_name,
+            "family": getattr(canonical, "family", None),
+            # Generic, provider-agnostic capability flags only (Step 1
+            # vocabulary). Never derived from what a provider happens to do.
+            "capabilities": {
+                "text": bool(getattr(capabilities, "text", False)),
+                "json": bool(getattr(capabilities, "json_", False)),
+                "reasoning": bool(getattr(capabilities, "reasoning", False)),
+                "vision": bool(getattr(capabilities, "vision", False)),
+                "long_context": bool(getattr(capabilities, "long_context", False)),
+                "tool_use": bool(getattr(capabilities, "tool_use", False)),
+            },
+            # Binding COUNT only — provider identity stays internal.
+            "binding_count": len(canonical.bindings or ()),
+            "configured": False,
+            "status": "not_configured",
+        }
+
+        configured = 0
+        unknown = 0
+        bindings = tuple(canonical.bindings or ())
+        for binding in bindings:
+            try:
+                if not provider_registry.has_provider(binding.provider):
+                    # Registered model, provider not registered → honestly not
+                    # configured. The provider name is never surfaced.
+                    continue
+                instance = provider_registry.create_provider(
+                    binding.provider, binding.provider_model_id
+                )
+                if bool(instance.is_available()):
+                    configured += 1
+            except Exception as exc:  # noqa: BLE001 - never crash readiness
+                logger.warning(
+                    "capability model binding probe failed for '%s': %s",
+                    canonical.id, exc,
+                )
+                unknown += 1
+
+        entry["configured"] = configured > 0
+        if configured > 0:
+            entry["status"] = "ready"
+        elif bindings and unknown == len(bindings):
+            # Every binding probe failed: truthfully unknown, NOT "unavailable".
+            entry["status"] = "unknown"
+        else:
+            entry["status"] = "not_configured"
+        projection["models"].append(entry)
+
+    return projection
+
+
+def capabilities_payload():
+    """Build the read-only configuration-readiness projection."""
+    seam_status_ready = "ready"
+    seam_status_missing = "not_configured"
+
+    # -- planner / AI Brain: the exact predicate create_scene_planner uses ---
+    planner = {"provider": None, "model": None, "configured": False,
+               "status": seam_status_missing}
+    try:
+        from app.content import providers as content_providers
+
+        try:
+            provider = content_providers.get_default_provider()
+        except ValueError:
+            # Unrecognized DEFAULT_LLM_PROVIDER: honestly unknown, never a
+            # guessed fallback (mirrors the executor's fail-loudly behavior).
+            planner["provider"] = str(
+                getattr(content_providers, "DEFAULT_LLM_PROVIDER", "") or ""
+            ).strip().lower() or None
+            planner["status"] = "unknown"
+        else:
+            available = bool(provider.is_available())
+            planner["provider"] = getattr(provider, "name", None)
+            planner["model"] = getattr(provider, "model", None)
+            planner["configured"] = available
+            if planner["provider"] == "mock":
+                # Explicit offline/test mode: usable, but never real AI
+                # planning — disclosed, not presented as production readiness.
+                planner["status"] = "offline_mode"
+                planner["configured"] = True
+            else:
+                planner["status"] = (
+                    seam_status_ready if available else seam_status_missing
+                )
+    except Exception as exc:  # noqa: BLE001 - readiness must never crash
+        logger.warning("capability planner projection failed: %s", exc)
+        planner["status"] = "unknown"
+
+    # -- TTS: existing configuration semantics (no external verification) ---
+    tts = {"provider": None, "configured": False, "status": seam_status_missing}
+    try:
+        from app.voice import config as voice_config
+
+        tts["provider"] = str(voice_config.TTS_PROVIDER or "").strip() or None
+        supported = tts["provider"] in voice_config.SUPPORTED_PROVIDERS
+        tts["configured"] = supported
+        if tts["provider"] == "mock":
+            tts["status"] = "offline_mode"
+            tts["configured"] = True
+        elif not supported:
+            tts["status"] = "unsupported"
+        else:
+            tts["status"] = seam_status_ready
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("capability tts projection failed: %s", exc)
+        tts["status"] = "unknown"
+
+    # -- image source: reuse the visual_sources availability() authority -----
+    image_source = {
+        "selector": None, "source": None, "configured": False,
+        "status": seam_status_missing, "children": [],
+    }
+    try:
+        from app.orchestrator.visual_sources import (
+            DEFAULT_IMAGE_SOURCE,
+            SourceAvailability,
+            create_visual_source,
+            resolve_image_source_config,
+        )
+
+        selector = resolve_image_source_config() or DEFAULT_IMAGE_SOURCE
+        image_source["selector"] = selector
+        source = create_visual_source(selector)
+        if source is None:
+            image_source["status"] = SourceAvailability.NOT_CONFIGURED.value
+        else:
+            availability = source.availability()
+            image_source["source"] = source.name
+            image_source["status"] = availability.value
+            image_source["configured"] = (
+                availability == SourceAvailability.AVAILABLE
+            )
+            for child in getattr(source, "children", []) or []:
+                image_source["children"].append({
+                    "name": child.name,
+                    "status": child.availability().value,
+                })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("capability image-source projection failed: %s", exc)
+        image_source["status"] = "unknown"
+
+    # -- Alibaba video seam: the gateway's actual gate is the key presence --
+    alibaba_video = {"configured": False, "status": seam_status_missing,
+                     "model": None}
+    try:
+        from app.orchestrator.alibaba_video_config import (
+            ALIBABA_API_KEY_ENV,
+            ALIBABA_VIDEO_MODEL_ENV,
+            DEFAULT_VIDEO_MODEL,
+            env_or_default,
+        )
+
+        configured = bool((os.getenv(ALIBABA_API_KEY_ENV) or "").strip())
+        alibaba_video["configured"] = configured
+        alibaba_video["status"] = (
+            seam_status_ready if configured else seam_status_missing
+        )
+        # Configuration-driven model identifier (non-secret by convention).
+        alibaba_video["model"] = env_or_default(
+            ALIBABA_VIDEO_MODEL_ENV, DEFAULT_VIDEO_MODEL
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("capability alibaba_video projection failed: %s", exc)
+        alibaba_video["status"] = "unknown"
+
+    # -- OpenRouter video seam: reuse its existing key resolver (bool only) --
+    openrouter_video = {"configured": False, "status": seam_status_missing,
+                        "model": None}
+    try:
+        from app.orchestrator.openrouter_video import (
+            OPENROUTER_MODEL_ENV,
+            resolve_openrouter_video_api_key,
+        )
+
+        configured = bool(resolve_openrouter_video_api_key())
+        openrouter_video["configured"] = configured
+        openrouter_video["status"] = (
+            seam_status_ready if configured else seam_status_missing
+        )
+        model = (os.getenv(OPENROUTER_MODEL_ENV) or "").strip()
+        openrouter_video["model"] = model or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("capability openrouter_video projection failed: %s", exc)
+        openrouter_video["status"] = "unknown"
+    seams = {
+        "planner": planner,
+        "tts": tts,
+        "image_source": image_source,
+        "alibaba_video": alibaba_video,
+        "openrouter_video": openrouter_video,
+    }
+
+    # -- route-level readiness: PURE PRESENTATION PROJECTION -----------------
+    # Maps each existing SaaS route onto the seams its CURRENT compilation
+    # consults. It re-implements no route logic, is never consulted by the
+    # executor, and must not become a replacement for route resolution:
+    # resolve_effective_route/apply_production_route remain the sole
+    # execution authority.
+    from app.production.routes import (
+        PRODUCTION_ROUTES,
+        ROUTE_FULL_AI_VIDEO,
+        ROUTE_LOCAL_AI_ASSISTED,
+    )
+
+    route_requirements = {
+        ROUTE_LOCAL_AI_ASSISTED: ("planner", "tts", "image_source"),
+        ROUTE_FULL_AI_VIDEO: ("planner", "tts", "alibaba_video"),
+    }
+    production_routes = {}
+    for route_id in PRODUCTION_ROUTES:
+        required = route_requirements.get(route_id, ())
+        missing = [name for name in required if not seams[name]["configured"]]
+        statuses = {name: seams[name]["status"] for name in required}
+        if missing:
+            status = "not_ready"
+        elif "offline_mode" in statuses.values():
+            status = "offline_mode"
+        else:
+            status = seam_status_ready
+        production_routes[route_id] = {"status": status, "missing": missing}
+
+    return _redact_secrets({
+        "notice": (
+            "Local configuration readiness only. Does NOT verify provider "
+            "uptime, connectivity, quota, balance, or generation success; "
+            "'ready' means locally configured, never 'provider available'. "
+            "This surface is independent of production state."
+        ),
+        "seams": seams,
+        # AVM Step 7 (additive): the canonical model registry projection that
+        # makes a client MODEL-FIRST. It never names a provider, never exposes
+        # a wire model id, and never ranks or prices a model.
+        "models": _canonical_models_projection(),
+        "production_routes": {
+            "note": (
+                "Presentation projection of the configuration facts above; "
+                "NOT route resolution. The executor's route compilation "
+                "remains the sole execution authority."
+            ),
+            "routes": production_routes,
+        },
+        "sample": False,
+    })
 
 
 def _load_manifest(project_dir: Path):
@@ -1080,10 +1414,62 @@ def create_production_payload(body: dict):
     try:
         mode = text("mode", required=True, maximum=32).lower()
         creation_method = text("creation_method", required=True, maximum=32).lower()
-        if mode != "single_video":
-            raise ValueError("Batch 1 supports only mode='single_video'")
+        if mode not in {"single_video", "unit_count"}:
+            raise ValueError("mode must be 'single_video' or 'unit_count'")
         if creation_method != "local":
             raise ValueError("Batch 1 supports only creation_method='local'")
+
+        # Track 7 Mode B: Multiple Independent Videos — additive validation.
+        # Only applies when mode == unit_count; single_video path unchanged.
+        unit_count = None
+        unit_titles = None
+        is_episodic = False
+        episodic_bible = None
+        episodic_episodes = None
+        if mode == "unit_count":
+            raw_count = body.get("unit_count")
+            if raw_count is None:
+                raise ValueError("unit_count is required when mode='unit_count'")
+            if isinstance(raw_count, bool) or not isinstance(raw_count, int):
+                raise ValueError("unit_count must be an integer from 2 to 20")
+            if not 2 <= raw_count <= 20:
+                raise ValueError("unit_count must be an integer from 2 to 20")
+            unit_count = raw_count
+            raw_titles = body.get("unit_titles")
+            if raw_titles is not None:
+                if not isinstance(raw_titles, list):
+                    raise ValueError("unit_titles must be a list of titles")
+                if len(raw_titles) != unit_count:
+                    raise ValueError("unit_titles length must equal unit_count")
+                cleaned: list[str] = []
+                for t in raw_titles:
+                    if not isinstance(t, str):
+                        raise ValueError("each unit_titles entry must be text")
+                    tt = t.strip()
+                    if not tt:
+                        raise ValueError("each unit_titles entry must be non-empty text")
+                    if len(tt) > 200:
+                        raise ValueError("each unit_titles entry must be 200 characters or fewer")
+                    if "\x00" in tt:
+                        raise ValueError("unit_titles entry contains an invalid character")
+                    cleaned.append(tt)
+                unit_titles = cleaned
+            _raw_ut = body.get("unit_type")
+            if _raw_ut is not None:
+                if not isinstance(_raw_ut, str):
+                    raise ValueError("unit_type must be text")
+                _ut = _raw_ut.strip().lower()
+                if _ut not in {"episode", "standalone_video"}:
+                    raise ValueError("unit_type must be 'episode' or 'standalone_video'")
+                if _ut == "episode":
+                    is_episodic = True
+                body["_normalized_unit_type"] = _ut
+            _raw_bible = body.get("bible")
+            _raw_eps = body.get("episodes")
+            if _raw_bible is not None or _raw_eps is not None:
+                is_episodic = True
+            if is_episodic and raw_titles is not None and _raw_eps is not None:
+                raise ValueError("unit_titles cannot be combined with episodes")
 
         title = text("title", maximum=200)
         brief = text("brief", maximum=500)
@@ -1135,6 +1521,53 @@ def create_production_payload(body: dict):
         if not route:
             route = route_id_for_legacy_strategy(generation_strategy)
 
+        # AVM Step 7 (additive): optional CANONICAL MODEL creation intent.
+        #
+        # This is the model-first user choice (``qwen-3.8-flash``), validated
+        # against the Step-1 canonical model registry so an unknown or
+        # misspelled id fails loudly here instead of being persisted and later
+        # silently reinterpreted. A client that omits the field gets ``None``
+        # = NOT DECLARED, which is exactly today's behavior.
+        #
+        # RUNTIME BOUNDARY (critical): this records INTENT only. The Step-3
+        # model-bound resolver stays DORMANT — nothing here calls
+        # ``resolve_model()`` and no planner/execution path reads this value, so
+        # planning keeps using the configured provider exactly as before. A
+        # provider or provider wire model id is NEVER accepted from a client:
+        # provider identity is internal execution evidence, recorded by Step 6
+        # in ``plan_meta.json``, never a creation input.
+        from app.content.model_registry import has_model, list_models
+
+        canonical_model_id = text("canonical_model_id", maximum=64).lower()
+        if canonical_model_id and not has_model(canonical_model_id):
+            known = ", ".join(m.id for m in list_models()) or "(none registered)"
+            raise ValueError(
+                f"canonical_model_id '{canonical_model_id}' is not a registered "
+                f"canonical model. Registered: {known}"
+            )
+
+        # V1 AUDIO POLICY FIX: optional, backward-compatible production AUDIO
+        # INTENT.  A client that does not send the field (the current frontend
+        # does not) gets ``None`` = NOT DECLARED, which the execution seam
+        # resolves to the documented backward-compatible default
+        # (``DEFAULT_AUDIO_INTENT`` = narration) — exactly the existing V1
+        # creation behavior.  An unknown value is rejected loudly here so it can
+        # never be persisted and later silently reinterpreted.  This is intent,
+        # not route: ROUTE ≠ AUDIO, and it is never derived from plan narration.
+        from app.production.models import (
+            AUDIO_INTENTS,
+            DEFAULT_AUDIO_INTENT,
+            normalize_audio_intent,
+        )
+
+        audio_intent = text("audio_intent", maximum=64).lower()
+        if audio_intent and audio_intent not in AUDIO_INTENTS:
+            raise ValueError(
+                "audio_intent must be one of: " + ", ".join(AUDIO_INTENTS)
+            )
+        if audio_intent:
+            audio_intent = normalize_audio_intent(audio_intent)
+
         duration = body.get("target_duration", 30)
         scenes = body.get("scene_count", 6)
         if isinstance(duration, bool) or not isinstance(duration, int) or not 10 <= duration <= 180:
@@ -1142,39 +1575,125 @@ def create_production_payload(body: dict):
         if isinstance(scenes, bool) or not isinstance(scenes, int) or not 2 <= scenes <= 20:
             raise ValueError("scene_count must be an integer from 2 to 20")
 
+        if is_episodic:
+            _rb = body.get("bible")
+            if _rb is not None:
+                if not isinstance(_rb, dict):
+                    raise ValueError("bible must be an object")
+                _re = _rb.get("elements")
+                if _re is None:
+                    raise ValueError("bible.elements is required when bible is supplied")
+                if not isinstance(_re, list):
+                    raise ValueError("bible.elements must be a list")
+                from app.production.models import BibleElement as _BEX, ProductionBible as _PBX
+                _els = []
+                for _e in _re:
+                    if not isinstance(_e, dict):
+                        raise ValueError("each bible element must be an object")
+                    _eid = _e.get("element_id"); _sec = _e.get("section")
+                    if not isinstance(_eid, str) or not _eid.strip():
+                        raise ValueError("each bible element requires element_id text")
+                    if not isinstance(_sec, str) or not _sec.strip():
+                        raise ValueError("each bible element requires section text")
+                    if "\x00" in _eid or "\x00" in _sec:
+                        raise ValueError("bible element contains an invalid character")
+                    _rc = _e.get("content"); _ct = {}
+                    if isinstance(_rc, dict):
+                        _ct = dict(_rc)
+                    elif isinstance(_rc, str):
+                        if _rc.strip():
+                            _ct["text"] = _rc.strip()
+                        if "\x00" in _rc:
+                            raise ValueError("bible element content contains an invalid character")
+                    elif _rc is not None:
+                        raise ValueError("bible element content must be text or object")
+                    _tt = _e.get("title")
+                    if isinstance(_tt, str) and _tt.strip():
+                        if "\x00" in _tt:
+                            raise ValueError("bible element title contains an invalid character")
+                        _ct.setdefault("title", _tt.strip())
+                    elif _tt is not None and not isinstance(_tt, str):
+                        raise ValueError("bible element title must be text")
+                    if _e.get("tags") is not None:
+                        _tgs = _e.get("tags")
+                        if not isinstance(_tgs, list):
+                            raise ValueError("bible element tags must be a list")
+                        for _tg in _tgs:
+                            if not isinstance(_tg, str):
+                                raise ValueError("each bible tag must be text")
+                            if "\x00" in _tg:
+                                raise ValueError("bible tag contains an invalid character")
+                        _ct.setdefault("tags", [x.strip() for x in _tgs if isinstance(x, str) and x.strip()])
+                    _els.append(_BEX(element_id=_eid.strip(), section=_sec.strip().lower(), content=_ct))
+                episodic_bible = _PBX(elements=_els)
+            _re2 = body.get("episodes")
+            if _re2 is not None:
+                if not isinstance(_re2, list):
+                    raise ValueError("episodes must be a list")
+                if len(_re2) != unit_count:
+                    raise ValueError("episodes length must equal unit_count")
+                for _ep in _re2:
+                    if not isinstance(_ep, dict):
+                        raise ValueError("each episodes entry must be an object")
+                    if "episode_number" in _ep and _ep["episode_number"] is not None:
+                        _en = _ep["episode_number"]
+                        if isinstance(_en, bool) or not isinstance(_en, int) or _en < 1:
+                            raise ValueError("episode_number must be an integer >= 1")
+                    if "season_number" in _ep and _ep["season_number"] is not None:
+                        _sn = _ep["season_number"]
+                        if isinstance(_sn, bool) or not isinstance(_sn, int) or _sn < 1:
+                            raise ValueError("season_number must be an integer >= 1")
+                    if "title" in _ep and _ep["title"] is not None:
+                        _t2 = _ep["title"]
+                        if not isinstance(_t2, str):
+                            raise ValueError("episode title must be text")
+                        if not _t2.strip():
+                            raise ValueError("episode title must be non-empty text")
+                        if len(_t2.strip()) > 200:
+                            raise ValueError("episode title must be 200 characters or fewer")
+                        if "\x00" in _t2:
+                            raise ValueError("episode title contains an invalid character")
+                    if "premise" in _ep and _ep["premise"] is not None:
+                        _pv = _ep["premise"]
+                        if not isinstance(_pv, str):
+                            raise ValueError("episode premise must be text")
+                        if "\x00" in _pv:
+                            raise ValueError("episode premise contains an invalid character")
+                        if len(_pv) > 500:
+                            raise ValueError("episode premise must be 500 characters or fewer")
+                    if "bible_refs" in _ep and _ep["bible_refs"] is not None:
+                        _br = _ep["bible_refs"]
+                        if not isinstance(_br, list):
+                            raise ValueError("bible_refs must be a list")
+                        for _rf in _br:
+                            if not isinstance(_rf, str) or not _rf.strip():
+                                raise ValueError("each bible_ref must be non-empty text")
+                            if "\x00" in _rf:
+                                raise ValueError("bible_ref contains an invalid character")
+                    if "dependencies" in _ep and _ep["dependencies"] is not None:
+                        _dp = _ep["dependencies"]
+                        if not isinstance(_dp, list):
+                            raise ValueError("dependencies must be a list")
+                        for _d in _dp:
+                            if not isinstance(_d, str) or not _d.strip():
+                                raise ValueError("each dependency must be non-empty text")
+                            if "\x00" in _d:
+                                raise ValueError("dependency contains an invalid character")
+                episodic_episodes = _re2
+
         tone = text("tone", maximum=120) or "curious and cinematic"
-        unit_id = "unit-001"
         issued_at = datetime.now().isoformat()
         production_id = generate_production_id(title, productions_dir=PRODUCTIONS_DIR)
-        production = Production(
-            production_id=production_id,
-            title=title,
-            generation_strategy=generation_strategy,
-            route=route,
-            command=ProductionCommand(
-                text=brief,
-                workload_shape="single_video",
-                intended_unit_count=1,
-                explicit_constraints={
-                    "mode": "single_video",
-                    "output_intent": output_intent,
-                    "target_duration": duration,
-                    "scene_count": scenes,
-                    "creation_method": "local",
-                    # Track 1 hardening (defect D3): truthful creation-time
-                    # cost CLASSIFICATION of the selected path — never a
-                    # monetary amount, never accounting (that truth already
-                    # lives in the execution provenance/accounting records).
-                    "cost_class": creation_cost_class(
-                        route=route, generation_strategy=generation_strategy
-                    ),
-                },
-                creation_context={"source": "web_create_video"},
-                issued_at=issued_at,
-            ),
-            units=[
+
+        # Track 7 Mode B: shape/intent is mode-derived; single_video == 1 unit,
+        # unit_count == N independent standalone_video units.
+        if mode == "single_video":
+            workload_shape = "single_video"
+            intended_count: int | None = 1
+            mode_constraint = "single_video"
+            units: list[ProductionUnit] = [
                 ProductionUnit(
-                    unit_id=unit_id,
+                    unit_id="unit-001",
                     ordinal=1,
                     unit_type="standalone_video",
                     title=title,
@@ -1190,7 +1709,107 @@ def create_production_payload(body: dict):
                         "number_of_scenes": scenes,
                     },
                 )
-            ],
+            ]
+        else:
+            workload_shape = "unit_count"
+            intended_count = unit_count  # type: ignore[assignment]
+            mode_constraint = "unit_count"
+            # Mode C: create episode units when episodic payload detected
+            if is_episodic:
+                from app.production.models import EpisodeMetadata as _EM
+                # bible already parsed above; episodes validated above (episodic_episodes)
+                # Re-parse episodic_bible if we took early short path (unit_type only)
+                if episodic_bible is None and body.get("bible") is not None:
+                    from app.production.models import BibleElement as _BE2, ProductionBible as _PB2
+                    _rb2 = body.get("bible")
+                    _elems2 = []
+                    for _e2 in _rb2.get("elements", []):  # type: ignore[union-attr]
+                        _rc2 = _e2.get("content")
+                        _c2 = dict(_rc2) if isinstance(_rc2, dict) else ({"text": _rc2.strip()} if isinstance(_rc2, str) and _rc2.strip() else {})
+                        if isinstance(_e2.get("title"), str) and _e2.get("title").strip():
+                            _c2.setdefault("title", _e2.get("title").strip())
+                        if isinstance(_e2.get("tags"), list):
+                            _c2.setdefault("tags", [x.strip() for x in _e2.get("tags") if isinstance(x, str) and x.strip()])
+                        _elems2.append(_BE2(element_id=_e2.get("element_id").strip(), section=_e2.get("section").strip().lower(), content=_c2))
+                    episodic_bible = _PB2(elements=_elems2)
+                if episodic_episodes is None and body.get("episodes") is not None:
+                    episodic_episodes = body.get("episodes")  # already validated shape above when present
+                # If still no episodic_episodes (episodic via unit_type/bible only), treat as bare episodic
+                units = []
+                for i in range(1, unit_count + 1):  # type: ignore[operator]
+                    ep_raw = episodic_episodes[i - 1] if episodic_episodes is not None else {}
+                    ep_title = ep_raw.get("title") if isinstance(ep_raw.get("title"), str) and ep_raw.get("title").strip() else f"{title} \u2014 Episode {i}"
+                    ep_premise = ep_raw.get("premise") if isinstance(ep_raw.get("premise"), str) and ep_raw.get("premise").strip() else brief
+                    ep_bible_refs = [r.strip() for r in ep_raw.get("bible_refs", [])] if isinstance(ep_raw.get("bible_refs"), list) else []
+                    ep_deps = [d.strip() for d in ep_raw.get("dependencies", [])] if isinstance(ep_raw.get("dependencies"), list) else []
+                    # episode_number / season_number / continuity
+                    en = ep_raw.get("episode_number") if isinstance(ep_raw.get("episode_number"), int) and not isinstance(ep_raw.get("episode_number"), bool) else i
+                    sn = ep_raw.get("season_number") if isinstance(ep_raw.get("season_number"), int) and not isinstance(ep_raw.get("season_number"), bool) else None
+                    ep_meta = _EM(season_number=sn, episode_number=en, episode_title=ep_title, continuity_refs=[])
+                    units.append(ProductionUnit(unit_id=f"unit-{i:03d}", ordinal=i, unit_type="episode", title=ep_title.strip(), description=ep_premise, premise=ep_premise, provider_intent="image_motion", content_intent={"topic_override": ep_premise, "target_duration": duration, "platform": output_intent, "tone": tone, "style": "curious and cinematic", "number_of_scenes": scenes}, episode=ep_meta, bible_refs=ep_bible_refs, dependencies=ep_deps))
+            else:
+                titles: list[str] = unit_titles or [f"{title} \u2014 Part {i}" for i in range(1, unit_count + 1)]  # type: ignore[operator]
+                units = [
+                    ProductionUnit(
+                        unit_id=f"unit-{i:03d}",
+                        ordinal=i,
+                        unit_type="standalone_video",
+                        title=titles[i - 1],
+                        description=brief,
+                        premise=brief,
+                        provider_intent="image_motion",
+                        content_intent={
+                            "topic_override": brief,
+                            "target_duration": duration,
+                            "platform": output_intent,
+                            "tone": tone,
+                            "style": "curious and cinematic",
+                            "number_of_scenes": scenes,
+                        },
+                    )
+                    for i in range(1, unit_count + 1)  # type: ignore[operator]
+                ]
+
+        production = Production(
+            production_id=production_id,
+            title=title,
+            bible=episodic_bible,
+            generation_strategy=generation_strategy,
+            route=route,
+            # None (omitted by the client) = undeclared -> documented
+            # backward-compatible default applied at the execution seam.
+            audio_intent=audio_intent or None,
+            command=ProductionCommand(
+                text=brief,
+                workload_shape=workload_shape,
+                intended_unit_count=intended_count,
+                explicit_constraints={
+                    "mode": mode_constraint,
+                    "output_intent": output_intent,
+                    "target_duration": duration,
+                    "scene_count": scenes,
+                    "creation_method": "local",
+                    # Track 1 hardening (defect D3): truthful creation-time
+                    # cost CLASSIFICATION of the selected path — never a
+                    # monetary amount, never accounting (that truth already
+                    # lives in the execution provenance/accounting records).
+                    "cost_class": creation_cost_class(
+                        route=route, generation_strategy=generation_strategy
+                    ),
+                    # Step 7: the user's canonical model choice, recorded as
+                    # creation INTENT (never as execution truth, never as a
+                    # provider choice). Absent when the client did not declare
+                    # one — an undeclared model is not a defaulted model.
+                    **(
+                        {"canonical_model_id": canonical_model_id}
+                        if canonical_model_id
+                        else {}
+                    ),
+                },
+                creation_context={"source": "web_create_video"},
+                issued_at=issued_at,
+            ),
+            units=units,
             created_at=issued_at,
         )
         save_new_production(production, root=PRODUCTIONS_DIR)
@@ -1223,6 +1842,18 @@ def create_production_payload(body: dict):
         "creation_method": "local",
         "generation_strategy": production.generation_strategy,
         "route": production.route,
+        # V1 AUDIO POLICY FIX: the declared intent (None = client did not send
+        # it) and the effective intent it resolves to.  Reported separately so
+        # the response never claims an explicit user choice that was not made.
+        "audio_intent": production.audio_intent,
+        "effective_audio_intent": production.audio_intent or DEFAULT_AUDIO_INTENT,
+        # AVM Step 7: the declared canonical model INTENT, echoed exactly as
+        # persisted (None = the client did not declare one). This is never a
+        # claim about what will execute, and no provider / provider wire model
+        # is echoed — provider identity is execution evidence only.
+        "canonical_model_id": production.command.explicit_constraints.get(
+            "canonical_model_id"
+        ),
         # Track 1 hardening (defect D3): the response must never claim
         # "local_free" for a billable production path.
         "cost_class": creation_cost_class(
@@ -1345,6 +1976,83 @@ def _unit_intent(unit) -> dict:
     return data
 
 
+#: AVM Step 7 — plan-metadata keys exposed to a browser.
+#:
+#: The FIRST SEVEN are the original Phase 11B allow-list, preserved verbatim:
+#: same spelling, same meaning, same "only when present" discipline.
+_PLAN_META_EVIDENCE_KEYS = (
+    "production_plan_version", "unit_plan_version",
+    "plan_identity", "content_hash",
+    "planner_provider", "planner_model",
+    "planner_warnings",
+)
+
+#: Step 6 AI Brain provenance keys (the ESTABLISHED provenance vocabulary plus
+#: the one additive ``canonical_model_id``). Anything else persisted beside them
+#: — prompts, raw bodies, credentials, absolute paths — stays server-side.
+_PLANNER_PROVENANCE_KEYS = (
+    "canonical_model_id", "provider", "model",
+    "request_id", "request_id_kind",
+    "fallback_used", "primary_provider", "fallback_reason",
+    "resolution_trace", "source",
+)
+
+try:  # single authoritative trace vocabulary (Step 6) — never re-declared here
+    from app.content.execution_evidence import RESOLUTION_TRACE_KEYS
+except Exception:  # pragma: no cover - defensive only
+    RESOLUTION_TRACE_KEYS = ("provider", "provider_model_id", "reason", "category")
+
+
+def _planner_provenance_evidence(raw_meta: dict):
+    """Project the Step-6 AI Brain provenance block for a model-first UI.
+
+    This is the ONLY additive key on the existing plan-evidence projection. It
+    exposes what actually executed — canonical model identity first, provider
+    and provider wire model as secondary execution evidence — and nothing else:
+
+    * explicit allow-list per key (``_PLANNER_PROVENANCE_KEYS``) and per
+      resolution-trace entry (``RESOLUTION_TRACE_KEYS``), so a malformed or
+      hostile ``plan_meta.json`` cannot smuggle prompts, credentials or paths;
+    * only scalars are forwarded, so no nested structure is ever passed through;
+    * ``None`` when the record carries no provenance at all (legacy productions,
+      mock/local planning). Absence stays absence: no canonical model, provider
+      or request id is ever inferred or fabricated here.
+
+    Deliberately NOT projected: ``planner_accounting``. Step 7 surfaces model
+    identity and provider fallback only — AVM has no authoritative AI Brain
+    pricing (Step 6 records ``billing_status=unknown`` / ``cost=None``), and no
+    cost/usage figure is rendered, so the block stays server-side.
+    """
+    raw = raw_meta.get("planner_provenance")
+    if not isinstance(raw, dict):
+        return None
+
+    scalar = (str, bool, int, float)
+    projected: dict = {}
+    for key in _PLANNER_PROVENANCE_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if key == "resolution_trace":
+            trace = []
+            for entry in value if isinstance(value, list) else ():
+                if not isinstance(entry, dict):
+                    continue
+                record = {
+                    trace_key: entry[trace_key]
+                    for trace_key in RESOLUTION_TRACE_KEYS
+                    if trace_key in entry and isinstance(entry[trace_key], scalar)
+                }
+                if record:
+                    trace.append(record)
+            if trace:
+                projected[key] = trace
+            continue
+        if value is None or isinstance(value, scalar):
+            projected[key] = value
+    return projected or None
+
+
 def _plan_evidence(production_id: str, unit_id: str) -> dict:
     """Plan artifacts shown as SUPPORTING EVIDENCE only — never binding authority."""
     from app.production.storage import unit_plan_dir
@@ -1364,21 +2072,81 @@ def _plan_evidence(production_id: str, unit_id: str) -> dict:
     if meta_path.is_file():
         try:
             raw_meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
-            evidence["meta"] = {
+            meta = {
                 key: raw_meta.get(key)
-                for key in (
-                    "production_plan_version", "unit_plan_version",
-                    "plan_identity", "content_hash",
-                    "planner_provider", "planner_model",
-                    "planner_warnings",
-                )
+                for key in _PLAN_META_EVIDENCE_KEYS
                 if key in raw_meta
             }
+            # AVM Step 7 (additive): model-centric AI Brain execution evidence,
+            # allow-listed key by key. ``planner_provenance`` appears only when
+            # the record actually carries it — legacy records stay legacy.
+            provenance = _planner_provenance_evidence(raw_meta)
+            if provenance is not None:
+                meta["planner_provenance"] = provenance
+            evidence["meta"] = meta
         except Exception as exc:
             evidence["meta_error"] = (
                 "malformed plan metadata: " + _browser_safe_diagnostic(exc)
             )
     return evidence
+
+
+def _final_video_output_facts(manifest) -> dict:
+    """Project the ACCEPTANCE-TIME media facts of the final artifact.
+
+    Phase 2D (Option A — reuse persisted authoritative metadata, zero new
+    media inspection). The pipeline's final acceptance gate already probes
+    the actual completed output once with ffprobe and persists the facts in
+    ``ProjectManifest.stages["complete"].metadata`` (duration/width/height/
+    file_size from the real media stream/container and the real artifact on
+    disk). This helper ONLY re-reads those recorded values; it never probes,
+    never infers from route/provider/config/targets, and never substitutes
+    zeros: anything unrecorded, malformed, or non-positive stays ``None``
+    (UNKNOWN != ZERO). A legitimately accepted artifact can never carry a
+    non-positive duration (acceptance requires a positive probe), so 0/-1 is
+    treated as unknown, not as a fact.
+
+    Deliberately NOT read here: ``StageResult.duration_seconds`` — that is
+    stage wall-clock timing and is never a media duration.
+    """
+    facts = {
+        "duration": None,
+        "width": None,
+        "height": None,
+        "file_size": None,
+        "resolution": None,
+    }
+
+    def _positive_number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return value if value > 0 else None
+
+    def _positive_int(value):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value if value > 0 else None
+
+    stages = getattr(manifest, "stages", None) or {}
+    try:
+        from app.orchestrator.models import PipelineStage
+
+        result = stages.get(PipelineStage.COMPLETE.value)
+    except Exception:  # pragma: no cover - defensive only
+        result = stages.get("complete")
+    metadata = dict(getattr(result, "metadata", None) or {})
+    if not metadata:
+        return facts
+
+    facts["duration"] = _positive_number(metadata.get("duration"))
+    facts["width"] = _positive_int(metadata.get("width"))
+    facts["height"] = _positive_int(metadata.get("height"))
+    facts["file_size"] = _positive_int(metadata.get("file_size"))
+    # Resolution is a derived label over the ACTUAL probed dimensions only
+    # (same "WxH" convention the assembly validator uses); never invented.
+    if facts["width"] and facts["height"]:
+        facts["resolution"] = f"{facts['width']}x{facts['height']}"
+    return facts
 
 
 def _manifest_payload(manifest, project_id: str | None = None) -> dict:
@@ -1401,6 +2169,19 @@ def _manifest_payload(manifest, project_id: str | None = None) -> dict:
     for artifact in artifact_payload.values():
         if artifact["available"] and artifact["type"] == "Final video":
             artifact["media_url"] = f"/api/projects/{safe_project_id}/media"
+    # Phase 2D: expose the recorded acceptance-time media facts on the
+    # final-video artifact. Additive only: existing keys/semantics are
+    # unchanged. Facts appear ONLY while the artifact is genuinely
+    # AVAILABLE — a RECORDED BUT MISSING / FAILED / NOT GENERATED artifact
+    # never echoes facts recorded for different bytes — and each fact stays
+    # null when it was never authoritatively recorded (UNKNOWN != ZERO).
+    # No media inspection happens on this read path.
+    final_video = artifact_payload.get("final_video")
+    if final_video is not None:
+        facts = _final_video_output_facts(manifest)
+        if final_video["state"] != "AVAILABLE":
+            facts = {key: None for key in facts}
+        final_video.update(facts)
     return {
         "project_id": safe_project_id,
         "topic": manifest.topic,
@@ -1422,6 +2203,17 @@ def _manifest_payload(manifest, project_id: str | None = None) -> dict:
             manifest.scene_video_paths,
         ),
         "production_binding": data.get("production_binding"),
+        # G3: the route Core COMPILED for this unit (route-compilation
+        # evidence, written once at project initialization).  This is a route
+        # fact only: it is not scene provider/model provenance, not media
+        # strategy, and not accounting.  None = UNKNOWN for projects created
+        # before the evidence seam (and for direct engine runs); it is never
+        # inferred from the current route registry or from the intent.
+        "route_compilation": (
+            manifest.route_compilation.model_dump(mode="json")
+            if getattr(manifest, "route_compilation", None) is not None
+            else None
+        ),
         "publications": _publication_summary(data),
         "artifacts": artifact_payload,
     }
@@ -1910,6 +2702,800 @@ def _reconciliation_summary(report) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# AUDIO PREVIEW + AUDIO EVIDENCE — read-only projection over real evidence
+# ---------------------------------------------------------------------------
+#
+# What this surface answers is narrow and specific: "what audio does the
+# finished production ACTUALLY contain, and where can the browser hear it?"
+#
+# Authority order (never inverted):
+#   1. the final assembled media artifact  (existing final-media evidence seam)
+#   2. persisted final-media acceptance metadata (stages["complete"].metadata)
+#   3. persisted assembly audio evidence    (stages["assembly"].metadata["audio"])
+#   4. persisted voice/native evidence      (stages["voice"], scene audio_facts)
+#   5. persisted manifest configuration     (assembly_config snapshot)
+#
+# The declared ``audio_intent`` is REPORTED, never used to decide what the
+# final file contains: intent is an input to execution, while execution
+# evidence and the delivered bytes are the truth.  ``Scene.narration`` is never
+# read here at all.  Nothing on this path generates, repairs, executes, or
+# persists anything; it reuses the media-inspection and artifact-serving seams
+# that already exist.
+
+#: Audio states.  Every value except ``NO_AUDIO`` is an EXISTING AVM word:
+#: ``AVAILABLE`` / ``FAILED`` come from the frozen artifact-presentation
+#: states, ``NOT_REQUIRED`` is ``ArtifactStatus.NOT_REQUIRED``, and
+#: ``UNKNOWN`` is the established "evidence does not establish it" reading
+#: (``UNKNOWN != ZERO``).  ``NO_AUDIO`` is the one genuinely new word: a
+#: complete, valid artifact that deliberately carries no audio stream is
+#: neither AVAILABLE nor a failure, and no existing state expresses that.
+AUDIO_STATE_AVAILABLE = "AVAILABLE"
+AUDIO_STATE_NO_AUDIO = "NO_AUDIO"
+AUDIO_STATE_NOT_REQUIRED = "NOT_REQUIRED"
+AUDIO_STATE_INCOMPLETE = "INCOMPLETE"
+AUDIO_STATE_FAILED = "FAILED"
+AUDIO_STATE_UNKNOWN = "UNKNOWN"
+
+#: What the final artifact's audio actually IS.  ``unknown`` is a real answer:
+#: the file carries audio but no persisted evidence attributes it to a narrator
+#: or to native source media, and inventing that difference would be a lie.
+AUDIO_SOURCE_NARRATION = "narration"
+AUDIO_SOURCE_NATIVE = "native"
+AUDIO_SOURCE_NATIVE_PLUS_NARRATION = "native_plus_narration"
+AUDIO_SOURCE_NONE = "none"
+AUDIO_SOURCE_UNKNOWN = "unknown"
+
+
+def _stage_status_value(manifest, stage) -> str | None:
+    """The persisted status string of one pipeline stage, or None if absent."""
+    result = manifest.get_stage_result(stage)
+    if result is None:
+        return None
+    return str(getattr(result.status, "value", result.status)).upper()
+
+
+def _stage_metadata(manifest, stage) -> dict:
+    result = manifest.get_stage_result(stage)
+    return dict(getattr(result, "metadata", None) or {})
+
+
+def _audio_execution_evidence(manifest) -> dict:
+    """Narration/native evidence taken ONLY from persisted execution evidence.
+
+    Prefers the assembly stage's audio evidence block (written by the accepted
+    audio-policy fix).  For projects that predate it, it falls back to other
+    durable evidence — a COMPLETED VOICE stage with a recorded audio artifact,
+    and scene-level ``AudioMediaFacts`` — and labels which path was used
+    through ``evidence_source``, so a reader always knows how a claim was
+    established.  Synthetic normalization silence is excluded by
+    ``has_native_audio`` semantics and is never reported as native audio.
+
+    Native provenance is then adjudicated by ``scene_audio_provenance`` (the
+    persisted synthetic identity), which can tell four things apart that a bare
+    probe cannot: established native audio, established synthetic silence, an
+    audio stream whose identity was never declared (historical evidence), and no
+    audio evidence at all.  A recorded native claim is only downgraded when
+    evidence actually contradicts it; it is never upgraded, and an unestablished
+    identity is reported as ``None`` rather than resolved by assumption.
+    """
+    from app.orchestrator.models import PipelineStage
+    from app.orchestrator.reconciliation import (
+        AUDIO_PROVENANCE_SYNTHETIC,
+        AUDIO_PROVENANCE_UNKNOWN,
+        native_audio_observed,
+        scene_audio_provenance,
+        summarize_audio_provenance,
+    )
+
+    persisted = _stage_metadata(manifest, PipelineStage.ASSEMBLY).get("audio")
+    voice_metadata = _stage_metadata(manifest, PipelineStage.VOICE)
+    voice_status = _stage_status_value(manifest, PipelineStage.VOICE)
+
+    if isinstance(persisted, dict) and persisted:
+        narration_present = bool(persisted.get("narration_track_present"))
+        native_present = bool(persisted.get("native_audio_present"))
+        native_scenes = [
+            str(scene_id)
+            for scene_id in (persisted.get("scenes_with_native_audio") or [])
+        ]
+        evidence_source = "assembly_audio_evidence"
+    else:
+        # Legacy path: a COMPLETED VOICE stage that recorded an audio artifact
+        # IS durable evidence that a narrator track exists.  A SKIPPED,
+        # FAILED, RUNNING, or absent one is not.  Never inferred from plan text.
+        narration_present = bool(
+            voice_status == "COMPLETED" and manifest.voice_audio_path
+        )
+        native_present = native_audio_observed(manifest)
+        native_scenes = []
+        evidence_source = "persisted_voice_and_scene_audio_evidence"
+
+    provenance = scene_audio_provenance(manifest)
+    summary = summarize_audio_provenance(provenance)
+    aggregate = summary["aggregate"]
+    established_native = summary["established_native"]
+    established_synthetic = summary["established_synthetic"]
+    unverified = summary["unverified"]
+
+    if established_native:
+        # Evidence positively establishes genuine scene audio.
+        native_present = True
+        native_scenes = sorted(set(native_scenes) | set(established_native))
+    elif aggregate == AUDIO_PROVENANCE_SYNTHETIC:
+        # Every recorded stream is declared synthetic silence: it is audio, but
+        # it is not native audio, whatever the codec or the older claim says.
+        native_present = False
+    elif aggregate in (AUDIO_PROVENANCE_UNKNOWN, "mixed"):
+        # Streams exist but their identity was never (fully) declared: the
+        # native question stays open instead of being answered by default.
+        native_present = None
+
+    return {
+        "narration_present": narration_present,
+        "native_present": native_present,
+        "native_scenes": native_scenes,
+        "synthetic_identity": aggregate,
+        "established_native_scenes": established_native,
+        "established_synthetic_scenes": established_synthetic,
+        "unverified_scenes": unverified,
+        "evidence_source": evidence_source,
+        "voice_stage_status": voice_status,
+        "voice_provider": voice_metadata.get("provider"),
+        "voice_audio_duration": voice_metadata.get("duration"),
+        "voice_skip_reason": voice_metadata.get("skip_reason"),
+    }
+
+
+def _final_audio_stream_facts(manifest, project_dir, artifact_available: bool) -> dict:
+    """Audio stream facts of the delivered artifact, labelled by provenance.
+
+    ``final_media_artifact``: read through the EXISTING authoritative
+    final-media evidence seam (one FFprobe pass over the accepted artifact) —
+    the top of the authority order, and the only source that can prove what the
+    delivered file actually carries today.
+
+    ``persisted_acceptance_metadata``: the facts the acceptance gate already
+    recorded for that artifact.  Used when a live probe is impossible (FFprobe
+    unavailable) or the recorded artifact is no longer present.
+
+    ``unavailable``: neither established anything.  Every field stays null —
+    ``UNKNOWN`` is never rendered as ``False``/``0``.
+    """
+    from app.orchestrator.models import PipelineStage
+    from app.orchestrator.reconciliation import (
+        final_audio_required,
+        final_media_evidence,
+    )
+
+    def _pack(**values):
+        facts = {
+            "has_audio": None,
+            "audio_stream_count": None,
+            "audio_codec": None,
+            "sample_rate": None,
+            "channels": None,
+            "audio_duration": None,
+            "audio_required": None,
+            "facts_source": "unavailable",
+            "artifact_inspected": False,
+        }
+        facts.update(values)
+        return facts
+
+    if artifact_available:
+        try:
+            evidence = final_media_evidence(manifest, project_dir)
+        except Exception as exc:  # noqa: BLE001 - a read must not become a 500
+            logger.info(
+                "Final media evidence could not be read (%s); falling back to "
+                "persisted acceptance metadata", type(exc).__name__
+            )
+            evidence = {}
+        validation = evidence.get("validation") or {}
+        if validation.get("exists") and "has_audio" in validation:
+            return _pack(
+                has_audio=bool(validation.get("has_audio")),
+                audio_stream_count=validation.get("audio_stream_count"),
+                audio_codec=validation.get("audio_codec"),
+                sample_rate=validation.get("audio_sample_rate"),
+                channels=validation.get("audio_channels"),
+                audio_duration=validation.get("audio_stream_duration"),
+                audio_required=validation.get("audio_required"),
+                facts_source="final_media_artifact",
+                artifact_inspected=True,
+            )
+
+    metadata = _stage_metadata(manifest, PipelineStage.COMPLETE)
+    recorded = metadata.get("audio_stream")
+    if isinstance(recorded, dict) and recorded:
+        return _pack(
+            has_audio=recorded.get("has_audio"),
+            audio_stream_count=recorded.get("audio_stream_count"),
+            audio_codec=recorded.get("audio_codec") or metadata.get("audio_codec"),
+            sample_rate=recorded.get("sample_rate"),
+            channels=recorded.get("channels"),
+            audio_duration=recorded.get("duration"),
+            # The REQUIREMENT is a policy fact, not a media fact, so it is
+            # re-derived from the recorded policy and native evidence through
+            # the single existing authority rather than being guessed.
+            audio_required=(
+                final_audio_required(manifest)
+                if recorded.get("has_audio") is not None
+                else None
+            ),
+            facts_source="persisted_acceptance_metadata",
+        )
+    if metadata.get("audio_codec"):
+        # Manifests written before the audio-stream block existed recorded only
+        # the acceptance codec: enough to establish THAT audio was delivered,
+        # not enough to describe the stream.  The rest stays null.
+        return _pack(
+            has_audio=True,
+            audio_codec=metadata.get("audio_codec"),
+            audio_required=final_audio_required(manifest),
+            facts_source="persisted_acceptance_metadata",
+        )
+    return _pack()
+
+
+def _final_audio_tracks(policy, facts, evidence) -> dict:
+    """Which tracks the DELIVERED artifact carries, per policy + evidence.
+
+    Scene-level evidence answers "does native scene audio exist"; the applied
+    policy decides whether that audio was allowed into the final mix at all.
+    Under ``narration_only`` an existing narrator track SUPPRESSES native audio
+    (the frozen ``select_audio_inputs`` behavior), so native evidence must never
+    be reported as delivered audio merely because some scene had sound.  Both
+    claims are returned separately so neither can be mistaken for the other.
+    """
+    has_audio = bool(facts.get("has_audio"))
+    narration_exists = evidence["narration_present"]
+    native_exists = evidence["native_present"]
+    permits_narration = audio_policy_requires_narration(policy)
+    permits_native = policy in (
+        AudioPolicy.NATIVE_ONLY,
+        AudioPolicy.NATIVE_PLUS_NARRATION,
+    )
+
+    narration_delivered = has_audio and narration_exists and permits_narration
+    if policy == AudioPolicy.NARRATION_ONLY and narration_exists:
+        native_delivered = False
+    else:
+        # ``native_exists`` is deliberately tri-state: True (established native),
+        # False (established non-native, e.g. declared synthetic silence) and
+        # ``None`` (an audio stream whose synthetic identity was never declared).
+        # Only an established True may be delivered as native audio; ``None`` must
+        # never be resolved to True by a policy that merely permits native audio,
+        # and it is not the same answer as an established False either.
+        native_delivered = bool(has_audio and native_exists is True and permits_native)
+
+    return {
+        "narration_exists": narration_exists,
+        "native_exists": native_exists,
+        "native_unverified": native_exists is None,
+        "narration_delivered": narration_delivered,
+        "native_delivered": native_delivered,
+    }
+
+
+def _classify_final_audio_source(policy, facts, evidence) -> str:
+    """What the FINAL artifact's audio actually is, from real evidence.
+
+    Tolerant of every combination the frozen policy layer legitimately
+    produces (``native_plus_narration`` may carry only one track; a policy that
+    suppresses native audio delivers narration alone) and answers ``unknown``
+    whenever the file carries audio that no evidence attributes.
+    """
+    has_audio = facts.get("has_audio")
+    if has_audio is False:
+        return AUDIO_SOURCE_NONE
+    if has_audio is not True:
+        return AUDIO_SOURCE_UNKNOWN
+    tracks = _final_audio_tracks(policy, facts, evidence)
+    if tracks["narration_delivered"] and tracks["native_delivered"]:
+        return AUDIO_SOURCE_NATIVE_PLUS_NARRATION
+    if tracks["narration_delivered"]:
+        return AUDIO_SOURCE_NARRATION
+    if tracks["native_delivered"]:
+        return AUDIO_SOURCE_NATIVE
+    # Audio exists but nothing establishes whose track it is — for example a
+    # stream delivered under a policy that permits none.  Never invent a source.
+    return AUDIO_SOURCE_UNKNOWN
+
+
+def _audio_policy_from_manifest(manifest) -> AudioPolicy:
+    """The persisted EFFECTIVE policy (hierarchy #5), via the shared normalizer.
+
+    A legacy manifest with no snapshot resolves to the historical
+    ``narration_only`` default exactly as reconciliation and the pipeline do —
+    this reads the recorded decision, it never recompiles intent.
+    """
+    return normalize_audio_policy(
+        (manifest.assembly_config or {}).get("audio_policy")
+    )
+
+
+def _resolve_audio_preview_state(final_video, facts, policy) -> tuple[str, str, bool]:
+    """``(state, reason, playable)`` from the artifact and its real streams.
+
+    Existing artifact states decide the mapping, so this can never disagree
+    with the frozen presentation contract:
+
+    - AVAILABLE + audio stream present -> ``AVAILABLE``  (playable)
+    - AVAILABLE + no audio stream      -> ``NOT_REQUIRED`` when the applied
+      policy required nothing, ``NO_AUDIO`` when audio simply was not there,
+      ``FAILED`` only when the policy REQUIRED audio that is absent
+    - RECORDED BUT MISSING / FAILED    -> ``FAILED`` (the delivered bytes are
+      not there to preview; stale facts are never echoed as availability)
+    - NOT GENERATED                    -> ``INCOMPLETE``
+    - unprobed                         -> ``UNKNOWN`` (never guessed)
+    """
+    artifact_state = (final_video or {}).get("state")
+    has_audio = facts.get("has_audio")
+
+    if artifact_state == "AVAILABLE":
+        if has_audio is True:
+            return (
+                AUDIO_STATE_AVAILABLE,
+                "The final artifact carries an audio stream: play it through "
+                "media_url to hear exactly what the production delivered.",
+                True,
+            )
+        if has_audio is False:
+            if policy == AudioPolicy.NONE:
+                return (
+                    AUDIO_STATE_NOT_REQUIRED,
+                    "This production intentionally carries no audio: the "
+                    "applied audio policy is 'none'.",
+                    False,
+                )
+            if facts.get("audio_required") is False:
+                return (
+                    AUDIO_STATE_NO_AUDIO,
+                    "The final artifact carries no audio stream. This is not "
+                    "an error: the applied policy did not require narrator "
+                    "audio and no native scene audio was available.",
+                    False,
+                )
+            if facts.get("audio_required") is True:
+                return (
+                    AUDIO_STATE_FAILED,
+                    "The applied audio policy requires an audio stream, but "
+                    "the final artifact carries none.",
+                    False,
+                )
+            return (
+                AUDIO_STATE_UNKNOWN,
+                "The final artifact carries no audio stream, and no recorded "
+                "evidence establishes whether audio was required. Nothing was "
+                "inferred.",
+                False,
+            )
+        if policy == AudioPolicy.NONE:
+            # An applied policy of ``none`` already establishes that NO audio is
+            # required, so the outcome is known from executed policy evidence
+            # even when the stream itself cannot be inspected.  It is still not
+            # "available"/"playable": nothing is claimed about the bytes.
+            return (
+                AUDIO_STATE_NOT_REQUIRED,
+                "This production's applied audio policy is 'none' "
+                "(intentionally audio-free); the artifact's stream could not be "
+                "inspected, so nothing was claimed about the bytes.",
+                False,
+            )
+        return (
+            AUDIO_STATE_UNKNOWN,
+            "The final artifact exists, but its audio stream could not be "
+            "inspected (no recorded acceptance metadata and FFprobe is "
+            "unavailable). Nothing was inferred.",
+            False,
+        )
+
+    if artifact_state in ("FAILED", "RECORDED BUT MISSING"):
+        return (
+            AUDIO_STATE_FAILED,
+            "The final video is not deliverable"
+            + (
+                ": the producing stage reported failure."
+                if artifact_state == "FAILED"
+                else ": the recorded artifact path is missing on disk."
+            ),
+            False,
+        )
+
+    return (
+        AUDIO_STATE_INCOMPLETE,
+        "No final video has been assembled for this unit yet, so there is no "
+        "production audio to preview.",
+        False,
+    )
+
+
+def unit_audio_payload(production_id: str, unit_id: str):
+    """AUDIO PREVIEW: read-only truth about the finished unit's audio.
+
+    Strictly a read: it never generates TTS, never executes or resumes a
+    production, never repairs an artifact, never writes a manifest, and never
+    calls a provider.  It reports the declared ``audio_intent`` alongside the
+    EFFECTIVE policy and the ACTUAL delivered media, so a caller can always
+    distinguish "what was asked for" from "what exists".
+    """
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    unit = next(
+        (item for item in production.units if item.unit_id == unit_id), None
+    )
+    if unit is None:
+        return 400, {
+            "error": "UNIT_NOT_FOUND",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "message": f"unit {unit_id!r} is not part of {production_id}.",
+        }
+    try:
+        bindings = _production_executor(production_id).discover_bindings(production)
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    bound = bindings.get(unit_id)
+
+    payload = {
+        "production_id": production_id,
+        "unit_id": unit_id,
+        "project_id": bound.directory_id if bound else None,
+        # Declared intent (what was ASKED for), reported verbatim and never
+        # used below to decide what the final file contains.
+        "audio_intent": production.audio_intent,
+        "audio_intent_declared": production.audio_intent is not None,
+        "audio_intent_source": None,
+        "effective_audio_policy": None,
+        "narration_required": None,
+        "audio_source": None,
+        "state": AUDIO_STATE_INCOMPLETE,
+        "available": False,
+        "playable": False,
+        "media_url": None,
+        "media_content_type": None,
+        "narration": None,
+        "native_audio": None,
+        "audio_stream": None,
+        "final_video": None,
+        "evidence": None,
+        "reason": (
+            "This unit has no bound execution project yet; nothing has been "
+            "assembled, so there is no production audio to preview."
+        ),
+        "sample": False,
+    }
+    if bound is None:
+        return 200, _redact_secrets(payload)
+
+    manifest = bound.manifest
+    final_video = _artifact_payload(manifest, bound.directory_id).get("final_video") or {}
+    final_available = final_video.get("state") == "AVAILABLE"
+    policy = _audio_policy_from_manifest(manifest)
+    evidence = _audio_execution_evidence(manifest)
+    facts = _final_audio_stream_facts(manifest, bound.project_dir, final_available)
+    tracks = _final_audio_tracks(policy, facts, evidence)
+    state, reason, playable = _resolve_audio_preview_state(final_video, facts, policy)
+    if (
+        tracks["native_unverified"]
+        and not tracks["narration_delivered"]
+        and facts.get("has_audio")
+    ):
+        # Audio is present, but nothing declared whether it is genuine scene
+        # audio or AVM-generated silence.  Report the open question instead of
+        # naming a source, and say what would settle it.
+        reason = (
+            "The final artifact carries an audio stream, but its synthetic "
+            "identity was never declared for "
+            + ", ".join(evidence["unverified_scenes"])
+            + ", so native audio is not claimed.  Scenes completed after this "
+            "evidence seam persist their declared audio facts, which resolves "
+            "the question."
+        )
+
+    payload.update({
+        "audio_intent_source": (manifest.assembly_config or {}).get(
+            "audio_intent_source"
+        ),
+        "effective_audio_policy": policy.value,
+        "narration_required": audio_policy_requires_narration(policy),
+        "audio_source": _classify_final_audio_source(policy, facts, evidence),
+        "state": state,
+        "available": state == AUDIO_STATE_AVAILABLE,
+        "playable": playable,
+        # The EXISTING range-aware final-media route is the preview surface:
+        # a browser plays the audio that is actually in the finished file.  No
+        # separate audio file, extraction, or transcoding is invented.
+        "media_url": (
+            f"/api/projects/{bound.directory_id}/media" if playable else None
+        ),
+        "media_content_type": MIME[".mp4"] if playable else None,
+        "narration": {
+            # "present" answers the delivered artifact; "track_recorded" keeps
+            # the execution fact visible without implying it reached the mix
+            # (a narrator track is suppressed by a native-only policy).
+            "present": tracks["narration_delivered"],
+            "track_recorded": tracks["narration_exists"],
+            "voice_stage_status": evidence["voice_stage_status"],
+            "voice_provider": evidence["voice_provider"],
+            "voice_audio_duration": evidence["voice_audio_duration"],
+            "intentionally_skipped": evidence["voice_stage_status"] == "SKIPPED",
+            "skip_reason": evidence["voice_skip_reason"],
+        },
+        "native_audio": {
+            # Same distinction: scene media may carry real audio that the
+            # applied policy deliberately excluded from the final file.
+            "present": tracks["native_delivered"],
+            "scene_audio_recorded": tracks["native_exists"],
+            "scenes": evidence["native_scenes"],
+            # Synthetic identity, exactly as persisted.  ``native`` and
+            # ``synthetic`` are established answers; ``unknown`` means audio was
+            # recorded but no provider declared what it is (historical scenes);
+            # ``absent`` means no audio evidence exists for any scene.  A known
+            # synthetic stream is never reported as native audio, and an unknown
+            # one is never silently promoted to either answer.
+            "synthetic_identity": evidence["synthetic_identity"],
+            "established_native_scenes": evidence["established_native_scenes"],
+            "established_synthetic_scenes": evidence["established_synthetic_scenes"],
+            "unverified_scenes": evidence["unverified_scenes"],
+        },
+        "audio_stream": facts,
+        "final_video": {
+            "state": final_video.get("state"),
+            "available": final_available,
+            "reason": final_video.get("reason"),
+        },
+        "evidence": {"source": evidence["evidence_source"]},
+        "reason": reason,
+    })
+    return 200, _redact_secrets(payload)
+
+
+# ---------------------------------------------------------------------------
+# G5 — plan / script CONTENT read projection (strictly read-only)
+# ---------------------------------------------------------------------------
+
+#: The ONLY creative fields this surface returns.  Everything else the
+#: authoritative plan model carries — plan/project identity, ``metadata``
+#: (planner provenance: provider, model, generated_at), and per-scene
+#: production hints (transition, on_screen_text, visual_style,
+#: camera_direction, sound_design, visual_source) — stays server-side.
+#: Planner provenance, route-compilation evidence, scene provenance and
+#: accounting each already have their own surfaces and are never mixed into
+#: creative plan content.
+PLAN_CREATIVE_FIELDS = (
+    "title",
+    "hook",
+    "script",
+    "call_to_action",
+    "estimated_duration",
+)
+PLAN_SCENE_CREATIVE_FIELDS = (
+    "id",
+    "sequence",
+    "narration",
+    "visual_prompt",
+    "estimated_duration",
+    "purpose",
+)
+
+#: Reuses the existing artifact-state vocabulary (``_artifact_state``).
+PLAN_STATE_AVAILABLE = "AVAILABLE"
+PLAN_STATE_NOT_GENERATED = "NOT_GENERATED"
+
+
+def _plan_not_generated(production_id: str, unit_id: str) -> dict:
+    """Honest absence: the plan is produced by execution, never by a GET."""
+    return {
+        "production_id": production_id,
+        "unit_id": unit_id,
+        "available": False,
+        "state": PLAN_STATE_NOT_GENERATED,
+        "plan": None,
+        "reason": (
+            "No plan has been generated for this unit yet. Plans are produced "
+            "by execution; this read never generates, repairs, or backfills "
+            "one."
+        ),
+        "sample": False,
+    }
+
+
+def _plan_evidence_invalid(production_id: str, unit_id: str, reason) -> dict:
+    """Structured, path-free refusal to serve untrusted plan bytes."""
+    return {
+        "error": "PLAN_EVIDENCE_INVALID",
+        "production_id": production_id,
+        "unit_id": unit_id,
+        "available": False,
+        "message": (
+            "The pinned unit plan could not be served as trusted content: "
+            f"{_browser_safe_diagnostic(reason)}. Core never regenerates, "
+            "repairs, or backfills a plan on a read; the durable plan "
+            "artifacts and the production binding remain the source of truth."
+        ),
+    }
+
+
+def _plan_creative_content(plan) -> dict:
+    """Explicit allow-list projection of the plan's creative content."""
+    return {
+        "title": plan.title,
+        "hook": plan.hook,
+        "script": plan.script,
+        "call_to_action": plan.call_to_action,
+        "estimated_duration": plan.estimated_duration,
+        "scenes": [
+            {
+                "id": scene.id,
+                "sequence": scene.sequence,
+                "narration": scene.narration,
+                "visual_prompt": scene.visual_prompt,
+                "estimated_duration": scene.estimated_duration,
+                "purpose": scene.purpose,
+            }
+            for scene in plan.scenes
+        ],
+    }
+
+
+def unit_plan_payload(production_id: str, unit_id: str):
+    """Read-only GET projection of one unit's authoritative creative plan.
+
+    The plan/script content is ALREADY durable and hash-pinned; this endpoint
+    only PROJECTS it.  No persistence, no manifest, and no planning behavior is
+    touched here.
+
+    Truth rules, all reused from existing Core semantics:
+
+    - ONE authoritative source for a production unit: the pinned plan artifact
+      ``productions/<production_id>/units/<unit_id>/plan/production_plan.json``
+      written by ``ProductionExecutor.resolve_plan``.
+    - A bound unit runs the existing binding authority FIRST
+      (``ProductionExecutor.discover_bindings``), which re-hashes the pinned
+      bytes against ``ProjectManifest.production_binding`` and compares plan
+      identity/versions; any contradiction raises there and is reported
+      truthfully, never served as content.
+    - The bytes must parse and validate as the existing ``ProductionPlan``
+      model, must hash (``compute_content_hash`` — the same SHA-256 helper the
+      executor uses) to the hash recorded in ``plan_meta.json``, and the plan's
+      own identity must equal the recorded ``plan_identity``.  The artifact's
+      production/unit identity must equal what was requested.
+    - Missing plan = honest ``NOT_GENERATED`` with ``available: false``,
+      because plans are created by execution.  Content is never fabricated
+      from production intent.
+    - Strictly non-mutating: no writes, no regeneration, no repair, no
+      backfill, no timestamp updates.
+    """
+    try:
+        production = _production_or_none(production_id)
+    except ValueError as exc:
+        return 500, _intent_malformed(production_id, exc)
+    if production is None:
+        return 404, _production_not_found(production_id)
+    unit = next(
+        (item for item in production.units if item.unit_id == unit_id), None
+    )
+    if unit is None:
+        return 400, {
+            "error": "UNIT_NOT_FOUND",
+            "production_id": production_id,
+            "unit_id": unit_id,
+            "message": f"unit {unit_id!r} is not part of {production_id}.",
+        }
+
+    from app.orchestrator.production_execution import META_FILE, PLAN_FILE
+    from app.production.storage import compute_content_hash, unit_plan_dir
+
+    # Existing binding authority (read-only): for a bound unit this is what
+    # proves the pinned bytes are the bytes the bound execution actually ran.
+    try:
+        bindings = _production_executor(production_id).discover_bindings(
+            production
+        )
+    except Exception as exc:
+        return 500, _executor_error(exc)
+    bound = bindings.get(unit_id)
+
+    directory = unit_plan_dir(production_id, unit_id, root=PRODUCTIONS_DIR)
+    plan_path = directory / PLAN_FILE
+    meta_path = directory / META_FILE
+    if not plan_path.is_file() and not meta_path.is_file():
+        return 200, _plan_not_generated(production_id, unit_id)
+    if not plan_path.is_file() or not meta_path.is_file():
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id, "partial unit plan artifacts"
+        )
+
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id,
+            f"malformed plan metadata ({type(exc).__name__})",
+        )
+    if not isinstance(meta, dict):
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id, "plan metadata is not an object"
+        )
+
+    # The artifact must belong to exactly the unit that was asked for.
+    if (
+        meta.get("production_id") != production_id
+        or meta.get("unit_id") != unit_id
+    ):
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id, "plan metadata identity mismatch"
+        )
+
+    # The served bytes must be the bytes the recorded hash vouches for.
+    recorded_hash = meta.get("content_hash")
+    if not recorded_hash:
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id, "plan metadata records no content hash"
+        )
+    try:
+        actual_hash = compute_content_hash(plan_path)
+    except OSError as exc:
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id,
+            f"plan artifact unreadable ({type(exc).__name__})",
+        )
+    if actual_hash != recorded_hash:
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id,
+            "plan content hash does not match plan metadata",
+        )
+
+    # Validate as the real plan model; malformed content is never projected.
+    from app.content.models import ProductionPlan
+
+    try:
+        plan = ProductionPlan.model_validate(
+            json.loads(plan_path.read_text(encoding="utf-8-sig"))
+        )
+    except Exception as exc:
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id,
+            f"invalid production plan ({type(exc).__name__})",
+        )
+
+    if meta.get("plan_identity") and plan.project_id != meta.get("plan_identity"):
+        return 500, _plan_evidence_invalid(
+            production_id, unit_id, "plan identity does not match plan metadata"
+        )
+    if bound is not None:
+        # Defensive belt-and-braces: discover_bindings above already fails
+        # loudly on any binding contradiction, so this can only fire on a
+        # future divergence. Either way, an unbacked plan is never served.
+        binding = bound.manifest.production_binding
+        if (
+            binding is None
+            or plan.project_id != binding.unit_plan_identity
+            or actual_hash != binding.unit_plan_content_hash
+            or int(meta.get("production_plan_version") or 0)
+            != binding.production_plan_version
+        ):
+            return 500, _plan_evidence_invalid(
+                production_id, unit_id, "plan does not match the production binding"
+            )
+
+    return 200, _redact_secrets({
+        "production_id": production_id,
+        "unit_id": unit_id,
+        "available": True,
+        "state": PLAN_STATE_AVAILABLE,
+        "plan": _plan_creative_content(plan),
+        "sample": False,
+    })
+
+
 def production_command_payload(
     production_id: str, unit_id, action: str, body: dict
 ):
@@ -2220,6 +3806,37 @@ class AVMHandler(BaseHTTPRequestHandler):
                 match.group(1), match.group(2)
             )
             return self._json(status, payload)
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/plan/?$", path)
+        if match:
+            # G5: explicit, unit-level creative plan read. Plan bodies are
+            # only ever read when THIS route is requested — never in the
+            # production list/detail/progress paths (Phase 2B performance).
+            status, payload = unit_plan_payload(match.group(1), match.group(2))
+            return self._json(status, payload)
+        # Operator-selected source segments (Track 8 V1).
+        mseg = re.match(r"^/api/productions/([^/]+)/source/([^/]+)/segments/?$", path)
+        if mseg:
+            from app.production.segments import load_segments
+            status, payload = load_segments(mseg.group(1), mseg.group(2), root=PRODUCTIONS_DIR)
+            return self._json(status, payload)
+        # Transcript GET (Track 8 V1)
+        mtr = re.match(r"^/api/productions/([^/]+)/source/([^/]+)/transcript/?$", path)
+        if mtr:
+            from app.transcription.transcribe import load_transcript
+            try:
+                tr = load_transcript(mtr.group(1), mtr.group(2), root=PRODUCTIONS_DIR)
+                return self._json(200, tr.model_dump())
+            except FileNotFoundError:
+                return self._json(404, {"error": "TRANSCRIPT_NOT_FOUND"})
+            except Exception as e:
+                return self._json(500, {"error": "LOAD_FAILED", "message": f"{e.__class__.__name__}"})
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/audio/?$", path)
+        if match:
+            # AUDIO PREVIEW: an explicit, unit-scoped, read-only evidence read.
+            # Like the plan and reconciliation reads it is never touched by the
+            # list/progress paths, so no media inspection happens on a poll.
+            status, payload = unit_audio_payload(match.group(1), match.group(2))
+            return self._json(status, payload)
         match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/?$", path)
         if match:
             status, payload = unit_detail_payload(match.group(1), match.group(2))
@@ -2235,6 +3852,51 @@ class AVMHandler(BaseHTTPRequestHandler):
         return self._json(404, {"detail": "not found"})
 
     def _productions_post(self, path: str):
+        m = re.match(r"^/api/productions/([^/]+)/source/?$", path)
+        if m:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 64 * 1024:
+                return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                return self._json(400, {"error": "INVALID_JSON"})
+            from app.production.source import register_source
+            status, payload = register_source(m.group(1), body.get("source_path") or "", root=PRODUCTIONS_DIR)
+            return self._json(status, payload)
+        # Track 8 source segment save (operator-selected ranges only).
+        mseg = re.match(r"^/api/productions/([^/]+)/source/([^/]+)/segments/?$", path)
+        if mseg:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 64 * 1024:
+                return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                return self._json(400, {"error": "INVALID_JSON"})
+            from app.production.segments import save_segments
+            status, payload = save_segments(mseg.group(1), mseg.group(2), body, root=PRODUCTIONS_DIR)
+            return self._json(status, payload)
+        # Track 8 V1 transcript
+        m2 = re.match(r"^/api/productions/([^/]+)/source/([^/]+)/transcript/?$", path)
+        if m2:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 64 * 1024:
+                return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}") if raw.strip() else {}
+            except Exception:
+                return self._json(400, {"error": "INVALID_JSON"})
+            from app.transcription.transcribe import transcribe_source
+            # Truthfulness: omitted provider -> production default (local_whisper),
+            # NOT silent mock.  Mock requires explicit provider="mock".
+            raw_prov = body.get("provider")
+            prov = str(raw_prov).strip() if isinstance(raw_prov, str) and raw_prov.strip() else None
+            status, payload = transcribe_source(m2.group(1), m2.group(2), root=PRODUCTIONS_DIR, provider=prov)
+            return self._json(status, payload)
         if re.match(r"^/api/productions/?$", path):
             return self._creation_post()
         match = re.match(r"^/api/productions/([^/]+)/(execute|resume)/?$", path)
@@ -2266,6 +3928,10 @@ class AVMHandler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "service": "avm-web"})
             if path == "/api/connections":
                 return self._json(200, connections_payload())
+            if path == "/api/capabilities":
+                # Phase 2C: read-only local configuration readiness. Exact
+                # path only — it never addresses a production or project.
+                return self._json(200, capabilities_payload())
             if path == "/api/projects":
                 return self._json(200, projects_index())
             match = re.match(r"^/api/projects/([^/]+)/publish/tiktok/status$", path)
@@ -2338,6 +4004,21 @@ class AVMHandler(BaseHTTPRequestHandler):
                 return self._json(405, {
                     "error": "METHOD_NOT_ALLOWED",
                     "message": "Asset surfaces are GET-only.",
+                })
+            if re.match(r"^/api/productions/[^/]+/units/[^/]+/audio/?$", path):
+                # The audio surface is evidence, not an action: it can never
+                # generate TTS, extract audio, or execute a production.
+                return self._json(405, {
+                    "error": "METHOD_NOT_ALLOWED",
+                    "message": "Audio evidence is a GET-only, read-only "
+                               "surface; it never generates or executes "
+                               "anything.",
+                })
+            if path == "/api/capabilities":
+                return self._json(405, {
+                    "error": "METHOD_NOT_ALLOWED",
+                    "message": "Capability readiness is a GET-only, "
+                               "read-only configuration surface.",
                 })
             match = re.match(r"^/api/platforms/(youtube|tiktok)/connect$", path)
             if match:

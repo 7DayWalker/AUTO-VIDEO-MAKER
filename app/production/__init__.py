@@ -23,7 +23,9 @@ Frozen authority: PHASE_9_DURABLE_PRODUCTION_PLAN.md.
 """
 
 from app.production.models import (
+    AUDIO_INTENTS,
     BIBLE_CANONICAL_SECTIONS,
+    DEFAULT_AUDIO_INTENT,
     PROVIDER_INTENT_DEFAULT,
     PROVIDER_INTENT_NAMES,
     PRODUCTION_ROUTES,
@@ -37,6 +39,7 @@ from app.production.models import (
     ProductionBible,
     ProductionCommand,
     ProductionUnit,
+    normalize_audio_intent,
 )
 from app.production.routes import (
     DEFAULT_PRODUCTION_ROUTE,
@@ -83,6 +86,10 @@ __all__ = [
     "BIBLE_CANONICAL_SECTIONS",
     "RECOMMENDED_UNIT_TYPES",
     "PRODUCTION_ROUTES",
+    # V1 audio intent (production-level audio decision; never Scene.narration)
+    "AUDIO_INTENTS",
+    "DEFAULT_AUDIO_INTENT",
+    "normalize_audio_intent",
     "Production",
     "ProductionCommand",
     "ProductionBible",

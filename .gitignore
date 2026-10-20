@@ -76,3 +76,8 @@ validate_scene1_live.py
 
 # ----- Cloudflare Wrangler Runtime -----
 .wrangler/
+# Local smoke workspaces, validation media, and handoff notes
+_real_smoke_source/
+_real_smoke_wk/
+single_window_frames/
+ChatGPT to Gemini Handoff Note.md

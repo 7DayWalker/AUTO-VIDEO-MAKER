@@ -29,3 +29,9 @@ google-auth-oauthlib==1.2.1
 
 # ----- Gemini Omni Video (Phase 7C) -----
 google-genai==2.20.0
+
+# ----- Local STT (Phase 11C Track 8) - real local transcription ----
+# openai-whisper is the production STT engine (LocalWhisperProvider).
+# torch is its required backend. The mock provider remains for tests.
+openai-whisper==20250625
+torch==2.14.1

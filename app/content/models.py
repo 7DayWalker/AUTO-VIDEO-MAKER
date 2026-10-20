@@ -318,9 +318,34 @@ class ContentGenerationResult(BaseModel):
     attempts: int = Field(default=1, ge=1)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[str] = None
+    # Step 6 (additive, model-centric AI Brain evidence):
+    #
+    # ``model`` above is the PROVIDER WIRE MODEL (e.g. ``qwen3.8-27b``) — that
+    # established meaning is preserved, never silently changed. The user-facing
+    # CANONICAL MODEL identity (e.g. ``qwen-3.8-flash``) therefore needs its
+    # own field; no existing field can carry it without semantic corruption.
+    #
+    # None = UNKNOWN: the legacy provider-first path, mock and local execution
+    # legitimately have no canonical model, and it is NEVER inferred from the
+    # provider model id.
+    canonical_model_id: Optional[str] = None
+    #: Raw provider-reported execution evidence, projected by
+    #: ``app.content.execution_evidence`` into the established
+    #: provenance/accounting vocabulary at the persistence seam. Mirrors
+    #: ``SceneGenerationResult.verification`` on the video side. Empty for
+    #: legacy results; never carries raw bodies, prompts or credentials.
+    verification: Dict[str, Any] = Field(default_factory=dict)
     
     @classmethod
-    def failure(cls, error: str, provider: str = None, model: str = None, attempts: int = 1) -> "ContentGenerationResult":
+    def failure(
+        cls,
+        error: str,
+        provider: str = None,
+        model: str = None,
+        attempts: int = 1,
+        canonical_model_id: str = None,
+        verification: Dict[str, Any] = None,
+    ) -> "ContentGenerationResult":
         """Create a failure result."""
         return cls(
             success=False,
@@ -328,6 +353,8 @@ class ContentGenerationResult(BaseModel):
             provider=provider,
             model=model,
             attempts=attempts,
+            canonical_model_id=canonical_model_id,
+            verification=verification or {},
         )
     
     @classmethod
@@ -338,6 +365,8 @@ class ContentGenerationResult(BaseModel):
         model: str,
         attempts: int = 1,
         warnings: List[str] = None,
+        canonical_model_id: str = None,
+        verification: Dict[str, Any] = None,
     ) -> "ContentGenerationResult":
         """Create a success result from a production plan."""
         return cls(
@@ -347,6 +376,8 @@ class ContentGenerationResult(BaseModel):
             model=model,
             attempts=attempts,
             warnings=warnings or [],
+            canonical_model_id=canonical_model_id,
+            verification=verification or {},
         )
 
 

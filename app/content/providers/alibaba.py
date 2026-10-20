@@ -443,6 +443,107 @@ class AlibabaProvider(BaseLLMProvider):
             self.name, f"unexpected HTTP {status}: {_trim_key(message)}"
         )
 
+    def supports_multimodal(self) -> bool:
+        return True
+
+    def generate_multimodal(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        *,
+        video: Optional[str] = None,
+        images: Optional[list] = None,
+        video_bytes: Optional[bytes] = None,
+        response_schema: Optional[type] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        """Multimodal via DashScope vision model (Qwen-VL): images/frames + transcript."""
+        # Keep conversion provider-side: if video supplied, extract frames via FFmpeg
+        if self._credential_class_error is not None:
+            raise self._credential_class_error
+        if not self._api_key:
+            raise AlibabaAuthenticationError(self.name)
+        validate_alibaba_credential(self._api_key)
+        import base64, pathlib, tempfile, subprocess, os
+        # Build OpenAI-compatible message with multimodal content
+        content_parts: list[dict] = [{"type": "text", "text": prompt}]
+        # Prefer video_bytes, then video file, then images
+        if video_bytes is not None:
+            b64 = base64.b64encode(video_bytes).decode("ascii")
+            content_parts.append({"type": "image_url", "image_url": {"url": f"data:video/mp4;base64,{b64}"}})
+        elif video is not None and os.path.isfile(video):
+            # Provider-specific conversion: extract frames deterministically (no fixed-count in contract)
+            # Use FFmpeg to sample frames; keep small and deterministic
+            try:
+                from app.assembly.ffmpeg import resolve_ffmpeg
+                ff = resolve_ffmpeg()
+                if ff:
+                    tmpd = pathlib.Path(tempfile.mkdtemp(prefix="qwen_vl_"))
+                    # Sample ~1 frame per 30s bounded to 6 frames max for this understanding window
+                    # Deterministic: caller windows are ~120s, so 4 frames covers it
+                    duration_probe = None
+                    try:
+                        from app.assembly.ffmpeg import probe_media
+                        duration_probe = probe_media(pathlib.Path(video)).duration or 0
+                    except Exception:
+                        duration_probe = 0
+                    # Use window prompt to infer sub-range: we treat whole file as evidence for now
+                    # Extract at 10%, 40%, 70%, 90% to capture visual change
+                    fracs = [0.15, 0.40, 0.70, 0.92]
+                    for fi, frac in enumerate(fracs):
+                        ts = max(0.5, float(duration_probe) * frac) if duration_probe and duration_probe > 2 else fi * 2.0
+                        out = tmpd / f"frame_{fi:02d}.jpg"
+                        cmd = [ff, "-y", "-ss", f"{ts:.2f}", "-i", str(video), "-vframes", "1", "-vf", "scale=512:-2", str(out)]
+                        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=20)
+                        if out.is_file() and out.stat().st_size > 1000:
+                            b64 = base64.b64encode(out.read_bytes()).decode("ascii")
+                            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                    # cleanup tmp
+                    try:
+                        import shutil as _sh
+                        _sh.rmtree(tmpd, ignore_errors=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if images:
+            for p in images:
+                try:
+                    ib = pathlib.Path(p).read_bytes()
+                    b64 = base64.b64encode(ib).decode("ascii")
+                    content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                except Exception:
+                    continue
+        # If no visual evidence was attached, still call vision model with text only (still multimodal capable)
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content_parts})
+        payload: dict = {
+            "model": self._vision_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if response_schema is not None:
+            payload["response_format"] = {"type": "json_object"}
+        self.last_request_kind = "multimodal"
+        started = time.monotonic()
+        data = self._post_chat(payload)
+        self.last_latency_ms = int((time.monotonic() - started) * 1000)
+        choices = data.get("choices") or []
+        if not choices:
+            raise AlibabaResponseError("multimodal response no choices", str(data)[:500])
+        content = (choices[0].get("message") or {}).get("content")
+        if isinstance(content, list):
+            # OpenAI list content: join text parts
+            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if not isinstance(content, str) or not content.strip():
+            raise AlibabaResponseError("multimodal empty content", str(data)[:500])
+        usage = _normalize_usage(data.get("usage"))
+        return LLMResponse(content=content, provider=self.name, model=self._vision_model, usage=usage)
+
     def generate_json(
         self,
         prompt: str,

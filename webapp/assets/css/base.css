@@ -3,6 +3,11 @@
    Dark, AI-native, premium. Dependency-free.
    ============================================================ */
 
+/* AVM Projector: editorial display serif for the Creator Home (Fraunces),
+   with system-serif fallback. Font loading failure is non-fatal and never
+   blocks rendering (display=swap + local fallbacks). */
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,340..640;1,9..144,340..640&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
 :root {
   /* Surfaces */
   --bg: #0b0f14;
@@ -52,6 +57,18 @@
   --glass-border: rgba(148, 163, 184, 0.16);
   --glow-accent: 0 0 44px rgba(79, 140, 255, 0.22);
   --glow-violet: 0 0 44px rgba(139, 124, 255, 0.18);
+
+  /* AVM Projector — warm cinematic identity for the Creator Home.
+     Raw values only; scoping to .home-view happens in home.css.
+     Status colors (success/warn/danger) intentionally stay global. */
+  --font-display: "Fraunces", "Iowan Old Style", Georgia, "Times New Roman", serif;
+  --projector: #eda43c;
+  --projector-bright: #ffc873;
+  --projector-soft: #f5d9a6;
+  --projector-ink: #20140a;
+  --ember: #c97b2e;
+  --cine-shadow: 0 2px 6px rgba(0, 0, 0, .45), 0 26px 70px -26px rgba(0, 0, 0, .8);
+  --glow-projector: 0 0 44px rgba(237, 164, 60, .24);
 
   --font: "Inter", "SF Pro Display", "Segoe UI Variable", "Segoe UI",
           system-ui, -apple-system, sans-serif;

@@ -30,12 +30,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from pydantic import ValidationError
 
-from app.production.models import Production
+from app.production.models import (
+    Production,
+    SourceAsset,
+    SourceSegment,
+    derive_production_unit_from_segment as _derive_unit_from_segment,
+)
 from app.production.routes import assert_saas_production_route
 from app.production.validation import assert_valid_production
 
@@ -43,6 +49,8 @@ _PRODUCTION_FILE = "production.json"
 _VERSIONS_DIR = "versions"
 _UNITS_DIR = "units"
 _PLAN_DIR = "plan"
+_SOURCE_DIR = "source"
+_SOURCE_META = "source.json"
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +92,116 @@ def unit_plan_dir(
     production_id: str, unit_id: str, root: Optional[Path] = None
 ) -> Path:
     return production_dir(production_id, root) / _UNITS_DIR / unit_id / _PLAN_DIR
+
+
+def narration_artifact_path(
+    production_id: str, unit_id: str, root: Optional[Path] = None
+) -> Path:
+    return unit_plan_dir(production_id, unit_id, root) / "narration.json"
+
+
+def narration_audio_metadata_path(
+    production_id: str, unit_id: str, root: Optional[Path] = None
+) -> Path:
+    return unit_plan_dir(production_id, unit_id, root) / "narration_audio.json"
+
+
+def narration_audio_path(
+    production_id: str,
+    unit_id: str,
+    *,
+    root: Optional[Path] = None,
+    output_format: str = "mp3",
+) -> Path:
+    ext = output_format.lower().lstrip(".")
+    if ext not in {"mp3", "wav"}:
+        raise ValueError("narration audio output format must be mp3 or wav")
+    return unit_plan_dir(production_id, unit_id, root) / f"narration_audio.{ext}"
+
+
+def save_narration_artifact(
+    artifact: "NarrationArtifact",
+    *,
+    production_id: str,
+    unit_id: str,
+    root: Optional[Path] = None,
+    source_asset: Optional["SourceAsset"] = None,
+    source_transcript: Optional["SourceTranscript"] = None,
+) -> Path:
+    """Persist a Track 9 narration artifact under the canonical unit plan directory."""
+    from app.production.narration import validate_narration_artifact
+
+    validate_narration_artifact(
+        artifact,
+        source_asset=source_asset,
+        source_transcript=source_transcript,
+    )
+    path = narration_artifact_path(production_id, unit_id, root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(artifact.model_dump(), indent=2, ensure_ascii=False))
+    return path
+
+
+def save_narration_audio(
+    artifact: "NarrationAudioArtifact",
+    *,
+    production_id: str,
+    unit_id: str,
+    root: Optional[Path] = None,
+) -> Path:
+    """Persist synthesized narration audio metadata under the canonical unit plan directory."""
+    from app.production.models import NarrationAudioArtifact
+
+    if not isinstance(artifact, NarrationAudioArtifact):
+        raise TypeError("artifact must be a NarrationAudioArtifact")
+    path = narration_audio_metadata_path(production_id, unit_id, root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(artifact.model_dump(), indent=2, ensure_ascii=False))
+    return path
+
+
+def load_narration_artifact(
+    production_id: str, unit_id: str, *, root: Optional[Path] = None
+) -> "NarrationArtifact":
+    """Load a persisted Track 9 narration artifact."""
+    from app.production.models import NarrationArtifact
+
+    path = narration_artifact_path(production_id, unit_id, root=root)
+    if not path.is_file():
+        raise FileNotFoundError(f"narration artifact not found: {path}")
+    return NarrationArtifact.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def load_narration_audio(
+    production_id: str, unit_id: str, *, root: Optional[Path] = None
+) -> "NarrationAudioArtifact":
+    """Load persisted synthesized narration audio metadata."""
+    from app.production.models import NarrationAudioArtifact
+
+    path = narration_audio_metadata_path(production_id, unit_id, root=root)
+    if not path.is_file():
+        raise FileNotFoundError(f"narration audio metadata not found: {path}")
+    return NarrationAudioArtifact.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def production_source_dir(production_id: str, root: Optional[Path] = None) -> Path:
+    return production_dir(production_id, root) / _SOURCE_DIR
+
+
+def production_source_meta(production_id: str, root: Optional[Path] = None) -> Path:
+    return production_source_dir(production_id, root) / _SOURCE_META
+
+
+def transcript_path_for(production_id: str, asset_id: str, root: Optional[Path] = None) -> Path:
+    return production_source_dir(production_id, root) / f"{asset_id}.transcript.json"
+
+
+def segments_path_for(production_id: str, asset_id: str, root: Optional[Path] = None) -> Path:
+    return production_source_dir(production_id, root) / f"{asset_id}.segments.json"
+
+
+def source_artifact_path(production_id: str, stored_path: str, root: Optional[Path] = None) -> Path:
+    return production_dir(production_id, root) / stored_path.replace("\\", "/").lstrip("/")
 
 
 def production_exists(production_id: str, root: Optional[Path] = None) -> bool:
@@ -205,6 +323,73 @@ def _write_unit_plan_dirs(production: Production, root: Optional[Path]) -> None:
         unit_plan_dir(production.production_id, unit.unit_id, root).mkdir(
             parents=True, exist_ok=True
         )
+
+
+def derive_production_unit_from_segment(
+    production_id: str,
+    source_asset: SourceAsset,
+    source_segment: SourceSegment,
+    *,
+    root: Optional[Path] = None,
+    unit_id: Optional[str] = None,
+    title: Optional[str] = None,
+    premise: Optional[str] = None,
+    unit_type: str = "standalone_video",
+    ordinal: Optional[int] = None,
+    content_intent: Optional[dict] = None,
+    provider_intent: Optional[str] = None,
+    save: bool = True,
+) -> Production:
+    """Load a production, derive one canonical unit from a selected source segment,
+    persist it through the canonical save/revision flow, and return the updated
+    production object.
+
+    Repeated derivation of the same production + source_asset + source_segment is
+    idempotent and reuses the existing derived unit instead of creating a duplicate.
+    """
+    production = load_production(production_id, root=root)
+    existing = next(
+        (
+            unit
+            for unit in production.units
+            if unit.source_lineage is not None
+            and unit.source_lineage.asset_id == source_asset.asset_id
+            and source_segment.segment_id in set(unit.source_lineage.source_segment_ids)
+        ),
+        None,
+    )
+    if existing is not None:
+        return production
+
+    derived = _derive_unit_from_segment(
+        production,
+        source_asset,
+        source_segment,
+        unit_id=unit_id,
+        title=title,
+        premise=premise,
+        unit_type=unit_type,
+        ordinal=ordinal,
+        content_intent=content_intent,
+        provider_intent=provider_intent,
+    )
+    revised_units = list(production.units) + [derived]
+    lineage_entries = list(production.source_lineage or [])
+    if derived.source_lineage is not None:
+        lineage_entries = [lineage for lineage in lineage_entries if lineage.unit_id != derived.unit_id]
+        lineage_entries.append(derived.source_lineage)
+
+    revised = production.model_copy(
+        update={
+            "plan_version": production.plan_version + 1,
+            "revised_at": datetime.now().isoformat(),
+            "units": revised_units,
+            "source_lineage": lineage_entries,
+        }
+    )
+    if save:
+        save_revision(revised, root=root)
+    return revised
 
 
 def save_new_production(

@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 import os
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.publishing.models import PublicationRecord, TikTokPublicationRecord
@@ -151,6 +151,81 @@ class StageResult(BaseModel):
         )
 
 
+class RouteCompilationRecord(BaseModel):
+    """Durable evidence of the PRODUCTION ROUTE Core compiled for one unit.
+
+    G3 (V1 should-fix — persisted route compilation evidence): route
+    resolution and compilation happen at execution time
+    (``ProductionExecutor._config_for_unit`` ->
+    ``app.production.routes.resolve_effective_route`` ->
+    ``apply_production_route``).  Until now the compiled decision existed only
+    in a log line, so a persisted production could not explain, from durable
+    evidence alone, which route Core actually compiled for execution.
+
+    SEMANTIC (deliberately narrow).  This record answers exactly one question:
+    "given the persisted production intent, what route did Core compile for
+    execution?"  It is the frozen output of the existing route-compilation
+    seam and is therefore attributable to Core.  It is:
+
+    - NOT provider/model provenance.  Which provider/model executed each
+      scene is the Batch 1F scene provenance record; no provider, model,
+      request/task id, or fallback fact may ever appear here, and nothing
+      here may be read as provenance.
+    - NOT media strategy.  ``overlays_applied`` names the execution-config
+      KEYS the legacy compatibility bridge mutated (e.g. ``image_source``);
+      it never records their values, which stay in the existing scene config.
+    - NOT a motion/video engine choice, an AI-brain choice, an audio policy,
+      or an assembly engine.
+    - NOT accounting.  No cost class, amount, credit, or usage is recorded
+      (the creation-time cost class stays where it is today).
+    - NOT user intent.  The intent artifact (``production.json``) keeps its
+      explicit ``route`` and legacy ``generation_strategy`` verbatim; this
+      record is a separate, execution-side fact and never overwrites intent.
+
+    Only fields that are ALREADY authoritative outputs of compilation are
+    recorded:
+
+    - ``route_id`` + ``route_version``: the registered route identity together
+      with the registry version it compiled against, so a later change to the
+      route registry can never rewrite history.  Everything the frozen
+      ``RouteDefinition`` additionally implies (``label``,
+      ``requires_native_motion``, ``forbids_still_image_substitution``,
+      ``allows_local_motion_engine``) is fully DERIVABLE from that pair and is
+      deliberately not duplicated — and requirements are not yet enforced, so
+      recording them as evidence would overstate them.
+    - ``execution_surface``: the surface the route compiled onto.
+    - ``route_source``: how the route was resolved, i.e. the precedence
+      evidence — ``"explicit_route"`` means the intent carried a route and it
+      was honoured verbatim, ``"legacy_strategy"`` means Core derived the
+      route from the legacy ``generation_strategy`` bridge.  This is exactly
+      what keeps compiled result distinguishable from intent.
+    - ``legacy_strategy``: the compatibility-bridge input actually used.
+    - ``overlays_applied``: which legacy overlay keys the compiler applied.
+      Empty for explicit-route runs and in mock mode, which is truthful: the
+      compiler applied nothing there.
+
+    Deliberately NOT a registry-membership validator: the record is a
+    historical fact, so it must still load even if the registry later drops or
+    renames a route.  ``label`` (registry display text) is absent because it
+    is presentation, not evidence.
+
+    Written ONCE, when the execution project is initialized.  Resume never
+    rewrites it (mirroring the existing rule that the persisted scene config
+    is authoritative on resume), and projects created before this seam keep
+    returning ``None`` = UNKNOWN, which is never back-inferred from today's
+    registry.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    route_id: str = Field(min_length=1)
+    route_version: int = Field(ge=1)
+    route_source: str = Field(min_length=1)
+    execution_surface: str = Field(min_length=1)
+    legacy_strategy: Optional[str] = None
+    overlays_applied: Tuple[str, ...] = ()
+
+
 class ProductionBinding(BaseModel):
     """Immutable Phase 10 execution-side binding for one production unit."""
 
@@ -180,6 +255,13 @@ class ProjectManifest(BaseModel):
     topic: str = Field(min_length=1, description="Video topic")
     # Phase 10: optional execution-side binding. Legacy manifests omit it.
     production_binding: Optional[ProductionBinding] = None
+    # G3: the PRODUCTION ROUTE Core compiled for this unit's execution
+    # (route-compilation evidence).  Distinct from the plan binding above,
+    # from scene provider provenance, from media/engine configuration, and
+    # from accounting.  Captured once at project initialization; direct
+    # engine runs that compiled no production route and every pre-G3 legacy
+    # manifest keep this None, which reads as UNKNOWN and is never inferred.
+    route_compilation: Optional[RouteCompilationRecord] = None
 
     
     # Pipeline state
@@ -360,6 +442,16 @@ class OrchestratorConfig(BaseModel):
     unit_plan_content_hash: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    # G3: one-way runtime carrier for the route-compilation evidence produced
+    # at the production route seam
+    # (``ProductionExecutor._config_for_unit`` -> ``apply_production_route``).
+    # The pipeline captures it into the freshly initialized project manifest
+    # (``ProjectManifest.route_compilation``) — the durable home of the
+    # evidence.  It is NOT a routing knob: nothing reads it back to decide
+    # execution behaviour, it is never part of the content/voice/scene/
+    # assembly config snapshots, and it carries no provider, model, media
+    # source, engine, audio, cost, or accounting data.
+    route_compilation: Optional[RouteCompilationRecord] = None
 
     call_to_action: Optional[str] = None
     style: str = Field(default="fast-paced documentary")
@@ -453,6 +545,24 @@ class OrchestratorConfig(BaseModel):
         default=DEFAULT_AUDIO_POLICY,
         description="Explicit final-audio policy persisted in the project manifest",
     )
+    # V1 AUDIO POLICY FIX: the production-level audio INTENT that compiled into
+    # ``audio_policy`` above, plus how it was established.  Both are EVIDENCE
+    # fields persisted into the assembly config snapshot so a project can
+    # explain "requested intent" separately from "effective policy".  They are
+    # runtime carriers compiled at the production/unit seam
+    # (``ProductionExecutor._config_for_unit`` -> ``compile_audio_policy``);
+    # a direct engine run leaves them None, which reads as UNKNOWN and is never
+    # back-inferred from narration text, the route, or a provider name.
+    audio_intent: Optional[str] = Field(
+        default=None,
+        description="Requested production audio intent (narration/native/"
+        "native_plus_narration/none), when compiled from production intent",
+    )
+    audio_intent_source: Optional[str] = Field(
+        default=None,
+        description="How the effective audio intent was established: "
+        "explicit_audio_intent | backward_compatible_default",
+    )
     enable_captions: bool = Field(default=True)
     # Phase 6F: caption presentation preset (minimal/standard/bold/viral).
     # Persisted into assembly_config so resume reproduces the same
@@ -489,6 +599,22 @@ class OrchestratorConfig(BaseModel):
     @classmethod
     def validate_audio_policy(cls, v) -> AudioPolicy:
         return normalize_audio_policy(v)
+
+    @field_validator("audio_intent", mode="before")
+    @classmethod
+    def validate_audio_intent(cls, v):
+        """Normalize the requested audio intent; ``None`` stays UNKNOWN.
+
+        ``None`` is preserved verbatim (a direct engine run compiled no
+        production intent, so the requested intent is genuinely unknown and is
+        never back-inferred).  A declared value must be a real intent: an
+        unknown string fails loudly rather than silently becoming narration.
+        """
+        if v is None or not str(v).strip():
+            return None
+        from app.production.models import normalize_audio_intent
+
+        return normalize_audio_intent(v)
     
     def to_content_brief_dict(self) -> dict:
         """Convert to ContentBrief parameters."""
@@ -583,7 +709,14 @@ class OrchestratorConfig(BaseModel):
             "resolution_width": self.resolution_width,
             "resolution_height": self.resolution_height,
             "music_volume": self.music_volume,
+            # Effective, compiled policy — what assembly actually obeys.
             "audio_policy": self.audio_policy.value,
+            # V1 AUDIO POLICY FIX: requested-intent evidence, persisted beside
+            # the effective policy so the audio decision stays auditable
+            # (requested intent vs compiled policy vs what actually ran).
+            # None on a direct engine run = UNKNOWN, never back-inferred.
+            "audio_intent": self.audio_intent,
+            "audio_intent_source": self.audio_intent_source,
             "enable_captions": self.enable_captions,
             "caption_preset": self.caption_preset,
         }

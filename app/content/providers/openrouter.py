@@ -42,6 +42,51 @@ logger = logging.getLogger(__name__)
 IMAGE_REQUEST_TIMEOUT_FLOOR = 300
 
 
+def _normalize_usage(raw: Any) -> Optional[Dict[str, int]]:
+    """Flatten OpenRouter's nested usage object into ``LLMResponse.usage: Dict[str, int]``.
+
+    OpenRouter returns nested/fractional usage detail, e.g.::
+
+        {"prompt_tokens": 12, "cost": 0.0006298,
+         "prompt_tokens_details": {"cached_tokens": 0, "video_tokens": 0},
+         "cost_details": {"upstream_inference_cost": 0.0}}
+
+    ``LLMResponse.usage`` is a frozen AVM contract (``Dict[str, int]``) and is
+    deliberately NOT loosened: this adapter-local normalization flattens every
+    numeric leaf into a ``<parent>_<leaf>`` key so nested structures never fail
+    Pydantic validation. Fractional values (e.g. USD ``cost``) are preserved as
+    micro-units under ``<key>_micro`` so no real accounting evidence is lost or
+    silently rounded to zero. Non-numeric leaves are dropped; missing usage maps
+    to ``None``.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    flat: Dict[str, int] = {}
+
+    def walk(node: Any, prefix: str) -> None:
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            name = f"{prefix}_{key}" if prefix else str(key)
+            if isinstance(value, bool):
+                # bool is an int subclass; never a usage quantity.
+                continue
+            if isinstance(value, int):
+                flat[name] = value
+            elif isinstance(value, float):
+                if value.is_integer():
+                    flat[name] = int(value)
+                else:
+                    # Preserve fractional precision truthfully (micro-units).
+                    flat[f"{name}_micro"] = int(round(value * 1_000_000))
+            elif isinstance(value, dict):
+                walk(value, name)
+
+    walk(raw, "")
+    return flat or None
+
+
 @dataclass
 class OpenRouterImageResult:
     """One verified image generation result from OpenRouter's Image API.
@@ -344,3 +389,78 @@ class OpenRouterProvider(BaseLLMProvider):
             raise
         except Exception as e:
             raise LLMResponseError(f"Unexpected error: {e}")
+
+    def supports_multimodal(self) -> bool:
+        return True
+
+    def generate_multimodal(self, prompt: str, system_prompt=None, *, video=None, images=None, video_bytes=None, response_schema=None, temperature: float = 0.7, max_tokens: int = 4096):
+        if not self._api_key:
+            raise LLMAuthenticationError(self.name)
+        import base64, pathlib as _pl, tempfile, subprocess, os as _os
+        content_parts = [{"type": "text", "text": prompt}]
+        src = None
+        if video_bytes is not None:
+            b64 = base64.b64encode(video_bytes).decode("ascii")
+            content_parts.append({"type": "image_url", "image_url": {"url": f"data:video/mp4;base64,{b64}"}})
+        elif video is not None and _os.path.isfile(video):
+            src = video
+            try:
+                from app.assembly.ffmpeg import resolve_ffmpeg
+                ff = resolve_ffmpeg()
+                if ff:
+                    import pathlib as _pp
+                    tmpd = _pp.Path(tempfile.mkdtemp(prefix="or_vl_"))
+                    duration_probe = None
+                    try:
+                        from app.assembly.ffmpeg import probe_media
+                        duration_probe = probe_media(_pp.Path(video)).duration or 0
+                    except: duration_probe = 0
+                    fracs = [0.15, 0.40, 0.70, 0.92]
+                    for fi, frac in enumerate(fracs):
+                        ts = max(0.5, float(duration_probe) * frac) if duration_probe and duration_probe > 2 else fi * 2.0
+                        out = tmpd / f"frame_{fi:02d}.jpg"
+                        cmd = [ff, "-y", "-ss", f"{ts:.2f}", "-i", str(video), "-vframes", "1", "-vf", "scale=512:-2", str(out)]
+                        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=20)
+                        if out.is_file() and out.stat().st_size > 1000:
+                            b64 = base64.b64encode(out.read_bytes()).decode("ascii")
+                            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                    import shutil as _sh
+                    try: _sh.rmtree(tmpd, ignore_errors=True)
+                    except: pass
+            except: pass
+        if images:
+            for pp in images:
+                try:
+                    ib = _pl.Path(pp).read_bytes()
+                    b64 = base64.b64encode(ib).decode("ascii")
+                    content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                except: continue
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content_parts})
+        payload = {"model": self._model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        if response_schema is not None:
+            payload["response_format"] = {"type": "json_object"}
+        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json", "HTTP-Referer": "https://github.com/auto-video-maker", "X-Title": "AUTO Video Maker"}
+        resp = __import__("requests").post(f"{self._base_url}/chat/completions", headers=headers, json=payload, timeout=self._timeout)
+        if resp.status_code == 401:
+            raise LLMAuthenticationError(self.name)
+        if resp.status_code == 429:
+            raise LLMRateLimitError(self.name)
+        if resp.status_code == 402:
+            raise LLMQuotaError(self.name)
+        if resp.status_code >= 500:
+            raise LLMConnectionError(self.name, f"Server error: {resp.status_code}")
+        if resp.status_code != 200:
+            raise LLMResponseError(f"HTTP {resp.status_code}", resp.text[:500])
+        data = resp.json()
+        if "choices" not in data or not data["choices"]:
+            raise LLMResponseError("No choices", str(data)[:500])
+        content = data["choices"][0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            content = "".join(p.get("text","") for p in content if isinstance(p, dict))
+        if not content:
+            raise LLMResponseError("Empty multimodal content")
+        usage = _normalize_usage(data.get("usage"))
+        return LLMResponse(content=content, provider=self.name, model=self._model, usage=usage, raw_response=data)
