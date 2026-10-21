@@ -200,13 +200,43 @@ def test_missing_usage_still_constructs_the_contract(monkeypatch):
 
 
 def test_openrouter_usage_behavior_is_unaffected():
-    # The normalization lives ONLY in the Alibaba adapter; OpenRouter's
-    # provider module contains no reference to it.
-    import inspect
+    # Track 9: OpenRouter normalizes nested/fractional usage into the frozen
+    # ``LLMResponse.usage: Dict[str, int]`` contract. Integer token counts
+    # are preserved exactly; fractional values are preserved as micro-units;
+    # nested leaves are flattened into <parent>_<leaf> keys. Unrelated
+    # OpenRouter response fields are never mutated.
+    from app.content.providers.openrouter import _normalize_usage
 
-    from app.content.providers import openrouter as openrouter_mod
+    raw = {
+        "prompt_tokens": 12,
+        "completion_tokens": 5,
+        "total_tokens": 17,
+        "cost": 0.0006298,
+        "prompt_tokens_details": {"cached_tokens": 0, "video_tokens": 0},
+        "cost_details": {"upstream_inference_cost": 0.0},
+        "unrelated_field": "preserved",
+    }
 
-    assert "normalize_usage" not in inspect.getsource(openrouter_mod)
+    before = dict(raw)
+    usage = _normalize_usage(raw)
+
+    # Integer token counts preserved exactly.
+    assert usage is not None
+    assert usage["prompt_tokens"] == 12
+    assert usage["completion_tokens"] == 5
+    assert usage["total_tokens"] == 17
+
+    # Fractional cost preserved as micro-units, never rounded to zero.
+    assert usage["cost_micro"] == 630
+
+    # Nested leaves flattened into <parent>_<leaf> keys.
+    assert usage["prompt_tokens_details_cached_tokens"] == 0
+    assert usage["prompt_tokens_details_video_tokens"] == 0
+    assert usage["cost_details_upstream_inference_cost"] == 0
+
+    # Unrelated OpenRouter response fields never mutated.
+    assert raw == before
+    assert raw["unrelated_field"] == "preserved"
 
 
 
