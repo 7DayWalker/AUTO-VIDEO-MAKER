@@ -230,6 +230,114 @@ def _canonical_models_projection() -> dict:
     return projection
 
 
+def _ai_summary_projection() -> dict:
+    """AVM Track 9 -- AI Summary understanding model projection (model-first, provider-neutral).
+
+    Additive ai_summary surface for GET /api/capabilities:
+      - modes: metadata for standard (transcript/audio-first, default SUMMARY_STANDARD_MODEL)
+        and pro (frame-based/multimodal visual understanding, default SUMMARY_PRO_MODEL).
+      - understanding_models: canonical models eligible for AI Summary, exposing ONLY
+        canonical id, display_name, family, capabilities, eligible_modes,
+        configured, status -- never provider names, wire IDs, quota or balance.
+
+    Truthfulness: readiness reuses the SAME BaseLLMProvider.is_available predicate
+    the executor consults; quota/balance stays unknown when no balance endpoint exists.
+    No network, no subprocess, no provider instantiation beyond local availability probe.
+    """
+    modes = {}
+    understanding_models = []
+    status = "ready"
+    try:
+        from app.production.narration import SUMMARY_PRO_MODEL, SUMMARY_STANDARD_MODEL
+        modes = {
+            "standard": {
+                "id": "standard",
+                "label": "Standard",
+                "description": "transcript/audio-first understanding",
+                "understanding_method": "transcript_audio",
+                "default_model_id": SUMMARY_STANDARD_MODEL,
+            },
+            "pro": {
+                "id": "pro",
+                "label": "Pro",
+                "description": "frame-based/multimodal visual understanding",
+                "understanding_method": "frame_sequence",
+                "default_model_id": SUMMARY_PRO_MODEL,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ai_summary modes projection failed: %s", exc)
+        modes = {
+            "standard": {"id": "standard", "default_model_id": "qwen-3.8-flash"},
+            "pro": {"id": "pro", "default_model_id": "gemini-3-flash-preview"},
+        }
+        status = "unknown"
+    try:
+        from app.content import provider_registry
+        from app.content.model_registry import list_models
+        canonical_models = list(list_models())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ai_summary model list failed: %s", exc)
+        return {"modes": modes, "understanding_models": [], "status": "unknown"}
+    for canonical in canonical_models:
+        caps = getattr(canonical, "capabilities", None)
+        if caps is None:
+            continue
+        is_standard = bool(getattr(caps, "text", False))
+        try:
+            is_pro = bool(caps.is_pro_eligible())
+        except Exception:
+            try:
+                is_pro = bool(caps.is_multimodal_capable())
+            except Exception:
+                is_pro = False
+        if not is_standard and not is_pro:
+            continue
+        eligible_modes = []
+        if is_standard:
+            eligible_modes.append("standard")
+        if is_pro:
+            eligible_modes.append("pro")
+        cap_proj = {
+            "text": bool(getattr(caps, "text", False)),
+            "json": bool(getattr(caps, "json_", False)),
+            "reasoning": bool(getattr(caps, "reasoning", False)),
+            "vision": bool(getattr(caps, "vision", False)),
+            "long_context": bool(getattr(caps, "long_context", False)),
+            "tool_use": bool(getattr(caps, "tool_use", False)),
+        }
+        configured = 0
+        unknown = 0
+        bindings = tuple(getattr(canonical, "bindings", None) or ())
+        for binding in bindings:
+            try:
+                if not provider_registry.has_provider(binding.provider):
+                    continue
+                instance = provider_registry.create_provider(binding.provider, binding.provider_model_id)
+                if bool(instance.is_available()):
+                    configured += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ai_summary binding probe failed for '%s': %s", canonical.id, exc)
+                unknown += 1
+        entry_configured = configured > 0
+        if entry_configured:
+            entry_status = "ready"
+        elif bindings and unknown == len(bindings):
+            entry_status = "unknown"
+        else:
+            entry_status = "not_configured"
+        understanding_models.append({
+            "id": canonical.id,
+            "display_name": canonical.display_name,
+            "family": getattr(canonical, "family", None),
+            "capabilities": cap_proj,
+            "eligible_modes": eligible_modes,
+            "configured": entry_configured,
+            "status": entry_status,
+        })
+    return {"modes": modes, "understanding_models": understanding_models, "status": status}
+
+
 def capabilities_payload():
     """Build the read-only configuration-readiness projection."""
     seam_status_ready = "ready"
@@ -413,6 +521,7 @@ def capabilities_payload():
         # makes a client MODEL-FIRST. It never names a provider, never exposes
         # a wire model id, and never ranks or prices a model.
         "models": _canonical_models_projection(),
+        "ai_summary": _ai_summary_projection(),  # Track 9: understanding model projection; never exposes provider/wire/quota
         "production_routes": {
             "note": (
                 "Presentation projection of the configuration facts above; "
@@ -3749,6 +3858,280 @@ def unit_publish_payload(production_id: str, unit_id: str, body: dict):
 # ---------------------------------------------------------------------------
 # HTTP layer
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Track 9 -- thin HTTP adapters (no logic duplication)
+# ---------------------------------------------------------------------------
+
+def _track9_check_unit(production_id: str, unit_id: str):
+    try:
+        from app.production.storage import load_production
+        prod = load_production(production_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        return None, (404, {"error": "PRODUCTION_NOT_FOUND", "production_id": production_id})
+    except Exception as exc:
+        return None, (500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"})
+    unit = next((u for u in (prod.units or []) if u.unit_id == unit_id), None)
+    if unit is None:
+        return None, (400, {"error": "UNIT_NOT_FOUND", "production_id": production_id, "unit_id": unit_id})
+    return prod, None
+
+
+def narration_get_payload(production_id: str, unit_id: str):
+    _, err = _track9_check_unit(production_id, unit_id)
+    if err:
+        return err
+    try:
+        from app.production.storage import load_narration_artifact
+        artifact = load_narration_artifact(production_id, unit_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        return 404, {"error": "NARRATION_NOT_FOUND", "production_id": production_id, "unit_id": unit_id, "message": "Narration has not been generated for this unit yet."}
+    except Exception as exc:
+        return 500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    return 200, artifact.model_dump()
+
+
+def narration_build_payload(production_id: str, unit_id: str, body: dict):
+    prod, err = _track9_check_unit(production_id, unit_id)
+    if err:
+        return err
+    if not isinstance(body, dict):
+        body = {}
+    summary_mode = str(body.get("summary_mode") or "standard").strip().lower()
+    if summary_mode not in ("standard", "pro"):
+        return 400, {"error": "INVALID_REQUEST", "message": "summary_mode must be standard or pro"}
+    sel = body.get("selection_mode")
+    if sel is not None:
+        if not isinstance(sel, str) or not sel.strip():
+            return 400, {"error": "INVALID_REQUEST", "message": "selection_mode must be text"}
+        sel = sel.strip().lower()
+        if sel not in ("auto", "explicit", "manual"):
+            return 400, {"error": "INVALID_REQUEST", "message": "selection_mode must be auto or explicit/manual"}
+    explicit = None
+    for k in ("summary_understanding_model_id", "understanding_model_id", "preferred_model_id"):
+        v = body.get(k)
+        if isinstance(v, str) and v.strip():
+            explicit = v.strip()
+            break
+        if v is not None and isinstance(v, str) and not v.strip():
+            return 400, {"error": "INVALID_REQUEST", "message": "model id must be non-empty text"}
+        if v is not None and not isinstance(v, str):
+            return 400, {"error": "INVALID_REQUEST", "message": "model id must be text"}
+    if sel in ("explicit", "manual") and not explicit:
+        return 400, {"error": "INVALID_REQUEST", "message": "explicit selection_mode requires a model id"}
+    mock_mode = bool(body.get("mock_mode"))
+    raw_dur = body.get("target_duration_seconds")
+    tds = None
+    if raw_dur is not None:
+        try:
+            if isinstance(raw_dur, bool):
+                raise ValueError
+            tds = float(raw_dur)
+        except Exception:
+            return 400, {"error": "INVALID_REQUEST", "message": "target_duration_seconds must be a number"}
+        if not tds > 0:
+            return 400, {"error": "INVALID_REQUEST", "message": "target_duration_seconds must be positive"}
+    aid = body.get("asset_id")
+    if aid is not None:
+        if not isinstance(aid, str) or not aid.strip():
+            return 400, {"error": "INVALID_REQUEST", "message": "asset_id must be text src-NNN"}
+        if not re.match(r"^src-\d{3}$", aid.strip()):
+            return 400, {"error": "INVALID_REQUEST", "message": "asset_id must match src-NNN"}
+        aid = aid.strip()
+    assets = list(prod.source_assets or [])
+    sa = None
+    if aid is not None:
+        sa = next((a for a in assets if a.asset_id == aid), None)
+        if sa is None:
+            return 404, {"error": "SOURCE_NOT_FOUND", "production_id": production_id, "asset_id": aid}
+    else:
+        if assets:
+            sa = assets[-1]
+    if sa is None:
+        return 404, {"error": "SOURCE_NOT_FOUND", "production_id": production_id, "message": "No source asset ingested; register a source first."}
+    if tds is None:
+        # Default must not be implausible for the actual source duration
+        tds = min(30.0, float(sa.duration) * 0.6) if float(sa.duration) > 0 else 30.0
+    try:
+        from app.transcription.transcribe import load_transcript as _lt
+        tr = _lt(production_id, sa.asset_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        return 404, {"error": "TRANSCRIPT_NOT_FOUND", "production_id": production_id, "asset_id": sa.asset_id, "message": "Transcribe the source first."}
+    except Exception as exc:
+        return 500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    if explicit is not None:
+        try:
+            from app.content.model_registry import get_model as _gm
+            m = _gm(explicit)
+            if summary_mode == "pro" and not m.capabilities.is_multimodal_capable():
+                return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": f"Model {explicit!r} is not multimodal-capable"}
+        except KeyError:
+            return 404, {"error": "MODEL_NOT_FOUND", "message": f"Unknown canonical model {explicit!r}"}
+    try:
+        from app.production.narration import build_grounded_narration_plan
+        art = build_grounded_narration_plan(production_id, unit_id, sa, tr, target_duration_seconds=float(tds), canonical_model_id=explicit, summary_understanding_model_id=explicit, summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR)
+        from app.production.storage import save_narration_artifact
+        save_narration_artifact(art, production_id=production_id, unit_id=unit_id, root=PRODUCTIONS_DIR, source_asset=sa, source_transcript=tr)
+    except FileNotFoundError as exc:
+        return 404, {"error": "SOURCE_NOT_FOUND", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    except ValueError as exc:
+        msg=str(exc); lo=msg.lower()
+        if "unknown canonical" in lo or "unknown summary" in lo or "unknown selection_mode" in lo:
+            return 400, {"error": "INVALID_REQUEST", "message": msg}
+        if "not multimodal" in lo or "cannot satisfy" in lo:
+            return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": msg}
+        return 400, {"error": "INVALID_REQUEST", "message": msg}
+    except KeyError as exc:
+        return 404, {"error": "MODEL_NOT_FOUND", "message": str(exc)}
+    except RuntimeError as exc:
+        return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": str(exc)}
+    except Exception as exc:
+        return 500, {"error": "NARRATION_BUILD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    d=art.model_dump(); d["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return 201, d
+
+
+def narration_synthesize_payload(production_id: str, unit_id: str, body: dict):
+    if not isinstance(body, dict):
+        body={}
+    _, err=_track9_check_unit(production_id, unit_id)
+    if err:
+        return err
+    try:
+        from app.production.storage import load_narration_artifact
+        art=load_narration_artifact(production_id, unit_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        return 404, {"error": "NARRATION_NOT_FOUND", "production_id": production_id, "unit_id": unit_id}
+    except Exception as exc:
+        return 500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    pn=body.get("provider_name")
+    if pn is not None:
+        if not isinstance(pn, str) or not pn.strip():
+            return 400, {"error": "INVALID_REQUEST", "message": "provider_name must be text"}
+        pn=pn.strip().lower()
+    voice=body.get("voice")
+    if voice is not None:
+        if not isinstance(voice, str) or not voice.strip():
+            return 400, {"error": "INVALID_REQUEST", "message": "voice must be text"}
+        voice=voice.strip()
+    fmt=body.get("format")
+    if fmt is not None:
+        if not isinstance(fmt, str) or not fmt.strip():
+            return 400, {"error": "INVALID_REQUEST", "message": "format must be mp3 or wav"}
+        fmt=fmt.strip().lower().lstrip(".")
+        if fmt not in ("mp3", "wav"):
+            return 400, {"error": "INVALID_REQUEST", "message": "format must be mp3 or wav"}
+    else:
+        fmt="mp3"
+    if bool(body.get("mock_mode")) and not pn:
+        pn="mock"
+    try:
+        from app.production.narration import synthesize_narration_audio
+        meta=synthesize_narration_audio(art, root=PRODUCTIONS_DIR, provider_name=pn, voice=voice, output_format=fmt)
+    except Exception as exc:
+        from app.voice.exceptions import VoiceProviderError
+        if isinstance(exc, VoiceProviderError):
+            return 503, {"error": "TTS_PROVIDER_UNAVAILABLE", "message": _browser_safe_diagnostic(exc) or str(exc)}
+        if isinstance(exc, ValueError) and "validation" in str(exc).lower():
+            return 500, {"error": "AUDIO_VALIDATION_FAILED", "message": _browser_safe_diagnostic(exc) or str(exc)}
+        return 500, {"error": "SYNTHESIS_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    try:
+        from app.production.storage import load_narration_artifact as _l2
+        upd=_l2(production_id, unit_id, root=PRODUCTIONS_DIR)
+        payload=upd.model_dump()
+    except Exception:
+        payload=art.model_dump()
+    payload["audio"]=meta.model_dump(); payload["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return 200, payload
+
+
+def summary_video_build_payload(production_id: str, unit_id: str, body: dict):
+    _, err=_track9_check_unit(production_id, unit_id)
+    if err:
+        return err
+    try:
+        from app.production.storage import load_narration_artifact
+        narr=load_narration_artifact(production_id, unit_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        return 404, {"error": "NARRATION_NOT_FOUND", "production_id": production_id, "unit_id": unit_id, "message": "Build narration first."}
+    except Exception as exc:
+        return 500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    try:
+        from app.production.storage import load_narration_audio as _la
+        narr_audio=_la(production_id, unit_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        if not getattr(narr, "audio_artifact_path", None):
+            return 404, {"error": "NARRATION_AUDIO_NOT_FOUND", "production_id": production_id, "unit_id": unit_id, "message": "Synthesize narration audio first."}
+        narr_audio=None
+    try:
+        from app.production.summary_video import assemble_narrated_summary
+        sv=assemble_narrated_summary(production_id, unit_id, root=PRODUCTIONS_DIR, narration_artifact=narr, narration_audio=narr_audio)
+    except FileNotFoundError as exc:
+        return 404, {"error": "SOURCE_NOT_FOUND", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    except ValueError as exc:
+        return 400, {"error": "INVALID_GROUNDING", "message": _browser_safe_diagnostic(exc) or str(exc)}
+    except RuntimeError as exc:
+        msg=_browser_safe_diagnostic(exc) or str(exc)
+        if "ffmpeg" in msg.lower() or "ffprobe" in msg.lower():
+            return 503, {"error": "FFMPEG_UNAVAILABLE", "message": msg}
+        return 500, {"error": "SUMMARY_ASSEMBLY_FAILED", "message": msg}
+    except Exception as exc:
+        return 500, {"error": "SUMMARY_ASSEMBLY_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    data=sv.model_dump(); data["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/summary-video/media"; return 201, data
+
+
+def summary_video_get_payload(production_id: str, unit_id: str):
+    _, err=_track9_check_unit(production_id, unit_id)
+    if err:
+        return err
+    try:
+        from app.production.summary_video import load_narrated_summary
+        sv=load_narrated_summary(production_id, unit_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        return 404, {"error": "SUMMARY_VIDEO_NOT_FOUND", "production_id": production_id, "unit_id": unit_id}
+    except Exception as exc:
+        return 500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
+    data=sv.model_dump(); data["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/summary-video/media"; return 200, data
+
+
+def _serve_summary_video_media(handler, production_id: str, unit_id: str):
+    _, err=_track9_check_unit(production_id, unit_id)
+    if err:
+        s,p=err; return handler._json(s,p)
+    try:
+        from app.production.summary_video import summary_video_output_path, load_narrated_summary
+        load_narrated_summary(production_id, unit_id, root=PRODUCTIONS_DIR)
+        media=summary_video_output_path(production_id, unit_id, root=PRODUCTIONS_DIR)
+    except FileNotFoundError:
+        return handler._json(404, {"error": "SUMMARY_VIDEO_NOT_FOUND", "production_id": production_id, "unit_id": unit_id})
+    except Exception as exc:
+        return handler._json(500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"})
+    if not media.is_file():
+        return handler._json(404, {"error": "SUMMARY_VIDEO_MEDIA_NOT_FOUND"})
+    size=media.stat().st_size; rh=handler.headers.get("Range",""); s,e=0,size-1
+    if rh:
+        if not rh.startswith("bytes="):
+            return handler._json(416, {"error": "INVALID_RANGE"})
+        v=rh[6:].split(",",1)[0].strip(); parts=v.split("-",1)
+        try:
+            if len(parts)!=2 or (not parts[0] and not parts[1]): raise ValueError
+            if parts[0]: s=int(parts[0]); e=int(parts[1]) if parts[1] else size-1
+            else: sl=int(parts[1]); s=max(0,size-sl); e=size-1
+            if s<0 or s>=size or e<s: raise ValueError
+            e=min(e,size-1)
+        except Exception:
+            handler.send_response(416); handler.send_header("Content-Range", f"bytes */{size}"); handler.end_headers(); return
+    ln=e-s+1
+    handler.send_response(206 if rh else 200)
+    handler.send_header("Content-Type", MIME.get(media.suffix.lower(), "video/mp4"))
+    handler.send_header("Content-Length", str(ln))
+    handler.send_header("Accept-Ranges", "bytes")
+    if rh: handler.send_header("Content-Range", f"bytes {s}-{e}/{size}")
+    handler.end_headers()
+    with media.open("rb") as fh:
+        fh.seek(s); rem=ln
+        while rem>0:
+            ch=fh.read(min(1024*256, rem))
+            if not ch: break
+            handler.wfile.write(ch); rem-=len(ch)
+
 
 class AVMHandler(BaseHTTPRequestHandler):
     server_version = "AVMWeb/1.0"
@@ -3830,6 +4213,19 @@ class AVMHandler(BaseHTTPRequestHandler):
                 return self._json(404, {"error": "TRANSCRIPT_NOT_FOUND"})
             except Exception as e:
                 return self._json(500, {"error": "LOAD_FAILED", "message": f"{e.__class__.__name__}"})
+        # Track 9: summary-video metadata GET (must be before generic unit match)
+        m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/summary-video/?$", path)
+        if m:
+            status, payload = summary_video_get_payload(m.group(1), m.group(2))
+            return self._json(status, payload)
+        m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/summary-video/media/?$", path)
+        if m:
+            return _serve_summary_video_media(self, m.group(1), m.group(2))
+        # Track 9: narration GET (must be before generic unit match)
+        m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/narration/?$", path)
+        if m:
+            status, payload = narration_get_payload(m.group(1), m.group(2))
+            return self._json(status, payload)
         match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/audio/?$", path)
         if match:
             # AUDIO PREVIEW: an explicit, unit-scoped, read-only evidence read.
@@ -3896,6 +4292,43 @@ class AVMHandler(BaseHTTPRequestHandler):
             raw_prov = body.get("provider")
             prov = str(raw_prov).strip() if isinstance(raw_prov, str) and raw_prov.strip() else None
             status, payload = transcribe_source(m2.group(1), m2.group(2), root=PRODUCTIONS_DIR, provider=prov)
+            return self._json(status, payload)
+        # Track 9: narration + summary-video POST routes
+        m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/narration/synthesize/?$", path)
+        if m:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 64 * 1024:
+                return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                return self._json(400, {"error": "INVALID_JSON"})
+            status, payload = narration_synthesize_payload(m.group(1), m.group(2), body)
+            return self._json(status, payload)
+        m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/narration/?$", path)
+        if m:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 64 * 1024:
+                return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                return self._json(400, {"error": "INVALID_JSON"})
+            status, payload = narration_build_payload(m.group(1), m.group(2), body)
+            return self._json(status, payload)
+        m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/summary-video/?$", path)
+        if m:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 64 * 1024:
+                return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                return self._json(400, {"error": "INVALID_JSON"})
+            status, payload = summary_video_build_payload(m.group(1), m.group(2), body)
             return self._json(status, payload)
         if re.match(r"^/api/productions/?$", path):
             return self._creation_post()
@@ -4039,6 +4472,8 @@ class AVMHandler(BaseHTTPRequestHandler):
                     match.group(1), privacy_level=body.get("privacy_level")
                 )
                 return self._json(status, payload)
+            if re.match(r"^/api/productions/[^/]+/units/[^/]+/summary-video/media/?$", path):
+                return self._json(405, {"error": "METHOD_NOT_ALLOWED", "message": "Summary video media is GET-only."})
             if path.startswith("/api/productions"):
                 return self._productions_post(path)
             return self._json(404, {"detail": "not found"})
