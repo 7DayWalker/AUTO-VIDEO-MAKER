@@ -57,17 +57,20 @@ class YouTubePublisher:
         client_secrets_file: Optional[str] = None,
         token_file: Optional[str] = None,
         youtube_client: Any = None,
+        *,
+        allow_interactive: bool = True,
     ):
         self.client_secrets_file = client_secrets_file
         self.token_file = token_file
         self._youtube = youtube_client
+        self.allow_interactive = allow_interactive
 
     # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_env(cls) -> "YouTubePublisher":
+    def from_env(cls, *, allow_interactive: bool = True) -> "YouTubePublisher":
         """Build a publisher from environment configuration.
 
         Required environment variables (see .env.example):
@@ -86,6 +89,7 @@ class YouTubePublisher:
         return cls(
             client_secrets_file=str(secrets_path),
             token_file=str(token_path),
+            allow_interactive=allow_interactive,
         )
 
     @staticmethod
@@ -104,6 +108,20 @@ class YouTubePublisher:
         first use. The refreshed token is saved to ``token_file``.
         """
         if self._youtube is not None:
+            return self._youtube
+
+        if not self.allow_interactive:
+            # HTTP publish/status may refresh stored credentials, but must
+            # never fall through to consent if they expire during a request.
+            creds = self.validate_stored_credentials()
+            if creds is None:
+                raise PermissionError(
+                    "No usable stored YouTube credentials; reconnect through "
+                    "the explicit platform connection command."
+                )
+            from googleapiclient.discovery import build
+
+            self._youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
             return self._youtube
 
         if not self.client_secrets_file or not Path(self.client_secrets_file).exists():

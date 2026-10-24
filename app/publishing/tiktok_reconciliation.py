@@ -57,6 +57,7 @@ from app.publishing.models import (
     utc_now_iso,
 )
 from app.publishing.reconciliation import (
+    _persist_platform_record,
     compute_file_fingerprint,
     project_dir_for,
 )
@@ -122,13 +123,7 @@ def ensure_tiktok_record(manifest: ProjectManifest) -> TikTokPublicationRecord:
 def persist_tiktok_record(
     manifest_path: Path, manifest: ProjectManifest, record: TikTokPublicationRecord
 ) -> None:
-    record.updated_at = utc_now_iso()
-    manifest.tiktok_publication = record
-    manifest.updated_at = utc_now_iso()
-    manifest_path.write_text(
-        json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _persist_platform_record(manifest_path, manifest, "tiktok_publication", record)
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +517,15 @@ def reconcile_tiktok_publication(
             reasons=reasons,
         )
 
+    if publisher is None and record.state == PublicationState.UNKNOWN_RECONCILIATION_REQUIRED:
+        return TikTokPublicationReport(
+            project_id=project_id,
+            verdict=PublicationVerdict.PUBLICATION_UNKNOWN_RECONCILIATION_REQUIRED,
+            state=record.state.value,
+            tiktok_publish_id=record.tiktok_publish_id, tiktok_post_id=record.tiktok_post_id,
+            reasons=[record.error or "explicit reconciliation required; no blind submission"],
+        )
+
     if record.tiktok_publish_id:
         if publisher is not None:
             info = publisher.fetch_status(record.tiktok_publish_id)
@@ -581,14 +585,14 @@ def reconcile_tiktok_publication(
             elif new_state == PublicationState.FAILED:
                 record.error = f"TikTok posting status={status}"
             persist_tiktok_record(manifest_path, manifest, record)
-            verdict = (
-                PublicationVerdict.PUBLICATION_VERIFIED
-                if new_state in (
-                    PublicationState.VERIFIED,
-                    PublicationState.VERIFIED_SANDBOX_PRIVATE,
-                )
-                else PublicationVerdict.PUBLICATION_PROCESSING
-            )
+            if new_state in (
+                PublicationState.VERIFIED, PublicationState.VERIFIED_SANDBOX_PRIVATE,
+            ):
+                verdict = PublicationVerdict.PUBLICATION_VERIFIED
+            elif new_state == PublicationState.FAILED:
+                verdict = PublicationVerdict.PUBLICATION_FAILED
+            else:
+                verdict = PublicationVerdict.PUBLICATION_PROCESSING
             reasons.append(f"API status={status}")
             return TikTokPublicationReport(
                 project_id=project_id,

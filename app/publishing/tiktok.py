@@ -114,25 +114,29 @@ class TikTokPublisher:
         redirect_uri: Optional[str] = None,
         token_file: Optional[str] = None,
         session: Optional[Any] = None,
+        *,
+        allow_interactive: bool = True,
     ):
         self.client_key = client_key
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri or DEFAULT_TIKTOK_REDIRECT_URI
         self.token_file = token_file
         self._session = session if session is not None else requests.Session()
+        self.allow_interactive = allow_interactive
 
     # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_env(cls) -> "TikTokPublisher":
+    def from_env(cls, *, allow_interactive: bool = True) -> "TikTokPublisher":
         """Build a publisher from environment configuration (.env)."""
         return cls(
             client_key=os.getenv("TIKTOK_CLIENT_KEY"),
             client_secret=os.getenv("TIKTOK_CLIENT_SECRET"),
             redirect_uri=os.getenv("TIKTOK_REDIRECT_URI", DEFAULT_TIKTOK_REDIRECT_URI),
             token_file=os.getenv("TIKTOK_TOKEN_FILE", DEFAULT_TIKTOK_TOKEN_FILE),
+            allow_interactive=allow_interactive,
         )
 
     @property
@@ -221,6 +225,15 @@ class TikTokPublisher:
         failure — never fakes success.
         """
         self._require_credentials()
+
+        if not self.allow_interactive:
+            token = self.validate_stored_token()
+            if token is None:
+                raise TikTokAuthError(
+                    "No usable stored TikTok credentials; reconnect through "
+                    "the explicit platform connection command."
+                )
+            return token
 
         token = self._load_token()
         if token and not self._token_expired(token):

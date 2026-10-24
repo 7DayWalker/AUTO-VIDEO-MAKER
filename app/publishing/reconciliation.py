@@ -23,6 +23,8 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,8 +67,11 @@ ORCHESTRATOR_OUTPUT_DIR = PROJECT_ROOT / "output" / "projects"
 _REPREPARABLE_STATES = {
     PublicationState.NOT_STARTED,
     PublicationState.PREPARED,
-    PublicationState.FAILED,
 }
+
+# Both platform writers share this lock. It protects a fresh manifest merge,
+# not a second publication lifecycle; all state transitions remain below.
+_PUBLICATION_MANIFEST_LOCK = threading.RLock()
 
 # States meaning "a submission may already exist on YouTube".
 _POST_SUBMISSION_STATES = {
@@ -98,10 +103,43 @@ def load_manifest(project_id: str, project_dir: Optional[Path] = None) -> Tuple[
 
 def save_manifest(manifest_path: Path, manifest: ProjectManifest) -> None:
     manifest.updated_at = utc_now_iso()
-    manifest_path.write_text(
-        json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=manifest_path.parent,
+            prefix=f".{manifest_path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(manifest.to_dict(), handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, manifest_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _persist_platform_record(manifest_path: Path, manifest: ProjectManifest,
+                             field_name: str, record: Any) -> None:
+    """Merge only the owning platform's record into the latest disk manifest.
+
+    A stale YouTube snapshot must not erase a newly persisted TikTok record
+    (or execution evidence), and vice versa. Atomic replacement prevents a
+    browser read from observing a partially written publication manifest.
+    """
+    if field_name not in {"publication", "tiktok_publication"}:
+        raise ValueError("unknown publication record field")
+    with _PUBLICATION_MANIFEST_LOCK:
+        _, latest = load_manifest(manifest.project_id, manifest_path.parent)
+        if latest.project_id != manifest.project_id or record.project_id != latest.project_id:
+            raise PublishingError("Publication record project identity mismatch")
+        record.updated_at = utc_now_iso()
+        setattr(latest, field_name, record)
+        save_manifest(manifest_path, latest)
+        # Keep the caller's snapshot in sync for subsequent in-memory reads.
+        manifest.publication = latest.publication
+        manifest.tiktok_publication = latest.tiktok_publication
+        manifest.updated_at = latest.updated_at
 
 
 def get_record(manifest: ProjectManifest) -> Optional[PublicationRecord]:
@@ -120,10 +158,8 @@ def ensure_record(manifest: ProjectManifest) -> PublicationRecord:
 
 
 def persist_record(manifest_path: Path, manifest: ProjectManifest, record: PublicationRecord) -> None:
-    """Persist the publication record durably (single write, whole manifest)."""
-    record.updated_at = utc_now_iso()
-    manifest.publication = record
-    save_manifest(manifest_path, manifest)
+    """Persist YouTube evidence without clobbering the other platform."""
+    _persist_platform_record(manifest_path, manifest, "publication", record)
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +338,15 @@ def prepare_publish(
 
     # Canonical metadata contract: built once from validated project evidence,
     # validated against platform limits, and persisted durably. Validation
-    # failures abort preparation before anything is submitted.
+    # is read-only and preserves the existing invalid-metadata error contract
+    # even when an existing publication independently forbids preparation.
     metadata_model = build_youtube_metadata(manifest, directory, privacy_status=privacy_status)
+    if record.youtube_video_id or record.state not in _REPREPARABLE_STATES:
+        raise DuplicateUploadBlockedError(
+            f"Cannot prepare YouTube publication in state {record.state.value} "
+            "or with an existing video identity; reconcile the existing "
+            "publication explicitly. Preparation never clears submission evidence."
+        )
     record.final_video_path = str(video_path)
     record.file_fingerprint = fingerprint
     record.file_size = size
@@ -660,6 +703,14 @@ def reconcile_publication(
             reasons=reasons,
         )
 
+    if publisher is None and record.state == PublicationState.UNKNOWN_RECONCILIATION_REQUIRED:
+        return PublicationReport(
+            project_id=project_id,
+            verdict=PublicationVerdict.PUBLICATION_UNKNOWN_RECONCILIATION_REQUIRED,
+            state=record.state.value, youtube_video_id=record.youtube_video_id,
+            reasons=[record.error or "explicit reconciliation required; no blind upload"],
+        )
+
     if record.youtube_video_id:
         if publisher is not None:
             info = publisher.get_video(record.youtube_video_id)
@@ -684,7 +735,7 @@ def reconcile_publication(
             # Phase 7B: recover an interrupted metadata update by inspecting
             # the EXISTING video — never by uploading again.
             pending_mismatches: List[str] = []
-            if record.pending_metadata is not None:
+            if record.pending_metadata is not None and new_state != PublicationState.FAILED:
                 pending_mismatches = metadata_mismatches(
                     record.pending_metadata, None, None, None, info
                 )
@@ -717,7 +768,7 @@ def reconcile_publication(
                 "checked_at": utc_now_iso(),
             }
 
-            if record.pending_metadata is not None:
+            if record.pending_metadata is not None and new_state != PublicationState.FAILED:
                 # Update submitted but the API does not confirm it yet:
                 # truthful pending verdict; the pending metadata stays durable
                 # so a later resume can reconcile again. No upload, no retry.
@@ -759,12 +810,15 @@ def reconcile_publication(
             if new_state == PublicationState.VERIFIED:
                 record.verified_at = utc_now_iso()
                 record.error = None
+            elif new_state == PublicationState.FAILED:
+                record.error = f"YouTube uploadStatus={upload_status}"
             persist_record(manifest_path, manifest, record)
-            verdict = (
-                PublicationVerdict.PUBLICATION_VERIFIED
-                if new_state == PublicationState.VERIFIED
-                else PublicationVerdict.PUBLICATION_PROCESSING
-            )
+            if new_state == PublicationState.VERIFIED:
+                verdict = PublicationVerdict.PUBLICATION_VERIFIED
+            elif new_state == PublicationState.FAILED:
+                verdict = PublicationVerdict.PUBLICATION_FAILED
+            else:
+                verdict = PublicationVerdict.PUBLICATION_PROCESSING
             reasons.append(f"API uploadStatus={upload_status}")
             return PublicationReport(
                 project_id=project_id,
@@ -845,12 +899,29 @@ def run_publish_flow(project_id: str, confirm_channel: bool = True) -> int:
     print("=" * 60)
 
     try:
-        record = prepare_publish(project_id)
+        # Inspect durable evidence BEFORE preparation. Resuming an existing
+        # identity must not reset VERIFIED/PROCESSING or erase an ambiguity.
+        offline_report = reconcile_publication(project_id)
+        if offline_report.verdict in {
+            PublicationVerdict.PUBLICATION_FAILED,
+            PublicationVerdict.PUBLICATION_UNKNOWN_RECONCILIATION_REQUIRED,
+        }:
+            print(offline_report.summary())
+            print("BLOCKED: inspect and explicitly reconcile; no upload attempted.")
+            return 2
+        _, manifest = load_manifest(project_id)
+        record = get_record(manifest)
+        already_submitted = bool(record and record.youtube_video_id)
+        if not already_submitted:
+            record = prepare_publish(project_id)
     except (PublishingEligibilityError, DuplicateUploadBlockedError, PublishingError) as exc:
         print(f"PUBLISHING REFUSED: {exc}")
         return 1
 
-    print(f"Reconciliation verdict : PROJECT_COMPLETE")
+    if already_submitted:
+        print("Existing publication identity; preparation skipped on resume.")
+    else:
+        print("Reconciliation verdict : PROJECT_COMPLETE")
     print(f"Final video            : {record.final_video_path}")
     print(f"SHA-256 fingerprint    : {record.file_fingerprint}")
     print(f"File size              : {record.file_size} bytes")

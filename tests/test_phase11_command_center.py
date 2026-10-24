@@ -637,7 +637,7 @@ def test_publish_rejects_platforms_without_existing_adapter(
 
     status, payload = _post(
         base + "/api/productions/" + PID + "/units/unit-001/publish",
-        {"confirm": True, "platforms": ["youtube"]},
+        {"confirm": True, "platforms": ["instagram"]},
     )
     assert status == 400
     assert payload["error"] == "PUBLISH_PLATFORM_NOT_SUPPORTED"
