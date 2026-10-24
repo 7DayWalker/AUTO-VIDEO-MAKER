@@ -31,7 +31,7 @@ def test_mock_invoices_provider_seam(tmp_path):
         def is_available(self): return True
         def generate(self, *a, **kw): self._call_count+=1; return None
     prov=_MockLike()
-    art=build_grounded_narration_plan(PID, UID, a, tr, target_duration_seconds=12.0, llm_provider_override=prov)
+    art=build_grounded_narration_plan(PID, UID, a, tr, target_duration_seconds=12.0, llm_provider_override=prov, mock_mode=True)
     assert art.beats
     assert prov._call_count >= 1
 def test_phase3_consumes_mock_ai_plan(tmp_path):

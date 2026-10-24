@@ -424,6 +424,8 @@ def list_pro_model_ids() -> Tuple[str, ...]:
 #: The Summary Pro job: understand EXISTING source video and identify
 #: meaningful events for a grounded, condensed narrated recap.
 JOB_SOURCE_VIDEO_RECAP = "source_video_event_recap"
+#: Summary Standard consumes the existing transcript, not native video/stills.
+JOB_SOURCE_TRANSCRIPT_RECAP = "source_transcript_recap"
 
 
 class JobRequirement(BaseModel):
@@ -445,6 +447,12 @@ class JobRequirement(BaseModel):
 #: video; a model qualifies through NATIVE video OR through frame-based visual
 #: analysis (both are recorded distinctly at execution time).
 JOB_REQUIREMENTS: Dict[str, JobRequirement] = {
+    JOB_SOURCE_TRANSCRIPT_RECAP: JobRequirement(
+        job_id=JOB_SOURCE_TRANSCRIPT_RECAP,
+        requires_text=True,
+        requires_json=True,
+        requires_any_input_modality=(InputModality.TEXT,),
+    ),
     JOB_SOURCE_VIDEO_RECAP: JobRequirement(
         job_id=JOB_SOURCE_VIDEO_RECAP,
         requires_text=True,
@@ -924,6 +932,7 @@ __all__ = [
     "is_deprecated_alias",
     "deprecated_aliases_for",
     "JOB_SOURCE_VIDEO_RECAP",
+    "JOB_SOURCE_TRANSCRIPT_RECAP",
     "JobRequirement",
     "JOB_REQUIREMENTS",
     "model_meets_job",

@@ -323,10 +323,15 @@ def assess_model_for_job(
 
     model = get_model(canonical_model_id)
     capability_ok, missing = model_meets_job(model, req)
+    # A visual-capable model still uses TEXT for Standard. Never impose Pro's
+    # native-video/frame requirement on a transcript/text+JSON job.
     method = job_video_understanding_method(model)
-
-    # The route must support the modality the model would actually use.
-    required_modality = method
+    if method not in req.requires_any_input_modality:
+        method = None
+    required_modality = method or next(
+        (m for m in req.requires_any_input_modality if model.capabilities.supports_input_modality(m)),
+        None,
+    )
 
     routes = tuple(
         assess_provider_route(model.id, b, required_modality=required_modality)

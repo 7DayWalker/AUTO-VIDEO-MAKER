@@ -196,7 +196,8 @@ def test_5_explicit_selection_resolves_opus_exactly():
     assert chosen2 == OPUS
 
 
-def test_5b_explicit_opus_is_not_overridden_by_auto_preference():
+def test_5b_explicit_opus_is_not_overridden_by_auto_preference(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-routing-key")
     from app.content.capability_router import select_model_auto
     from app.production.narration import resolve_summary_model
 
@@ -213,6 +214,7 @@ def test_5b_explicit_opus_is_not_overridden_by_auto_preference():
 
 def test_6_execution_uses_the_exact_codecraft_wire_id(monkeypatch):
     monkeypatch.setenv("CODECRAFT_API_KEY", "cc_fake_for_test")
+    monkeypatch.setenv("CODECRAFT_BASE_URL", "https://example.invalid/v1")
     resolved = resolve_model(OPUS)
     assert resolved.canonical_model_id == OPUS
     assert resolved.provider == "codecraft"

@@ -1,4 +1,4 @@
-"""Track 9 HTTP /api surface -- hermetic (mock mode, no live calls)."""
+"""Track 9 HTTP /api surface -- hermetic mock and real paths, no live calls."""
 from __future__ import annotations
 import json, threading, urllib.request, urllib.error
 from pathlib import Path
@@ -237,3 +237,144 @@ def test_narration_synthesize_invalid_format(monkeypatch, tmp_path):
         assert s==400, j
         assert j.get("error")=="INVALID_REQUEST"
     finally: httpd.shutdown()
+
+
+def _standard_real_source(tmp_path):
+    """Persist canonical source/transcript evidence without FFmpeg or STT calls."""
+    from app.production.storage import save_revision, transcript_path_for
+    from tests.track9_narration_fakes import standard_evidence
+
+    asset, transcript = standard_evidence()
+    production = _make_prod(tmp_path)
+    save_revision(production.model_copy(update={
+        "source_assets": [asset], "plan_version": production.plan_version + 1,
+        "revised_at": "2026-10-24T09:00:00+00:00",
+    }), root=tmp_path / "productions")
+    path = transcript_path_for(PID, AID, root=tmp_path / "productions")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(transcript.model_dump_json(), encoding="utf-8")
+    return asset, transcript
+
+
+@pytest.mark.parametrize("model_id", [None, "qwen-3.8-flash", "gemini-3-flash-preview"])
+def test_standard_real_http_uses_resolved_adapter_and_persists(monkeypatch, tmp_path, model_id):
+    from app.production.models import NarrationArtifact
+    from app.production.narration import validate_narration_artifact
+    from app.production.storage import load_narration_artifact
+    from tests.track9_narration_fakes import install_standard_provider, standard_response
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("mock/Pro planner must not run for real Standard HTTP requests")
+
+    monkeypatch.setattr("app.production.narration_mock.mock_grounded_plan", forbidden)
+    monkeypatch.setattr("app.production.narration_pro.build_pro_multimodal_plan", forbidden)
+    provider, factory_calls, binding = install_standard_provider(monkeypatch, model_id or "qwen-3.8-flash")
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        asset, transcript = _standard_real_source(tmp_path)
+        body = {"summary_mode": "standard", "mock_mode": False, "target_duration_seconds": 30}
+        if model_id is not None:
+            body.update(selection_mode="explicit", summary_understanding_model_id=model_id)
+        status, payload, _ = _post(base, f"/api/productions/{PID}/units/{UID}/narration", body)
+        assert status == 201, payload
+        assert factory_calls == [binding.provider_model_id]
+        assert provider.json_calls == len(provider.calls) == 1
+        media_url = payload.pop("media_url")
+        artifact = NarrationArtifact.model_validate(payload)
+        assert artifact.summary == standard_response()["summary"]
+        assert artifact.transcript_refs == ["1", "9"]
+        assert [beat.order for beat in artifact.beats] == [1, 2]
+        assert [ref.transcript_segment_ids for ref in artifact.source_refs] == [[1], [9]]
+        assert artifact.narration_text == " ".join(beat["narration_text"] for beat in standard_response()["beats"])
+        assert artifact.status == "grounded" and artifact.source_asset_id == AID
+        validate_narration_artifact(artifact, source_asset=asset, source_transcript=transcript)
+        assert load_narration_artifact(PID, UID, root=tmp_path / "productions").model_dump() == payload
+        status, reloaded, _ = _get(base, media_url)
+        assert status == 200 and reloaded == payload
+        for key in ("provider", "provider_model_id", "wire_id", "api_key"):
+            assert key not in payload
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.parametrize("failure", ["bad_grounding", "bad_json", "missing_configuration", "ineligible_model"])
+def test_standard_real_http_rejects_invalid_plan_without_persistence(monkeypatch, tmp_path, failure):
+    from app.content.model_registry import CanonicalModel, MODEL_REGISTRY, ModelCapabilities
+    from app.production.storage import narration_artifact_path
+    from tests.track9_narration_fakes import install_standard_provider, standard_response
+
+    data = standard_response()
+    if failure == "bad_grounding":
+        data["beats"][0]["source_refs"][0]["transcript_segment_ids"] = [999]
+    provider, factory_calls, binding = install_standard_provider(
+        monkeypatch, data=data, **({"raw": "malformed model output"} if failure == "bad_json" else {}),
+    )
+    if failure == "missing_configuration":
+        for key in binding.config_keys:
+            monkeypatch.delenv(key, raising=False)
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _standard_real_source(tmp_path)
+        body = {"summary_mode": "standard", "mock_mode": False}
+        if failure == "ineligible_model":
+            model = CanonicalModel(id="standard-no-json", display_name="No JSON", family="fixture", capabilities=ModelCapabilities(json_=False))
+            monkeypatch.setitem(MODEL_REGISTRY, model.id, model)
+            body.update(selection_mode="explicit", summary_understanding_model_id=model.id)
+        status, payload, _ = _post(base, f"/api/productions/{PID}/units/{UID}/narration", body)
+        assert status == (422 if failure in ("missing_configuration", "ineligible_model") else 400), payload
+        assert payload["error"] == ("MODEL_NOT_ELIGIBLE" if status == 422 else "INVALID_REQUEST")
+        assert not narration_artifact_path(PID, UID, root=tmp_path / "productions").exists()
+        if failure in ("missing_configuration", "ineligible_model"):
+            assert factory_calls == provider.calls == []
+        else:
+            assert provider.json_calls == len(provider.calls) == 1
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_capabilities_standard_requires_json_without_provider_leakage(monkeypatch, tmp_path):
+    from app.content.model_registry import CanonicalModel, ModelCapabilities
+
+    model = CanonicalModel(id="text-without-json", display_name="Text without JSON", family="fixture", capabilities=ModelCapabilities(json_=False))
+    monkeypatch.setattr("app.content.model_registry.list_models", lambda: (model,))
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        status, payload, _ = _get(base, "/api/capabilities")
+        assert status == 200
+        assert payload["ai_summary"]["understanding_models"] == []
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_standard_real_http_retains_validated_source_segment_ids(monkeypatch, tmp_path):
+    from app.production.storage import load_narration_artifact
+    from tests.track9_narration_fakes import install_standard_provider, standard_response
+
+    data = standard_response()
+    for index, beat in enumerate(data["beats"], 1):
+        beat["source_refs"][0]["source_segment_id"] = f"seg-{index:03d}"
+    provider, _, _ = install_standard_provider(monkeypatch, data=data)
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _standard_real_source(tmp_path)
+        segment_path = f"/api/productions/{PID}/source/{AID}/segments"
+        status, payload, _ = _post(base, segment_path, {"segments": [
+            {"start_seconds": 10, "end_seconds": 20, "transcript_segment_ids": [1]},
+            {"start_seconds": 90, "end_seconds": 100, "transcript_segment_ids": [9]},
+        ]})
+        assert status == 200, payload
+        status, payload, _ = _post(base, f"/api/productions/{PID}/units/{UID}/narration", {
+            "summary_mode": "standard", "mock_mode": False, "target_duration_seconds": 30,
+        })
+        assert status == 201, payload
+        persisted = load_narration_artifact(PID, UID, root=tmp_path / "productions")
+        assert [beat.source_segment_ids for beat in persisted.beats] == [["seg-001"], ["seg-002"]]
+        assert [ref.source_segment_id for ref in persisted.source_refs] == ["seg-001", "seg-002"]
+        evidence = json.loads(provider.calls[0]["prompt"].split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+        assert [segment["segment_id"] for segment in evidence["source_segments"]] == ["seg-001", "seg-002"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

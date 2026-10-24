@@ -236,7 +236,8 @@ def test_4d_image_input_and_native_video_are_distinct_capabilities():
 # 5. Auto selects a CANONICAL MODEL before provider routing
 # =========================================================================
 
-def test_5_auto_selects_model_before_provider():
+def test_5_auto_selects_model_before_provider(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-routing-key")
     selection = select_model_auto(JOB_SOURCE_VIDEO_RECAP)
     assert selection.selection_mode == "auto"
     # The result is a MODEL identity, never a provider name.
@@ -253,15 +254,18 @@ def test_5_auto_selects_model_before_provider():
     assert route.canonical_model_id == selection.canonical_model_id
 
 
-def test_5b_auto_makes_no_cost_claim():
+def test_5b_auto_makes_no_cost_claim(monkeypatch):
     """Capability ranking is explicitly identified; cost is NOT claimed."""
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-routing-key")
     selection = select_model_auto(JOB_SOURCE_VIDEO_RECAP)
     assert selection.cost_optimized is False
     assert selection.ranking_basis == "capability_rank"
 
 
-def test_5c_auto_requires_an_eligible_provider_route():
+def test_5c_auto_requires_an_eligible_provider_route(monkeypatch):
     """A capable model with NO eligible route must not win Auto."""
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-routing-key")
+    monkeypatch.delenv("T9_DEFINITELY_UNSET_KEY", raising=False)
     orphan_id = "t9-auto-orphan"
     MODEL_REGISTRY[orphan_id] = CanonicalModel(
         id=orphan_id, display_name="Orphan", family="test",
@@ -297,7 +301,8 @@ def test_5d_auto_ranks_by_legitimate_capability_metadata():
 # 6. Explicit selection is NEVER overridden
 # =========================================================================
 
-def test_6_explicit_selection_never_overridden():
+def test_6_explicit_selection_never_overridden(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-routing-key")
     from app.production.narration import resolve_summary_model
 
     auto_choice = select_model_auto(JOB_SOURCE_VIDEO_RECAP).canonical_model_id
@@ -330,7 +335,8 @@ def test_7_provider_chosen_only_from_that_models_bindings():
             assert route.canonical_model_id == m.id
 
 
-def test_7b_selected_route_belongs_to_the_selected_model():
+def test_7b_selected_route_belongs_to_the_selected_model(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-routing-key")
     selection = select_model_auto(JOB_SOURCE_VIDEO_RECAP)
     route = select_provider_for_model(selection.canonical_model_id)
     model = get_model(selection.canonical_model_id)
@@ -832,7 +838,8 @@ def test_17_resolver_remains_the_single_resolver():
     assert resolved.canonical_model_id != resolved.provider_model_id
 
 
-def test_17b_eligibility_listing_is_deterministic():
+def test_17b_eligibility_listing_is_deterministic(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-routing-key")
     first = [a.canonical_model_id for a in list_eligible_models_for_job()]
     second = [a.canonical_model_id for a in list_eligible_models_for_job()]
     assert first == second

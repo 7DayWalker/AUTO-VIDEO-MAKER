@@ -90,6 +90,7 @@ def resolve_model(
     *,
     mode: str = "exact",
     try_next_on_failure: bool = False,
+    job_id: Optional[str] = None,
 ) -> ResolvedModelProvider:
     """Resolve a canonical model to a provider instance.
 
@@ -99,6 +100,9 @@ def resolve_model(
         try_next_on_failure: If False (default), resolve first binding
             deterministically. If True, eligible provider failures try
             next binding in declared order (intra-model fallback).
+        job_id: Optional capability job. When supplied, only locally eligible
+            bindings for that job can be instantiated; canonical identity and
+            declared binding order are preserved.
 
     No network call; provider.generate() is never invoked here.
     """
@@ -124,10 +128,26 @@ def resolve_model(
 
     attempted: List[Dict[str, Optional[str]]] = []
     last_exc: Optional[BaseException] = None
+    eligible_bindings = None
+    if job_id is not None:
+        from app.content.capability_router import assess_model_for_job
+
+        assessment = assess_model_for_job(canonical.id, job_id)
+        if not assessment.capability_ok:
+            raise ValueError(f"Canonical model {canonical.id!r} cannot satisfy job {job_id!r}")
+        eligible_bindings = {
+            (route.provider, route.provider_model_id) for route in assessment.eligible_routes()
+        }
 
     for binding in bindings:
         provider_name = binding.provider
         wire_id = binding.provider_model_id
+        if eligible_bindings is not None and (provider_name, wire_id) not in eligible_bindings:
+            attempted.append({
+                "provider": provider_name, "provider_model_id": wire_id,
+                "reason": "route_not_eligible_for_job", "category": FailureCategory.CONFIGURATION,
+            })
+            continue
 
         if not provider_registry.has_provider(provider_name):
             if not try_next_on_failure:

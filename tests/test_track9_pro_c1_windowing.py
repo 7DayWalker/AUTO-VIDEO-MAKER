@@ -134,10 +134,23 @@ def test_pro_requires_multimodal_and_no_silent_downgrade(tmp_path):
     with _pt.raises(Exception):
         build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=10.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", llm_provider_override=Bad(), root=tmp_path)
 
-def test_provider_neutrality_dynamic_resolve():
+def test_provider_neutrality_dynamic_resolve(monkeypatch):
     from app.production.narration import resolve_summary_model
     from app.content.model_resolver import resolve_model
+    import app.content.provider_registry as provider_registry
     mid=resolve_summary_model("pro")
+    from app.content.model_registry import get_model
+    binding = get_model(mid).bindings[0]
+    for key in binding.config_keys:
+        monkeypatch.setenv(key, "https://example.invalid/v1" if key.endswith("BASE_URL") else "synthetic-routing-key")
+    # Resolve the real canonical binding through a hermetic adapter, not a
+    # workstation-configured live provider (including import-time key caches).
+    class StubProvider:
+        name = binding.provider
+        model = binding.provider_model_id
+        def is_available(self): return True
+        def generate(self, *args, **kwargs): raise AssertionError("resolution must not generate")
+    monkeypatch.setitem(provider_registry._REGISTRY, binding.provider, lambda wire=None: StubProvider())
     resolved=resolve_model(mid, mode="exact", try_next_on_failure=True)
     assert resolved.provider and resolved.provider_model_id
     from app.content.model_registry import get_model

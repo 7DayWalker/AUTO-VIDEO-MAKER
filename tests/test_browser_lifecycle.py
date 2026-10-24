@@ -1,6 +1,7 @@
 """Zero-credit tests for the proof-based dedicated Chrome lifecycle."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -60,7 +61,10 @@ def test_startup_rejects_explicitly_wrong_port_owner():
     assert browser._startup_ready(evidence) is False
 
 
-def test_dedicated_process_tree_does_not_include_normal_chrome():
+def test_dedicated_process_tree_does_not_include_normal_chrome(monkeypatch):
+    # The synthetic process command below belongs to this exact profile. It
+    # must not depend on PROJECT_ROOT/profile isolation in an external runner.
+    monkeypatch.setattr(browser, "BROWSER_PROFILE_DIR", Path(r"C:\Projects\AUTO-VIDEO-MAKER\browser_profile"))
     dedicated = {
         "pid": 42, "ppid": 1,
         "command_line": "chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\\Projects\\AUTO-VIDEO-MAKER\\browser_profile",

@@ -10,7 +10,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
 
-from app.content.model_registry import get_model
+from app.content.model_registry import (
+    JOB_REQUIREMENTS,
+    JOB_SOURCE_TRANSCRIPT_RECAP,
+    get_model,
+    model_meets_job,
+)
 from app.content.model_resolver import resolve_model
 from app.production.models import (
     NarrativeBeat,
@@ -77,10 +82,9 @@ def resolve_summary_model(
     is separate and resolved later via app.content.model_resolver.
 
     Selection modes:
-      - AUTO ('auto'): capability-driven -- eligible models are those with
-        multimodal video understanding (is_multimodal_capable). Ranked by
-        capability score deterministically; no cost claim unless pricing
-        metadata exists.
+      - AUTO ('auto'): capability-driven -- Standard needs text/JSON; Pro
+        needs multimodal video understanding (is_multimodal_capable). Ranked
+        deterministically; no cost claim unless pricing metadata exists.
       - EXPLICIT ('explicit'/'manual'): resolve ONLY the requested canonical
         model; no ranking, no cross-model fallback. Same-model provider
         fallback is allowed at execution time via the resolver.
@@ -88,6 +92,9 @@ def resolve_summary_model(
     If selection_mode is None, it is inferred: explicit when a model id is
     supplied, otherwise auto.
     """
+    mode = (mode or "standard").strip().lower()
+    if mode not in ("standard", "pro"):
+        raise ValueError(f"Unknown summary_mode: {mode!r}")
     # Normalize aliases / handle legacy call pattern where explicit id is passed
     # as preferred_model_id or as summary_understanding_model_id.
     explicit_id = summary_understanding_model_id if summary_understanding_model_id is not None else preferred_model_id
@@ -111,11 +118,17 @@ def resolve_summary_model(
         if explicit_id is None or not str(explicit_id).strip():
             raise ValueError("Explicit model selection requires a canonical model id")
         m = get_model(explicit_id)
+        if mode == "standard":
+            capable, missing = model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_TRANSCRIPT_RECAP])
+            if not capable:
+                raise ValueError(
+                    f"Model {m.id!r} cannot satisfy Summary Standard requirements: {', '.join(missing)}"
+                )
         if mode == "pro" and not m.capabilities.is_multimodal_capable():
             raise ValueError(
                 f"Model {explicit_id!r} is not multimodal-capable; cannot satisfy Summary Pro requirements"
             )
-        return explicit_id
+        return m.id
 
     # AUTO path: capability-driven (no hardcoded Gemini owner, no provider privilege)
     if mode == "pro":
@@ -137,12 +150,12 @@ def resolve_summary_model(
     if mode == "standard":
         from app.content.model_registry import list_models
         for m in list_models():
-            if m.capabilities.text and not m.capabilities.is_multimodal_capable():
+            if model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_TRANSCRIPT_RECAP])[0] and not m.capabilities.is_multimodal_capable():
                 return m.id
         for m in list_models():
-            if m.capabilities.text:
+            if model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_TRANSCRIPT_RECAP])[0]:
                 return m.id
-        raise ValueError("No text-capable summary understanding model available for Standard")
+        raise ValueError("No text/JSON-capable summary understanding model available for Standard")
     raise ValueError(f"Unknown summary mode: {mode!r}")
 
 
@@ -181,7 +194,7 @@ def build_grounded_narration_plan(
     source_transcript: SourceTranscript,
     *,
     target_duration_seconds: float,
-    # None means "not supplied" (AI Brain default applies for Standard; AUTO for Pro).
+    # None means "not supplied" (capability-driven AUTO for Standard and Pro).
     # An explicit value is ALWAYS treated as explicit model selection.
     canonical_model_id: Optional[str] = None,
     # New explicit Summary Understanding Model seam (auto vs explicit).
@@ -236,25 +249,24 @@ def build_grounded_narration_plan(
         else:
             summary_model_id = resolve_summary_model("pro", selection_mode="auto")
     else:
-        # Standard: transcript/audio-first. Deprecated aliases are normalized.
-        # None means "not supplied" -> AI Brain default canonical model.
-        base_id = canonical_model_id if canonical_model_id is not None else "qwen-3.8-flash"
-        norm = _normalize_summary_alias(base_id) or base_id
-        if summary_understanding_model_id is not None:
-            norm = _normalize_summary_alias(summary_understanding_model_id) or summary_understanding_model_id
-        if norm == SUMMARY_PRO_MODEL:
-            norm = SUMMARY_STANDARD_MODEL
-        summary_model_id = norm
-        # Validate existence
-        resolve_narration_model(summary_model_id)
+        # Standard uses the same canonical AUTO/EXPLICIT seam, with text+JSON
+        # eligibility. A visual-capable explicit model is never substituted.
+        summary_model_id = resolve_summary_model(
+            "standard",
+            preferred_model_id=canonical_model_id,
+            selection_mode=summary_understanding_mode,
+            summary_understanding_model_id=summary_understanding_model_id,
+        )
 
     duration = float(target_duration_seconds)
-    if duration <= 0:
+    if not math.isfinite(duration) or duration <= 0:
         raise ValueError("target_duration_seconds must be positive")
     if duration > source_asset.duration * 2.5:
         raise ValueError("target_duration_seconds is implausible for the source asset duration")
 
-    if mock_mode or llm_provider_override is not None:
+    # Pro's historical mock override seam is retained; Standard overrides are
+    # real planner adapters unless mock_mode was explicitly requested.
+    if mock_mode or (mode == "pro" and llm_provider_override is not None):
         if mode == "pro":
             from app.content.model_registry import get_model as _get_model
             try:
@@ -287,21 +299,44 @@ def build_grounded_narration_plan(
         from app.production.narration_mock import mock_grounded_plan
         return mock_grounded_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, status=status, provider_override=llm_provider_override)
     # Real provider path: hierarchical multimodal for Pro, text-only for Standard
-    resolve_narration_model(summary_model_id)
-    resolved = resolve_model(summary_model_id, mode="exact", try_next_on_failure=True)
-    prov_real = resolved.provider_instance
+    if mode == "pro":
+        resolve_narration_model(summary_model_id)
+    if llm_provider_override is not None:
+        prov_real = llm_provider_override
+    else:
+        if mode == "standard":
+            from app.content.capability_router import assess_model_for_job
+            eligibility = assess_model_for_job(summary_model_id, JOB_SOURCE_TRANSCRIPT_RECAP)
+            if not eligibility.eligible:
+                raise RuntimeError(
+                    f"Canonical model {summary_model_id!r} has no eligible route for Summary Standard text/JSON planning"
+                )
+        resolve_kwargs = {"job_id": JOB_SOURCE_TRANSCRIPT_RECAP} if mode == "standard" else {}
+        resolved = resolve_model(summary_model_id, mode="exact", try_next_on_failure=True, **resolve_kwargs)
+        prov_real = resolved.provider_instance
     if not prov_real.is_available():
-        raise RuntimeError(f"LLM provider '{resolved.provider}' for '{summary_model_id}' not available")
+        raise RuntimeError(f"Canonical model {summary_model_id!r} is not available for narration planning")
     if mode == "pro":
         if not getattr(prov_real, "supports_multimodal", lambda: False)():
             raise RuntimeError(f"Pro requires multimodal provider; {resolved.provider!r} does not support multimodal (no silent downgrade)")
         # Long-form hierarchical multimodal understanding (bounded windows)
         from app.production.narration_pro import build_pro_multimodal_plan
         return build_pro_multimodal_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, summary_model_id=summary_model_id, prov=prov_real, root=root)
-    # Standard real path still requires ai_grounded_plan bridge
-    raise RuntimeError(
-        "real provider path requires ai_grounded_plan — use mock_mode=True or "
-        "llm_provider_override for tests until CodeCraft credentials present"
+    from app.production.narration_real import ai_grounded_plan
+    from app.production.storage import segments_path_for
+
+    source_segments = []
+    if segments_path_for(production_id, source_asset.asset_id, root=root).is_file():
+        from app.production.models import SourceSegment
+        from app.production.segments import load_segments
+
+        segment_status, segment_payload = load_segments(production_id, source_asset.asset_id, root=root)
+        if segment_status != 200:
+            raise ValueError("Cannot load validated source-segment evidence for narration")
+        source_segments = [SourceSegment.model_validate(item) for item in segment_payload["segments"]]
+    return ai_grounded_plan(
+        production_id, unit_id, source_asset, source_transcript,
+        target_duration_seconds=duration, prov=prov_real, status=status, source_segments=source_segments,
     )
 
 

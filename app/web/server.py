@@ -283,7 +283,7 @@ def _ai_summary_projection() -> dict:
         caps = getattr(canonical, "capabilities", None)
         if caps is None:
             continue
-        is_standard = bool(getattr(caps, "text", False))
+        is_standard = bool(getattr(caps, "text", False) and getattr(caps, "json_", False))
         try:
             is_pro = bool(caps.is_pro_eligible())
         except Exception:
