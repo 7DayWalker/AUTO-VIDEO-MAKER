@@ -4,13 +4,22 @@ A local automation system that produces short-form videos and publishes them to 
 
 ## Current Objective
 
-Validate the concept of automated short-form video production using Google Flow's free credits for video generation, with a target of approximately 2 videos per day once fully operational.
+Operate the signed-off AVM V1 product through one AVM Core: durable productions and
+units, canonical model selection, local/AI video creation, source-video repurposing
+and grounded narration, validated media, and explicit manual YouTube/TikTok publishing.
+K3 is an independent control surface, not a second production engine.
 
 ## Current Phase
 
-**Phase 1 — Google Flow Proof of Concept**
+**Phase 11C COMPLETE — Tracks 1–14 Verified & Signed Off (2026-10-24).**
 
-Prove that we can reliably automate a normal authenticated Google Flow browser session and download one generated video.
+Authoritative scope and historical audit trail: [AVM_MASTER_ROADMAP.md](AVM_MASTER_ROADMAP.md).
+The next phase is **Phase 12 — Automated Publishing, Scheduling & V1.x Operator Polish**;
+automation/scheduling is not implemented by the V1 closure.
+
+Verified closure: **Core 1,904 passed, 0 failed, 1 skipped** (opt-in live E2E),
+**K3 86 passed, 0 failed**, and a successful K3 production build with zero errors.
+Core code checkpoint: `a1bb5ed`; K3 real-mode Summary checkpoint: `b6a7f3d`.
 
 ---
 
@@ -54,7 +63,12 @@ Copy the example environment file and edit it with your values:
 copy .env.example .env
 ```
 
-For Phase 1, no real API keys are needed. The defaults work fine.
+Hermetic tests require no real API credentials or `.env`. Real AI generation,
+narration and platform publishing require the applicable configured provider or
+stored platform authorization; missing configuration fails truthfully. Transcription
+uses local Whisper by default. Google Flow remains a private operator route with
+manual authentication and credit protections. Never use an Alibaba Token Plan
+`sk-sp-` credential inside AVM; mock execution is an explicit offline option only.
 
 ### 6. Run the System Health Check
 
@@ -67,12 +81,42 @@ This verifies that the configuration loads and all required directories exist.
 ### 7. Run Unit Tests
 
 ```cmd
-pytest
+python tools\run_hermetic_pytest.py tests -q --tb=short
 ```
+
+The strict runner disables dotenv loading, removes inherited provider configuration,
+isolates runtime/credential/profile roots, and blocks external networking while
+allowing loopback HTTP route tests. Synthetic configuration belongs to individual
+tests; no AI-provider, YouTube or TikTok calls are permitted in this run. Local
+FFmpeg/FFprobe fixtures remain real; installed media tools are required.
+
+K3 lives in the separate repository
+`C:\Users\Paul Ella\AppData\Local\Cline\avm-studio-pro`. From that repository,
+run `node --test tests/*.mjs` (Git Bash, or expanded file arguments in PowerShell)
+and `npm run build`. The closure build has a non-fatal bundle-size warning, not a
+build error; Core's existing Pydantic deprecation warnings remain documented.
+
+### 8. Core / K3 Control Surface Boundary
+
+Run `python -m app.web.server` for Core HTTP `/api/*` (default
+`http://127.0.0.1:8787`). K3 runs on `:5173` and proxies same-origin `/api` requests
+to Core; `AVM_CORE_URL` configures the target. Production intent, execution and
+binding remain Core-owned. Core production/media roots are configurable/isolatable;
+there is no multi-tenant database/auth, billing ledger or native mobile app in V1.
+
+Production/progress/capability/media reads do not start production or upload.
+Publication-status GETs may reconcile an **existing** remote identity and persist
+fresh verification evidence; connection checks may refresh stored credentials.
+They are non-interactive, not universally read-only. OAuth consent is an explicit
+connect command; automated retries/publishing/scheduling remain Phase 12.
 
 ---
 
-## Phase 1: Google Flow Proof of Concept
+## Historical Phase 1: Google Flow Proof of Concept
+
+The following records the original Flow proof-of-concept workflow, not current V1
+phase status. The dedicated-profile/manual-authentication and credit safety rules
+remain in force; the authoritative current architecture is in the roadmap above.
 
 ### What It Does
 
@@ -151,7 +195,11 @@ The script will:
 
 ---
 
-## Project Structure
+## Project Structure (Historical Phase 1 Snapshot)
+
+This original snapshot is retained as history, not a complete V1 module inventory.
+Current production, content, assembly, voice, transcription, publishing and HTTP
+seams are documented in `AVM_MASTER_ROADMAP.md`; K3 remains a separate repository.
 
 ```
 AUTO-VIDEO-MAKER/
@@ -189,11 +237,38 @@ AUTO-VIDEO-MAKER/
 
 ---
 
-## Planned Pipeline (Future Phases)
+## Implemented V1 Production Pipeline and V1.x Boundaries
 
-Content idea → content specification → video prompts → video generation → asset management → video assembly → audio → captions → quality control → YouTube publishing → TikTok publishing
+Production command → durable `Production` / `ProductionUnit` intent → canonical
+planning → provider-independent execution → project-owned assets and conditional
+audio → captions / FFmpeg assembly → validation / accepted completed project →
+explicit manual YouTube/TikTok publishing and durable reconciliation evidence.
 
-**None of these production features are implemented yet.**
+- **Track 8 — V1 complete:** source video registration, timestamped transcription,
+  validated source segments, deterministic/AI candidate moment selection through the
+  shared grounded-planning primitives, and derived `ProductionUnit` lineage.
+  Deterministic synthetic planning is mock-labelled; source lineage alone is not
+  execution completion. Derived units publish through the canonical path once bound
+  to an accepted completed project. Direct clip-rendering shortcuts bypassing that
+  execution path remain **V1.x**; no separate unattended clipping engine is claimed.
+- **Track 9 — V1 complete:** real Summary Standard text+JSON grounded planning,
+  windowed Summary Pro visual understanding/narration, TTS synthesis, and
+  `narrated_summary.mp4` assembly with Core HTTP and K3 SummaryStudio integration.
+  Users select canonical models; AVM resolves providers internally with same-model
+  failover and truthful `ready` / `not_configured` / `unknown` readiness.
+  SummaryStudio defaults to real execution; its sandbox checkbox is opt-in.
+- Standalone summary sidecars are inspectable/downloadable through
+  `/api/productions/{id}/units/{unitId}/summary-video` and `/summary-video/media`.
+  Automatic promotion into a canonical `ProjectManifest` publishing record without
+  a bound completed project is **V1.x**; V1 returns **`422 SUMMARY_HANDOFF_REQUIRED`**.
+- Tracks 11–13 are complete as ownership/storage/credential/media, operation-accounting
+  and two-repo HTTP/mobile-readiness seams, not implemented SaaS billing/auth or a
+  native mobile app. Costs and attempt/fallback provenance are durable evidence;
+  unknown cost is never fabricated as zero or an account credit balance.
+- Automated publishing, scheduling and V1.x operator polish are next in Phase 12;
+  autonomous quality/scale, intelligent optimization and generalized recovery retain
+  their later-phase gates. Provider quota/uptime and compatible free video-model
+  availability remain external prerequisites, not guarantees from passing tests.
 
 ---
 

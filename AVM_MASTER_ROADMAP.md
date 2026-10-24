@@ -11,6 +11,12 @@ This is a **strategic and architectural** roadmap. It deliberately does **not** 
 implementation designs for future phases. Every future phase receives its own frozen
 specification / design gate before implementation (see Cross-Cutting Principles).
 
+**Signed-off position — 2026-10-24:** **Phase 11C COMPLETE (Tracks 1–14 Verified &
+Signed Off)**. Founder/CTO acceptance covers the bounded V1 scope below: **1,904
+passed, 0 failed, 1 skipped** (opt-in live E2E) in Core and **86 passed, 0 failed**
+in K3, with a successful production build. **Phase 12 — Automated Publishing,
+Scheduling & V1.x Operator Polish** is next; this closure does not implement it.
+
 ---
 
 ## 1. Strategic Vision
@@ -117,6 +123,7 @@ does **not** mean everything before SaaS is disposable personal-only software:
           │ Phase 10 Plan Execution   │
           │ Phase 11 Command Center   │
           │ Phase 11B Experience      │
+          │ Phase 11C V1 Product      │
           │ Phase 12 Automation       │
           │ Phase 13 Quality + Scale  │
           │ Phase 14 Provider Intel   │
@@ -314,7 +321,7 @@ closed by final acceptance; Git checkpoint `b50503c`).
 
 **Status:** ✅ COMPLETE.
 
-### 4.9 PERSONAL AVM MATURITY — Phase 11B 🟡
+### 4.9 PERSONAL AVM MATURITY — Phase 11B ✅
 
 **Name:** Command Center Experience.
 
@@ -326,9 +333,10 @@ or execution semantics**.
 Phase 11B is **UX/UI refinement and experience architecture only**: a bounded
 refinement of the existing Phase 11 Personal Command Center control surface.
 
-**Scope direction for the future Phase 11B Discovery stage** (direction only —
-these are **not** implementation requirements, and no Phase 11B specification exists
-yet):
+**Accepted experience scope:** the original discovery direction below was frozen in
+`PHASE_11B_COMMAND_CENTER_EXPERIENCE.md` (`dd21b26`), implemented, and accepted at
+`cc551ca`. Specification-time discovery/no-implementation language is historical,
+not the current implementation status. The original authority boundaries remain:
 
 - information hierarchy
 - navigation and screen organization
@@ -376,17 +384,18 @@ production-oriented operator experience."*
 a refinement of the existing Personal Command Center surface — not a new engine and
 not a separate product core.
 
-Phase 11B exists **only before Phase 12** — to polish the operator experience
-before automation is introduced. Phase 11B must receive its own frozen
-specification / design gate (the future Phase 11B Discovery stage) before any
-implementation begins. This roadmap entry grants **no permission** to implement
-Phase 11B early.
+Phase 11B was the bounded experience gate **before Phase 12**. Its specification,
+implementation review, and acceptance are complete (`dd21b26`, `cc551ca`);
+`tests/test_phase11_command_center.py` verifies 49 cases, including the accepted
+11B projections, media confinement, diagnostics, and binding behavior. This status
+reconciliation does not reopen its frozen specification or authorize new execution
+semantics.
 
 **Status:** ✅ COMPLETE — the Phase 11B specification was frozen (`dd21b26`) and its
 recovered implementation was subsequently reviewed and accepted (`cc551ca`), as recorded
 by the 2026-09-08 amendment (Section 13).
 
-### 4.10 PERSONAL AVM PRODUCT — Phase 11C 🟡
+### 4.10 PERSONAL AVM PRODUCT — Phase 11C ✅
 
 **Name:** AVM V1 Product Implementation & Expansion.
 
@@ -406,6 +415,14 @@ Phase 11C is the approved roadmap for controlled V1 implementation. It is not bl
 permission to implement every capability listed below immediately. Each implementation
 increment still requires a separately authorized task, an appropriate design or
 implementation checkpoint, validation, and acceptance evidence.
+
+**Status:** ✅ **COMPLETE — Tracks 1–14 Verified & Signed Off, 2026-10-24**.
+The Founder/CTO closure decision accepts the implemented V1 workflow and preparation
+seams, not all future capabilities mentioned in this strategic roadmap. Core code
+checkpoint: `a1bb5edb6b8574554548a1682b9427f84cc28ff3`; K3 real-mode Summary
+checkpoint: `b6a7f3d9b3b37ff072456c1d4525e3b7f4cd73c7`. The earlier Track 9
+integration/routing checkpoint is `114bad3`, Core HTTP projection checkpoint
+`20713eb`, and manual publishing parity checkpoint `39ff7d3` (K3: `d59225b`).
 
 **Strategic objective:** Make the existing AVM Core operate and feel like one coherent
 creative AI video studio across the Personal AVM/local control surface, while preserving
@@ -434,28 +451,31 @@ Phase 11C starts from a substantial existing base:
 Phase 11C shall preserve these boundaries. It shall not reopen completed phases merely
 because V1 exposes their capabilities through a more integrated product workflow.
 
-#### Current starting point — evidence-based baseline
+#### Historical starting point and reconciled V1 inventory
 
-The AVM Product Architecture V1 Baseline identified the following starting point:
+The AVM Product Architecture V1 Baseline supplied the discovery-time starting point.
+The inventory below is reconciled to the signed-off 2026-10-24 implementation;
+the dated discovery/amendment records in Section 13 remain historical evidence.
 
-| Area | Current evidence | 11C treatment |
+| Area | Current evidence | Signed-off V1 treatment |
 |---|---|---|
-| Production intent | `app/production/models.py` and `app/production/storage.py` provide `Production`, `ProductionUnit`, optional `ProductionBible`, dependencies, provider intent, versioning, and durable intent storage | Preserve and integrate |
-| Plan-backed execution | `app/orchestrator/production_execution.py` provides `ProductionExecutor`, `derive_progress()`, binding discovery, per-unit plans, and resumable execution around the existing engine | Preserve; correct wiring where required; do not replace |
-| Project binding | `ProjectManifest.production_binding` is the authoritative Production → Unit → Project relationship | Preserve as the only binding authority |
-| Scene execution | `app/orchestrator/scene_execution.py` provides the provider-independent execution boundary | Preserve and extend additively |
-| Local video | ImageMotion, local asset normalization, external video intake, FFmpeg, and FFprobe paths exist in `app/orchestrator/visual_providers.py` and `app/assembly/` | Consolidate, validate, and integrate |
-| Google Flow | Browser/CDP Flow route and credit protections exist in `app/flow/` and the Flow provider wrapper | Preserve as a first-class route |
-| AI video | Gemini Omni and OpenRouter video routes exist; OpenRouter includes catalog/access/cost gates and remote-job handling | Integrate and harden; no premature intelligence layer |
-| Narration | `app/voice/` provides plan narration extraction, Edge TTS, mock TTS, validation, and timing | Reuse for existing workflows; add source-video narration only as a genuine workflow gap |
-| Assembly/captions | `app/assembly/` and `app/orchestrator/captions.py` provide local assembly, audio policy, captions, and validation | Preserve and connect to new workflows |
-| Publishing | YouTube and TikTok adapters, OAuth/connection paths, durable records, and reconciliation exist in `app/publishing/` | Consolidate through existing adapters; do not add a new state machine |
-| Command Center | Phase 11 API/UI exists; Phase 11B implementation is interrupted and unaccepted | Complete and polish through controlled review |
-| Long-video repurposing | No transcription, source-video analysis, segment planner, or derived-episode lineage was found | Genuine additive gap |
-| SaaS/mobile | No identity, tenancy, billing, credit ledger, cloud storage, or mobile API exists | Keep as preparation/direction, not premature infrastructure |
+| Production intent | `app/production/models.py` and `app/production/storage.py` provide `Production`, `ProductionUnit`, optional `ProductionBible`, dependencies, provider intent, versioning, and durable intent storage | V1 COMPLETE; preserved and integrated |
+| Plan-backed execution | `app/orchestrator/production_execution.py` provides `ProductionExecutor`, `derive_progress()`, binding discovery, per-unit plans, and resumable execution around the existing engine | V1 COMPLETE; existing executor authority preserved |
+| Project binding | `ProjectManifest.production_binding` is the authoritative Production → Unit → Project relationship | V1 COMPLETE; only binding authority |
+| Scene execution | `app/orchestrator/scene_execution.py` provides the provider-independent execution boundary | V1 COMPLETE; additive integration, no replacement engine |
+| Local video | ImageMotion, local asset normalization, external video intake, FFmpeg, and FFprobe paths exist in `app/orchestrator/visual_providers.py` and `app/assembly/` | V1 COMPLETE; consolidated, validated and integrated |
+| Google Flow | Browser/CDP Flow route and credit protections exist in `app/flow/` and the Flow provider wrapper | V1 COMPLETE within external/runtime limits; first-class route |
+| AI video | Gemini Omni, OpenRouter and Batch 1C Alibaba routes are integrated; catalog/access/cost gates and remote-job handling remain explicit | V1 COMPLETE within configured-provider limits; no premature intelligence layer |
+| Narration | Existing `app/voice/` TTS is reused by real Standard text/JSON and Pro windowed visual grounded planning in `app/production/narration*.py`; narration/audio artifacts and summary MP4s persist under unit plans | V1 COMPLETE; no silent mock or cross-model substitution |
+| Assembly/captions | `app/assembly/` and `app/orchestrator/captions.py` provide local assembly, audio policy, captions, and validation | V1 COMPLETE; preserved and connected to new workflows |
+| Publishing | Existing YouTube/TikTok adapters, non-interactive HTTP commands, durable verification/reconciliation, and Core/K3 unit publishing parity are implemented (`39ff7d3`, `d59225b`) | V1 COMPLETE for manual publishing of accepted completed projects; automation remains Phase 12 |
+| Command Center | Phase 11B implementation accepted at `cc551ca`; creator/production surfaces and independent K3 control surface consume existing Core authorities | V1 COMPLETE; no frontend execution authority |
+| Long-video repurposing | Source registration, timestamped local transcription, validated source segments, shared deterministic/AI grounded moment-selection primitives, and derived `ProductionUnit` lineage are present | V1 COMPLETE for the bounded source/lineage workflow; direct clip shortcuts remain V1.x |
+| SaaS/mobile | Ownership/root/credential/media/accounting seams and client-neutral HTTP contracts are verified; no multi-tenant DB/auth, billing ledger, cloud platform, or native mobile app is implemented | V1 preparation COMPLETE; infrastructure/product rollout remains future |
 
-The baseline also found that `productions/` is empty in the inspected working tree,
-while `output/projects/` contains existing execution artifacts. Existing code and tests
+At discovery time, the baseline found that `productions/` was empty in the inspected
+working tree, while `output/projects/` contained existing execution artifacts. That
+historical observation is not a current filesystem claim. Existing code and tests
 must be inspected before any capability is described as missing: absence of a product
 surface is not proof that the underlying engine does not exist.
 
@@ -487,37 +507,63 @@ the preferred V1 experience.
 
 #### V1 capability direction and classification
 
-The following is the initial product classification. It is a controlled baseline, not a
-permanent freeze; changes are governed by the new-idea rule below.
+The following is the signed-off V1 classification (2026-10-24). Original discovery
+classifications remain in the amendment history; future changes still follow the
+new-idea rule below. COMPLETE always means the stated V1 boundary, not every possible
+product extension.
 
-| Capability | Evidence-based treatment | Initial product classification |
+| Capability | Verified implementation / remaining boundary | Signed-off product classification |
 |---|---|---|
-| Local video creation through ImageMotion | EXISTS; `ImageMotionVisualProvider` and local FFmpeg processing exist | **V1 — POLISH / HARDEN / INTEGRATE** |
-| Local asset/video normalization and assembly | EXISTS; asset intake, FFmpeg, audio policy, captions, and validation exist | **V1 — INTEGRATE** |
-| Google Flow production route | EXISTS; Flow browser/CDP provider and credit firewall exist | **V1 — INTEGRATE / HARDEN** |
-| OpenRouter AI video creation | EXISTS; video gateway, catalog, async jobs, cost gates, and resume protections exist | **V1 — INTEGRATE / HARDEN** |
-| Multi-model routing and suitable-model selection | Basic provider/model configuration exists; evidence-based intelligent ranking does not | **DECISION REQUIRED for V1; otherwise V1.x / Phase 14** |
-| Cost-aware AI usage | Provider-specific controls exist, including Flow limits and OpenRouter paid gates; no unified ledger exists | **V1 — preserve existing controls; V1.x for unified accounting** |
-| Single Video Production | Supported by one Production with one Unit and the existing single-project engine | **V1 — INTEGRATE / POLISH** |
-| Multiple Independent Video Production | Production/Unit schema and serial executor support representation and composition; batch product workflow is incomplete | **V1 — INTEGRATE; parallel/batch expansion V1.x** |
-| Series / Episodic Production | Optional Bible, episode metadata, dependencies, and shared context exist; continuity enforcement does not | **V1 — model/workflow integration; continuity intelligence V1.x / DECISION REQUIRED** |
-| Approximately 45–60 second episodic output | Existing short-form plan and assembly constraints can produce short episodes | **V1 — INTEGRATE** |
-| Production Bible-required series workflow | Bible is optional in the core by design; a series workflow may require it at creation/validation | **V1 — DECISION REQUIRED for exact product gate** |
-| Long-video repurposing from approximately 45–60 minute source | External video intake exists, but transcription, analysis, segmentation, and lineage are absent | **V1 — GENUINE GAP, controlled additive track** |
-| Approximately 60-second derived clips/episodes | Existing units and assembly can represent outputs; repurposing planner is missing | **V1 — GENUINE GAP for planner; output polish reuses existing core** |
-| Video Upload → AI Narration | Voice/TTS exists for generated plans; upload ingestion and transcription do not | **V1 — GENUINE GAP for source workflow** |
-| Manual publishing | YouTube/TikTok adapters and durable publication records exist | **V1 — INTEGRATE / HARDEN** |
-| Automated publishing | Existing roadmap places automation after 11B; no automatic publishing in 11C | **POST-V1 / Phase 12** |
+| Local video creation through ImageMotion | Local rendering, FFmpeg, captions, conditional audio, measured narration synchronization, and accepted final-media evidence are integrated | **V1 COMPLETE** |
+| Local asset/video normalization and assembly | Project-owned intake, hashing, validation, audio policy, captions, and assembly preserve existing authorities | **V1 COMPLETE** |
+| Google Flow production route | Browser/CDP route, checkpoint/resume, and credit firewall remain first-class; authenticated browser/provider availability remains an external prerequisite | **V1 COMPLETE within documented runtime limits** |
+| OpenRouter AI video creation | Gateway/catalog/access/paid gates, async-job handling, and duplicate-submit protections are integrated; free-model live availability is external | **V1 COMPLETE within documented runtime limits** |
+| Canonical model selection and routing | Standard text/JSON vs Pro visual eligibility, explicit canonical identity, metadata-based Auto, and same-model provider failover are verified; economics/quality optimization is not implemented | **V1 COMPLETE; intelligent optimization Phase 14/15** |
+| Cost-aware AI usage | Operation/attempt/fallback accounting is durable, cost provenance is explicit, and unknown remains unknown; no account credit ledger exists | **V1 COMPLETE evidence seams; billing/ledger V1.x / POST-V1** |
+| Single Video Production | One Production/Unit uses the canonical planner, executor, project binding, validation, and manual publishing path | **V1 COMPLETE** |
+| Multiple Independent Video Production | `unit_count` creation and independent units use the shared serial executor; product expansion/unattended scheduling remains deferred | **V1 COMPLETE; expansion V1.x** |
+| Series / Episodic Production | Episode metadata, dependency-aware units, and optional shared Bible/context use the same executor; continuity intelligence is not claimed | **V1 COMPLETE bounded workflow; continuity intelligence V1.x / DECISION REQUIRED** |
+| Approximately 45–60 second episodic output | Explicit short-form duration intent and existing plan/assembly constraints are reusable; achieved media duration remains validated evidence, not a UI claim | **V1 COMPLETE canonical output path** |
+| Production Bible-required series workflow | Core Bible remains optional; context/episode semantics are verified, while automatic Bible creation and mandatory continuity enforcement remain an explicit future product decision | **V1 COMPLETE optional-context seam; mandatory gate V1.x / DECISION REQUIRED** |
+| Long-video repurposing from approximately 45–60 minute source | Owned source registration, timestamped transcription, validated moment ranges, shared deterministic/AI candidate selection, and derived-unit lineage are implemented | **Track 8 V1 COMPLETE; standalone clip-rendering shortcut V1.x** |
+| Approximately 60-second derived clips/episodes | Derived units participate in canonical planning/execution and manual publishing once bound to an accepted completed project; source lineage alone is never completion | **V1 COMPLETE unit/lineage path; bypass rendering V1.x** |
+| Video Upload → AI Narration / Summary Video | Real Standard and windowed Pro planners, TTS synthesis, `narrated_summary.mp4`, Core routes, and K3 SummaryStudio are integrated | **Track 9 V1 COMPLETE; automatic sidecar-to-project promotion V1.x** |
+| Manual publishing | Core/K3 YouTube/TikTok commands require accepted completed project evidence and retain durable publication outcomes | **V1 COMPLETE** |
+| Automated publishing | No automatic publishing/scheduler was added by 11C | **Phase 12 — next, not implemented** |
 | Additional publishing platforms | Platform registry and adapter direction exist; Instagram/Facebook are not implemented | **V1.x / DECISION REQUIRED** |
-| Personal AVM Command Center | Phase 11 exists; interrupted Phase 11B implementation needs review and completion | **V1 — POLISH / HARDEN / INTEGRATE** |
-| Future public SaaS | Strategic one-core direction exists; identity, tenancy, billing, and service infrastructure do not | **V1 — architecture preparation only; SaaS product V1.x / POST-V1** |
+| Personal AVM Command Center | Phase 11B accepted (`cc551ca`); Core creator/operational views and independent K3 consume the same HTTP authorities | **V1 COMPLETE** |
+| Future public SaaS | Verified ownership, configurable storage, credentials, accounting, and media-delivery seams; no multi-tenant DB/auth or SaaS rollout | **Track 11 preparation COMPLETE; SaaS product V1.x / POST-V1** |
 | Subscriptions and billing | No implementation and no approved prices, tiers, provider, or revenue share | **DECISION REQUIRED; V1.x / POST-V1** |
-| Credits and credit consumption | Provider-specific cost controls exist; no product credit ledger exists | **V1 — define boundaries only; V1.x implementation** |
-| Future mobile application | Product direction is approved; no mobile application/API surface exists | **V1 — mobile-readiness constraints; POST-V1 application** |
+| Credits and credit consumption | Durable provider-operation evidence is separate from commercial credit consumption; K3 exposes no authoritative credit balance | **Track 12 seams COMPLETE; ledger/billing V1.x / POST-V1** |
+| Future mobile application | Core HTTP and K3 are strictly decoupled; read-only vs reconciliation-mutating contracts are documented; no native mobile app exists | **Track 13 preparation COMPLETE; POST-V1 application** |
 | Advertising/revenue sharing | No authoritative commercial rules exist | **POST-V1 / DECISION REQUIRED** |
 
 No prices, subscription tiers, billing provider, advertising model, or revenue-share
 percentage is established by this amendment.
+
+**Founder/CTO V1 vs V1.x scope decision — 2026-10-24:**
+
+- **Track 8 — Long-Video Repurposing: V1 COMPLETE.** Acceptance covers production-owned
+  source registration, timestamped transcription, deterministic/AI candidate moment
+  selection through reused grounded-planning primitives, validated source segment
+  ranges, and derived `ProductionUnit` lineage creation. Deterministic synthetic
+  planning remains explicitly mock-labelled; real AI selection uses the resolved
+  adapter. There is no claim of a separate unattended clip-discovery/rendering engine
+  or dedicated candidate-selection HTTP endpoint. Derived units participate in
+  canonical execution and publishing **once bound to an accepted completed project**.
+  Standalone direct clip-rendering shortcuts bypassing `ProductionUnit` project
+  execution remain **V1.x**.
+- **Track 9 — Upload Video → AI Narration / Summary Video: V1 COMPLETE.** Both Summary
+  Standard (real text+JSON grounded planner) and Summary Pro (bounded/windowed visual
+  understanding plus grounded narration), TTS audio synthesis, `narrated_summary.mp4`
+  assembly, Core `/api` routes, and K3 `SummaryStudio` are accepted. K3 defaults to
+  real execution; the explicit sandbox toggle is optional and starts off.
+  Standalone summary sidecars are inspectable/downloadable through
+  `/api/productions/{id}/units/{unitId}/summary-video` and `/summary-video/media`.
+  They do **not** create a `ProjectManifest.production_binding`, mark a project
+  complete, or fabricate a publishing record. Automatic promotion into a canonical
+  publishing record without a bound completed project remains **V1.x**; V1 refuses
+  that handoff with **`422 SUMMARY_HANDOFF_REQUIRED`**.
 
 #### Major capability tracks
 
@@ -556,26 +602,51 @@ in presentation order:
 14. **V1 validation and stabilization** — validate the integrated product against actual
     workflows, safety boundaries, runtime prerequisites, and acceptance criteria.
 
+**Tracks 1–14 — final verification and sign-off (2026-10-24):** all tracks below are
+**COMPLETE for their explicitly bounded V1 scope**. Evidence counts refer to the
+recorded hermetic Core run and K3 Node suite; shared tests support more than one
+track and must not be added together as independent totals. Provider-safe contracts
+prove wiring and guards, not current external quota/uptime or unattended operation.
+
+| Track | Signed-off status | Verified evidence / accepted boundary |
+|---:|---|---|
+| 1 — Core/repository hardening | ✅ COMPLETE | `test_phase11c_track1_truthfulness.py`: 27 passed; `test_phase2a_core_fixes.py`: 25; `test_phase2b_parallel_derivation.py`: 11; `test_phase2c_capability_readiness.py`: 15; `test_phase2d_output_metadata.py`: 12. The 10 credential/profile-dependent tests now pass without runner-supplied synthetic configuration. |
+| 2 — Production consolidation | ✅ COMPLETE | `test_production_plan.py`: 87 passed; `test_phase10_plan_backed_execution.py`: 20; scene/checkpoint/route suites protect the existing Production → Unit → bound ProjectManifest → execution/validation chain. No competing authority. |
+| 3 — Command Center | ✅ COMPLETE | Accepted 11B checkpoint `cc551ca`; `test_phase11_command_center.py`: 49 passed; `test_web_server.py`: 9. K3's 86-case suite protects shell/views, truthful mappings, and selected-unit commands. |
+| 4 — Local creation | ✅ COMPLETE | `test_assembly.py`: 47 passed; `test_voice.py`: 44; `test_caption_presets.py`: 7; Batch 1A timeline suite: 8; local E2E: 2 passed (live E2E excluded). Local rendering/audio/captions/accepted MP4 evidence reuse existing primitives. |
+| 5 — AI creation | ✅ COMPLETE | Batch 1C Alibaba/follow-up/visual suites: 88 passed; `test_openrouter_video.py`: 33; `test_gemini_omni.py`: 12. Credential-class, request, paid-operation, native-audio, fallback, and provenance guards remain intact. |
+| 6 — Google Flow | ✅ COMPLETE within runtime limits | `test_flow.py`: 29 passed; `test_flow_scene.py`: 78; `test_browser_lifecycle.py`: 4. First-class private operator route, dedicated browser/CDP and credit firewall retained; no live generation required by the closure run. |
+| 7 — Production modes | ✅ COMPLETE | Multiple Independent: 19 passed; Series/Episodic: 21. Shared unit-count/episode/context/dependency-aware workflow and canonical executor; optional Bible retained, continuity intelligence not claimed. |
+| 8 — Long-video repurposing | ✅ COMPLETE — V1 decision above | Source ingestion/transcription/segments suites: 68 passed; Track 8 derivation/lineage/truthfulness suites: 15. Deterministic/AI candidate selection reuses Track 9 grounded-planning evidence; Track 10 verifies publishing once the derived unit has an accepted completed project. Direct clip shortcut stays V1.x. |
+| 9 — Upload → AI narration/summary | ✅ COMPLETE — V1 decision above | All Track 9 suites: 188 passed, including 31 real Standard contracts and 17 HTTP cases. K3 Summary/tier suite: 14 passed; real/sandbox handler requests and baseline JSX verified. Standalone publishing promotion stays V1.x. |
+| 10 — Manual publishing | ✅ COMPLETE | `test_track10_publishing_parity.py`: 105 passed; existing YouTube/TikTok metadata/reconciliation suites remain green. K3 publishing/evidence suite: 32 passed. Canonical project completion, target identity, privacy, duplicate-submit, and durable verification boundaries preserved. |
+| 11 — SaaS foundation seams | ✅ COMPLETE — preparation only | Ownership/relocation/secret exclusions in the 87-case production-plan suite; range-aware media in Command Center/Track 9/web suites; non-interactive HTTP credentials in Track 10. Core/K3 remain one engine with separate control surfaces; no tenant DB/auth. |
+| 12 — Subscription/credit seams | ✅ COMPLETE — evidence only | `test_phase11c_batch1h_accounting.py`: 20 passed; `test_model_provenance_accounting.py`: 23; `test_local_route_provenance.py`: 20; provenance/logging suites: 14/16. K3 planner evidence mapping: 9 passed. Unknown monetary cost is not zero or a product credit balance. |
+| 13 — Mobile-readiness seams | ✅ COMPLETE — preparation only | Core client-neutral HTTP contracts, configurable roots and explicit GET/status side-effect documentation; K3's 86 tests and Vite production build verify separate client integration. No native app, mobile engine, database, queue, or auth service. |
+| 14 — V1 validation/stabilization | ✅ COMPLETE — SIGNED OFF | Core: **1,904 passed, 0 failed, 1 skipped** via `tools/run_hermetic_pytest.py`, **0 external network attempts**. K3: **86 passed, 0 failed**, production build exit 0 / 0 errors. Known warnings and V1.x scope remain explicit. |
+
 #### Controlled implementation sequence
 
-The expected 11C sequence is:
+The authorized sequence is preserved below as the completed implementation audit
+trail. All 14 stages are signed off for the bounded V1 scope; historical initial
+treatments describe why work was authorized, not pending implementation status.
 
-| Order | Stage | Dependency rationale | Initial treatment |
+| Order | Stage | Dependency rationale | Final V1 status / original treatment |
 |---:|---|---|---|
-| 1 | V1 foundation and repository hardening | All later work depends on a trustworthy baseline, runtime prerequisites, evidence, and clean authority boundaries | DISCOVER; POLISH / HARDEN |
-| 2 | Existing production-system consolidation | Production modes must use the existing intent, plan, binding, executor, manifest, checkpoint, and reconciliation chain | REUSE; INTEGRATE |
-| 3 | Personal Command Center completion and polish | The operator needs a truthful control surface before broader production workflows are exposed | REUSE; POLISH / HARDEN; separately accept 11B |
-| 4 | Local video-creation integration | The lowest-cost path and existing FFmpeg/ImageMotion primitives provide the baseline production route | REUSE; INTEGRATE |
-| 5 | AI generation and OpenRouter integration | Existing provider/cost controls must be exposed only after the core local route is coherent | REUSE; INTEGRATE / HARDEN |
-| 6 | Google Flow integration | Flow remains first-class but is externally/runtime sensitive and must retain credit protections | REUSE; INTEGRATE / HARDEN |
-| 7 | Single, multiple-independent, and episodic mode consolidation | These modes share the Production/Unit architecture; product workflows depend on the consolidated execution path | REUSE; INTEGRATE; genuine UX gaps only |
-| 8 | Long-video repurposing | Requires stable media ownership, units, assembly, captions, and publishing before adding source analysis | GENUINE GAP; additive workflow |
-| 9 | AI narration for uploaded/source media | Depends on source ingestion, transcription, and segment context; extends existing voice and timing primitives | GENUINE GAP plus REUSE |
-| 10 | Publishing consolidation | Requires stable final artifact evidence and unit/project relationships; automated publishing remains excluded | REUSE; INTEGRATE / HARDEN |
-| 11 | SaaS foundation preparation | Must be informed by real personal production evidence; define seams without premature infrastructure | PROPOSED preparation only |
-| 12 | Subscription and credit architecture preparation | Requires evidence of actual resource/cost behavior and approved commercial decisions | DECISION REQUIRED; design only unless separately authorized |
-| 13 | Mobile-readiness preparation | Depends on stable control contracts and surface-neutral core operations | PROPOSED preparation only |
-| 14 | V1 validation and stabilization | Final acceptance must cover integrated workflows and ensure later-phase boundaries remain intact | HARDEN; validate; accept |
+| 1 | V1 foundation and repository hardening | All later work depends on a trustworthy baseline, runtime prerequisites, evidence, and clean authority boundaries | ✅ COMPLETE — DISCOVER; POLISH / HARDEN |
+| 2 | Existing production-system consolidation | Production modes must use the existing intent, plan, binding, executor, manifest, checkpoint, and reconciliation chain | ✅ COMPLETE — REUSE; INTEGRATE |
+| 3 | Personal Command Center completion and polish | The operator needs a truthful control surface before broader production workflows are exposed | ✅ COMPLETE — REUSE; POLISH / HARDEN; 11B accepted |
+| 4 | Local video-creation integration | The lowest-cost path and existing FFmpeg/ImageMotion primitives provide the baseline production route | ✅ COMPLETE — REUSE; INTEGRATE |
+| 5 | AI generation and OpenRouter integration | Existing provider/cost controls must be exposed only after the core local route is coherent | ✅ COMPLETE — REUSE; INTEGRATE / HARDEN |
+| 6 | Google Flow integration | Flow remains first-class but is externally/runtime sensitive and must retain credit protections | ✅ COMPLETE within runtime limits — REUSE; INTEGRATE / HARDEN |
+| 7 | Single, multiple-independent, and episodic mode consolidation | These modes share the Production/Unit architecture; product workflows depend on the consolidated execution path | ✅ COMPLETE — REUSE; INTEGRATE; no separate engines |
+| 8 | Long-video repurposing | Requires stable media ownership, units, assembly, captions, and publishing before adding source analysis | ✅ COMPLETE bounded source/lineage workflow — GENUINE GAP; additive reuse |
+| 9 | AI narration for uploaded/source media | Depends on source ingestion, transcription, and segment context; extends existing voice and timing primitives | ✅ COMPLETE Standard + Pro + Core/K3 — GENUINE GAP plus REUSE |
+| 10 | Publishing consolidation | Requires stable final artifact evidence and unit/project relationships; automated publishing remains excluded | ✅ COMPLETE manual parity — REUSE; INTEGRATE / HARDEN |
+| 11 | SaaS foundation preparation | Must be informed by real personal production evidence; define seams without premature infrastructure | ✅ COMPLETE ownership/storage/credential/media seams only |
+| 12 | Subscription and credit architecture preparation | Requires evidence of actual resource/cost behavior and approved commercial decisions | ✅ COMPLETE accounting evidence; commercial policy remains DECISION REQUIRED |
+| 13 | Mobile-readiness preparation | Depends on stable control contracts and surface-neutral core operations | ✅ COMPLETE two-repo HTTP seam and side-effect documentation only |
+| 14 | V1 validation and stabilization | Final acceptance must cover integrated workflows and ensure later-phase boundaries remain intact | ✅ COMPLETE — final hermetic validation and Founder/CTO sign-off |
 
 The sequence may be amended only through the new-idea/change rule below. A later stage
 must not be pulled forward merely because its UI can be sketched before its authority,
@@ -608,12 +679,18 @@ Phase 11C preserves the established AVM authority model:
   approved later phase (the single fixed **Alibaba-primary → OpenRouter-fallback**
   resilience policy is explicitly authorized for Batch 1C by the 2026-09-12 amendment —
   see Section 4.10 "Batch 1C" and Section 8A.14; it is capability-aware,
-  failure-classified, with no parallel generation and no provider ranking);
-- provider intelligence/ranking before its approved later phase;
+  failure-classified, with no parallel generation and no provider ranking; Track 9's
+  separately verified same-canonical-model provider failover is also allowed and
+  never substitutes a different model);
+- generalized provider intelligence or cost/quality/latency optimization before its
+  approved later phase; Track 9's deterministic capability-metadata eligibility/Auto
+  choice is the accepted V1 exception, not a commercial intelligence engine;
 - a new quality engine before its approved later phase;
 - a new media-processing architecture where the approved local/FFmpeg primitives fit;
 - a new publishing state machine;
-- a frontend framework or unnecessary build-system migration.
+- an unnecessary migration of the Core frontend/framework/build system. The approved
+  independent K3 React/Vite repository consumes Core HTTP; it does not replace the
+  Core engine or create a second execution/state authority.
 
 New workflow artifacts such as transcripts, segment plans, source-media records, and
 derived-unit lineage may become durable evidence when separately designed. They must not
@@ -673,6 +750,46 @@ providers, a credit ledger, cloud infrastructure, or a database merely to claim 
 readiness. Personal/local operation remains the immediate constraint. SaaS design work
 belongs only where it prevents an avoidable architectural dead end in the shared core.
 
+**Track 11 — verified V1 SaaS foundation seams (COMPLETE, preparation only):**
+
+- `Production` / `ProductionUnit` own declared source/creative intent;
+  `ProjectManifest.production_binding` owns the relationship to an execution project.
+  Manifest/checkpoint/reconciliation evidence owns execution and final-media facts.
+  These are ownership boundaries, **not** implemented users, tenants, permissions,
+  or database tables.
+- Production storage, `ProductionExecutor(productions_root=..., projects_root=...)`,
+  and existing media/credential roots are configurable/isolatable. The hermetic
+  runner verifies relocation without importing the operator's OAuth/profile data.
+- HTTP publishing/status uses non-interactive credential handling
+  (`allow_interactive=False` on request-path publisher factories): it may validate
+  or refresh stored credentials but cannot launch OAuth consent. Interactive
+  consent is confined to the explicit platform-connect command.
+- Core `/api` project, scene, asset, and summary media delivery is root-confined,
+  MIME-aware and range-aware; a sidecar URL is not project ownership or completion.
+  K3 consumes these contracts through its same-origin proxy and service seam.
+- Evidence: production ownership/relocation tests, 49 Command Center tests,
+  17 Track 9 HTTP tests, and 105 Track 10 parity tests passed. **No multi-tenant
+  database/auth, billing service, job queue or cloud platform is present in V1.**
+
+**Track 12 — verified V1 subscription/credit seams (COMPLETE, evidence only):**
+
+- `app/orchestrator/scene_execution.py::build_operation_accounting` is the existing
+  operation-record builder. `BILLING_STATUS_BILLABLE`, non-billable and unknown status,
+  `usage`, `cost`, `cost_source`, `currency`, request identity and source are recorded
+  separately. `ZERO_COST_PROVIDERS` establishes local/non-billable facts, not a
+  promise that every route or AVM service is free.
+- Generated/reused operations and primary/final fallback attempts retain durable
+  provenance through planner evidence, execution checkpoints and manifests. A
+  submitted billable operation with unknown cost stays `cost=None`; missing usage,
+  unknown totals or multiple costs without a verified aggregation do not become
+  zero. Provider-reported vs AVM-calculated vs absent cost sources remain explicit.
+- K3 maps existing planner/provider evidence (`planner-evidence.mapper.test.mjs`,
+  9 passed) and configuration readiness, but exposes no authoritative account credit
+  balance or consumption economy. Design-preview numbers are not billing evidence.
+  No fabricated credit balances, billing tables, subscription tiers, prices, or
+  exchange rates were introduced. Accounting seams do not implement collection of
+  payment or a product credit ledger.
+
 Commercial direction is recorded without invented terms:
 
 - Local creation: free initially / potentially monetized later.
@@ -702,6 +819,32 @@ The personal web UI may remain richer and more diagnostic than a future mobile U
 readiness does not require a mobile framework, a separate execution engine, or a new
 mobile-specific authority.
 
+**Track 13 — verified V1 mobile-readiness seams (COMPLETE, preparation only):**
+
+- Strict two-repo separation: Core `C:\Projects\AUTO-VIDEO-MAKER` exposes HTTP
+  `/api/*` at default `127.0.0.1:8787`; K3
+  `C:\Users\Paul Ella\AppData\Local\Cline\avm-studio-pro` serves its independent
+  client at `:5173`. K3's `src/services/avm/core-api.js` and `service.js` call the
+  same-origin `/api` proxy; `AVM_CORE_URL` configures its target. K3 does not import
+  Core Python, persist production state, or own execution. Both repositories have
+  their own verified tests/build contracts.
+- **Read-only/local inspection:** production list/detail/unit/progress reads,
+  `GET /api/capabilities`, summary/transcript reads and media GETs do not start
+  execution, generation or publication. Unit reconciliation uses the existing
+  oracle with `persist=False`; it is inspection, not a publishing reconciliation.
+- **GET does not universally mean passive:** `/api/connections` performs a
+  non-interactive stored-token check that may refresh credentials/contact the
+  platform. `GET /api/projects/{id}/publish/{youtube|tiktok}/status` can reconcile an
+  existing remote identity and persist updated verification evidence, serialized
+  with publishing. It never submits/uploads; disconnected or active-publish cases
+  stay passive. K3 exposes this as explicit `reconcileProjectPublication` inspection,
+  not a background upload retry or generic read-only health check.
+- Execute/resume/publish/connect and source/transcript/narration/synthesis/assembly
+  remain explicit operator commands with existing validation and safety gates.
+  The 86-case K3 suite verifies selected-unit targeting and transport uncertainty;
+  the Core HTTP suites verify refusal/no-submission and read-vs-mutation boundaries.
+  No native mobile application or premature infrastructure is claimed.
+
 #### Validation and checkpoint strategy
 
 Each 11C increment shall use the smallest appropriate acceptance checkpoint:
@@ -724,6 +867,44 @@ Validation must distinguish local processing from paid/external operations. Expe
 irreversible operations require explicit authorization and must not be used merely to
 produce acceptance evidence. Existing tests remain regression protection; they are not
 permission to widen scope.
+
+**Final validation checkpoint — 2026-10-24 (accepted):**
+
+```text
+Core: python tools/run_hermetic_pytest.py tests -q --tb=short
+1904 passed, 1 skipped, 2 warnings in 456.80s (0:07:36)
+Hermetic network guard: 0 external attempts.
+
+Core Track 9 suites: 188 passed, 2 warnings in 82.96s (0:01:22)
+Core Track 9 HTTP:   17 passed, 2 warnings in 21.36s
+Original 10 configuration/profile blockers: 10 passed, 1 warning in 1.44s
+All four affected files directly: 85 passed, 1 warning in 73.53s (0:01:13)
+
+K3: node --test tests/*.mjs
+86 passed, 0 failed, 0 skipped; exit 0
+K3: npm run build
+1976 modules transformed; production build exit 0; 0 build errors
+```
+
+The Core runner disables dotenv/inherited provider configuration, isolates runtime
+and credential/profile roots, and blocks external networking while allowing
+loopback HTTP. Synthetic configuration and fake adapters are scoped to tests;
+there are no external runner overrides for the 10 fixed blockers. The only skip is
+`test_batch1_local_route_live_intelligence_end_to_end`, an expressly opt-in live
+E2E; no AI-provider, YouTube or TikTok call was made for final closure. Existing
+Pydantic deprecations and K3's non-fatal >500 kB bundle warning remain visible.
+An earlier full run encountered a Windows loopback `WinError 10053` in one Track 10
+HTTP test; that file passed unchanged on recheck (105 passed) and the sequential
+full run above passed. It was not masked by retries or weakened guards.
+
+Recorded transcripts/JUnit: `C:\Users\Paul Ella\AppData\Local\Temp\phase11c-core-sequential.txt`,
+`phase11c-core-sequential.xml`, `phase11c-core-track9.txt`,
+`phase11c-core-api-routes-final.txt`, `phase11c-core-ten-tests.txt`,
+`phase11c-k3-tests-final.txt`, and `phase11c-k3-build-final.txt` in that same directory.
+These are local audit evidence, not committed production artifacts. The inspected
+pre-fix checkout collected 1,865 tests, not the earlier quoted 1,866; 40 new contract/
+HTTP cases yield 1,905 collected = 1,904 passed + one opt-in skip. Counts do not claim
+a paid/live smoke or native mobile/SaaS implementation.
 
 #### Exit criteria
 
@@ -753,6 +934,15 @@ Phase 11C may be accepted only when evidence demonstrates, at minimum:
 - the resulting product is coherent enough to serve as the proven V1 baseline rather
   than a collection of disconnected demonstrations.
 
+**Exit-criteria disposition:** ✅ **MET AND SIGNED OFF — Phase 11C COMPLETE**.
+The explicit Founder/CTO 2026-10-24 decision accepts Tracks 1–14 against the
+verified inventory, safe execution/ownership chain, hermetic results, documented
+Track 8/9 V1 vs V1.x boundaries, and preparation-only Tracks 11–13. Phase 11B and
+Batch 1A/1B/1C are implemented and verified, not pending discovery/application code.
+Phase 12 (automation/scheduling/V1.x operator polish), Phase 13 (quality/scale),
+Phase 14 (intelligent optimization), Phase 15 (generalized recovery) and future
+public SaaS/native mobile work retain their separate authorization gates.
+
 #### Explicit non-goals
 
 Phase 11C does **not**:
@@ -762,7 +952,8 @@ Phase 11C does **not**:
 - absorb Phase 12 personal automation, scheduling, unattended execution, or automatic
   continuation;
 - absorb Phase 13 quality scoring, quality gates, or autonomous scale systems;
-- absorb Phase 14 provider ranking, optimization, or intelligent model selection;
+- absorb Phase 14 provider ranking, optimization, or intelligent model selection
+  beyond the accepted Track 9 capability-metadata selection/same-model failover;
 - absorb Phase 15 generalized retry, substitution, or automated recovery policy, or any
   provider ranking/intelligent routing (the single fixed **Alibaba-primary →
   OpenRouter-fallback** resilience policy is explicitly authorized for Batch 1C by the
@@ -773,7 +964,8 @@ Phase 11C does **not**:
   without evidence that the current stage requires it;
 - create a second execution engine, state machine, binding authority, or publishing
   state machine;
-- migrate the frontend to a framework or introduce an unnecessary build system;
+- unnecessarily migrate the Core frontend/build system; the approved independent
+  K3 React/Vite control surface is not a second Core or an execution authority;
 - invent final commercial prices, tiers, credit exchange rates, or revenue-sharing terms;
 - claim that external video intake is already long-video repurposing;
 - claim that plan-driven TTS is already upload-to-AI-narration;
@@ -873,18 +1065,26 @@ BATCH 2
 
 Nothing in Batch 1A, 1B, or 1C implements either Batch 2 capability.
 
-**Status:** 🟡 IN PROGRESS — Batch 1 core production and local creation committed
-(`8f3940a`); the remaining Batch 1 scope is structured as workstreams 1A/1B/1C above;
-every increment still requires separately authorized tasks and checkpoints (see
-Section 13). By the 2026-09-12 amendment, **Batch 1C is reassigned from ComfyUI (now
-deferred) to Alibaba Cloud provider integration + OpenRouter fallback**; Batch 1C
-remains **NOT IMPLEMENTED / PENDING IMPLEMENTATION** (its architecture was validated by
-the live-validation gate and the Batch 1C implementation specification, but no
-application code has been written).
+**Status:** ✅ **Batch 1A / 1B / 1C IMPLEMENTED AND VERIFIED — accepted at Phase 11C
+closure, 2026-10-24.** Core production/local creation checkpoints `8f3940a` and
+`72113d8` are retained. Batch 1A's `reconcile_local_render_durations` has 8 passing
+timeline tests; Batch 1B's metadata/query relevance hardening is covered by the
+42-case Batch 1 hardening and 28-case visual-source suites. Batch 1C's Alibaba text/
+reasoning/image/video adapters and classified OpenRouter fallback have 88 passing
+Alibaba/follow-up/visual tests, plus durable provenance/accounting/logging evidence.
+The 2026-09-12 **scope-only** amendment remains historical; its pending/no-code
+status no longer describes the current checkout. ComfyUI stays deferred. Batch 2's
+semantic pixel evaluation and general Production Timeline abstraction were not
+implemented by 1A/1B/1C and remain separately scoped V1.x/future work.
 
 ### 4.11 PERSONAL AVM MATURITY — Phase 12 🟡
 
 **Name:** Personal Automation.
+
+**Next authorized roadmap phase:** **Phase 12 — Automated Publishing, Scheduling &
+V1.x Operator Polish**. The original Personal Automation name and continuous-workload
+objective below are preserved; operator-polish/Track 8–9 handoff items are follow-up
+scope, not permission to bypass canonical execution or absorb Phase 13–15.
 
 **Purpose:** Move AVM from an operator-driven production tool toward an **autonomous
 production system**.
@@ -901,7 +1101,8 @@ significant.
 
 **Question this phase answers:** *"Continue production automatically."*
 
-**Status:** 🟡 FUTURE.
+**Status:** 🟡 NEXT — Phase 11C is signed off; automated publishing, scheduling and
+V1.x operator-polish implementation require separately scoped Phase 12 tasks.
 
 ### 4.12 PERSONAL AVM MATURITY — Phase 13 🟡
 
@@ -1393,23 +1594,23 @@ property of the production request, not a different codebase.
 
 **MODE A — SINGLE VIDEO.** One standalone video. Continuity between separate
 productions is not inherently required. (Represented today by one Production with one
-Unit over the existing single-project engine; Phase 11C integrates/polishes this.)
+Unit over the existing single-project engine; Phase 11C integration is COMPLETE.)
 
 **MODE B — MULTIPLE INDEPENDENT VIDEOS.** Multiple videos created as one production
 request, but each video is independent. Examples: 20 motivational videos; 30 unrelated
 social videos; bulk content generation. Each unit may have a different story,
 characters, visual identity, assets, and even a different provider/model. A Production
-Bible is **not** inherently required. (Production/Unit schema and serial execution
-exist; batch product workflow is an 11C integration item with parallel/batch expansion
-deferred to V1.x.)
+Bible is **not** inherently required. (Production/Unit schema, unit-count creation
+and serial execution are V1 COMPLETE; 19 Multiple Independent and 21 Series/Episodic
+contract tests pass. Additional parallel/batch product expansion remains V1.x.)
 
 **MODE C — SERIES / EPISODIC PRODUCTION.** Multiple connected videos/episodes where
 continuity matters. Examples: Episode 1 → Episode 2 → Episode 3…; a 60-episode
 narrative; recurring characters/world. A Production Bible and continuity become
 **required when the production intent demands persistent continuity** (8A.5).
-(Representable today; continuity *enforcement/intelligence* does not exist and is
-classified V1.x / DECISION REQUIRED in Phase 11C — it must not be silently pulled
-forward.)
+(V1 episode metadata, dependency-aware units, and optional shared Bible/context are
+implemented through the same executor. Automatic continuity enforcement/intelligence
+remains V1.x / DECISION REQUIRED and must not be inferred from the V1 sign-off.)
 
 ### 8A.5 Production Bible — architectural role (ARCHITECTURALLY DEFINED)
 
@@ -1444,8 +1645,9 @@ cinematography; tone; narrative rules; voice characteristics; continuity constra
 
 **Story Intelligence ownership (FUTURE):** Story Intelligence should eventually
 create/maintain the Bible rather than forcing normal users to manually construct it.
-Bible-required series gating in the product remains **DECISION REQUIRED** in Phase
-11C; nothing here implements it.
+Automatic Bible creation and mandatory Bible/continuity gates remain **V1.x /
+DECISION REQUIRED**. Founder/CTO V1 acceptance preserves the Core's optional Bible
+contract; storing episode/shared context is not automatic continuity enforcement.
 
 ### 8A.6 Formal production routes (ARCHITECTURALLY DEFINED)
 
@@ -1459,8 +1661,10 @@ captions; assembly; quality validation. The route should be capable of extremely
 operating cost when free/local capabilities are available. **Truthfulness rule:** AVM
 must NOT claim every provider/model in this route is permanently free — free provider
 availability can change at any time (already experienced in Phases 7D/7E). *Status:
-core primitives implemented and verified (ImageMotion, stock sources, local TTS,
-FFmpeg assembly); route-level consolidation is a Phase 11C integration item.*
+core primitives and V1 route-level consolidation implemented and verified
+(ImageMotion, stock sources, configured TTS, FFmpeg, captions, measured local
+narration synchronization and accepted completed project evidence).* No claim is
+made that externally hosted TTS or all AI generation is offline/free.
 
 **ROUTE 2 — FULL AI VIDEO PRODUCTION.** Production primarily using AI-generated video
 rather than static-image-plus-motion workflows. Potential models/providers: Veo;
@@ -1469,8 +1673,10 @@ applicable. AVM should eventually select an appropriate model based on: visual
 quality; scene requirements; motion requirements; duration; modality; provider
 availability; model capability; cost; latency; user budget; user settings; and
 local/cloud availability. *Status: Gemini Omni (7C) and the OpenRouter video gateway
-(7E) exist as first-class providers; model-selection intelligence is Phase 14
-(future); the additional models above are FUTURE candidates, not commitments.*
+(7E) and Batch 1C's Alibaba video adapters/fallback are integrated first-class
+providers; V1 canonical capability routing is verified, while quality/economics
+optimization remains Phase 14. The additional models above are FUTURE candidates,
+not commitments; external configured-model access is a runtime prerequisite.*
 
 **ROUTE 3 — GOOGLE FLOW PRODUCTION.** Google Flow remains a **specialized production
 route** and a first-class provider (Section 8, principle 6). It is **not** collapsed
@@ -1483,23 +1689,37 @@ credit firewall intact.*
 transcription → content understanding → identify high-value segments →
 generate/restructure short-form content → captions → platform-specific outputs →
 final shorts. This is **fundamentally different from generating video from scratch**.
-*Status: genuine gap; controlled additive track in Phase 11C; external video intake
-(7B) is explicitly not repurposing.*
+*Status: Track 8 V1 COMPLETE under the Founder/CTO 2026-10-24 decision.* Source
+registration, timestamped transcription, validated source ranges, deterministic/AI
+candidate moment selection through shared grounded planners, and derived
+`ProductionUnit` lineage are implemented. Operator-selected segments remain
+explicit; no dedicated candidate-selection endpoint or unattended clip engine is
+claimed. Canonical execution/publishing requires an accepted completed project
+binding; direct clip-rendering shortcuts bypassing that path remain **V1.x**.
+External video intake alone (7B) is still explicitly not repurposing.
 
 **ROUTE 5 — VIDEO UPLOAD → AI NARRATION / TRANSFORMATION.** User supplies an existing
 video. Conceptually: upload → analyze → understand → generate narration/script where
 appropriate → generate/obtain voice where required → synchronize → captions → assembly
 → output. Potential uses: AI narration; replacement narration; educational commentary;
-documentary-style transformation; social-media transformation. *Status: genuine gap
-(source ingestion/transcription absent); controlled additive track in Phase 11C;
-plan-driven TTS is explicitly not this capability.*
+documentary-style transformation; social-media transformation. *Status: Track 9 V1
+COMPLETE.* Real **Summary Standard** text+JSON grounded planning and **Summary Pro**
+windowed visual understanding/grounded narration feed the existing TTS authority
+and `narrated_summary.mp4` assembly. Core `/api` and K3 `SummaryStudio` are integrated
+with real execution by default and explicit opt-in sandbox execution. Model users
+select canonical identities; providers/wire IDs remain internal. Summary sidecars
+are inspectable/downloadable through `/summary-video` and `/summary-video/media`;
+automatic promotion to a `ProjectManifest` publication record without an accepted
+completed project binding remains **V1.x** (`422 SUMMARY_HANDOFF_REQUIRED` in V1).
+Plan-driven TTS by itself remains distinct from this complete source workflow.
 
 **ROUTE 6 — PUBLISHING / DISTRIBUTION.** Publishing remains **downstream of
 production**. Conceptually: Finished Asset → Review → Manual / Assisted / Automated
 Publishing. Potential destinations: YouTube; TikTok; Instagram/Reels; future
 platforms; a future AVM mobile app. Publishing automation remains subject to existing
 phase boundaries and is not pulled forward. *Status: manual YouTube/TikTok publishing
-exists; automated publishing remains Phase 12.*
+is V1 COMPLETE in Core and K3 for accepted completed projects; automated publishing
+and scheduling remain Phase 12.*
 
 ### 8A.7 Mode + route composition (ARCHITECTURALLY DEFINED — mandatory distinction)
 
@@ -1524,10 +1744,25 @@ Seedance; Wan; Kling; future providers/models.
 - ComfyUI itself is **not** a production mode (8A.9).
 - Route + provider + model must never be collapsed into one concept.
 
-**Selection semantics (SaaS — PLANNED, not implemented):**
+**Verified V1 canonical model-selection semantics (Tracks 5/9):**
+
+- Users select **canonical models**, never provider names or provider wire IDs.
+  Summary Standard requires text + structured JSON; Summary Pro requires supported
+  visual understanding, with native-video vs frame-sequence routes recorded
+  distinctly. Eligible model metadata is projected from the one Core registry.
+- Explicit selection resolves only the requested canonical identity; provider
+  failover stays within its declared eligible bindings. An unavailable route cannot
+  silently change the selected model or return synthetic narration.
+- Auto is deterministic capability/eligibility metadata selection, not a claim of
+  cheapest/fastest/best output. Core/K3 readiness is truthful local configuration:
+  `ready`, `not_configured`, or `unknown`; configured credentials are not proof of
+  quota, remaining credit, provider uptime, or paid access.
+
+**Additional SaaS selection/credit semantics — PLANNED, not implemented:**
 
 - AVM may automatically choose an eligible provider/model;
-- users may optionally explicitly select a provider/model;
+- users may explicitly select a canonical model under approved product policy;
+  provider choice remains internal, not a public provider/wire-ID picker;
 - explicit model selection consumes the corresponding AVM credit cost;
 - model/provider capability and cost must remain distinct from route semantics.
 
@@ -1677,12 +1912,16 @@ mixes.)
 ### 8A.14 Routing and fallback — preserved boundaries (ARCHITECTURALLY DEFINED)
 
 Existing routing/fallback safety principles are preserved, with one explicitly
-authorized Batch 1C addition (2026-09-12 amendment):
+authorized Batch 1C addition (2026-09-12 amendment) and the bounded Track 9
+canonical-model routing accepted at V1 closure (2026-10-24):
 
 - Nothing in this roadmap implies "if provider A fails, automatically substitute
   provider B" except where an explicitly authorized policy permits it. **The single
   fixed Alibaba-primary → OpenRouter-fallback policy is now such an explicitly
-  authorized policy (Phase 11C Batch 1C, 2026-09-12).**
+  authorized policy (Phase 11C Batch 1C, 2026-09-12).** Track 9 also permits provider
+  failover **only within one selected canonical model's eligible bindings**.
+  Model-first summary requests do not use capability similarity as permission to
+  substitute another model via the legacy provider-default fallback.
 - The Phase 8 no-fallback contract continues to prohibit **blind/generalized**
   automatic substitution and any automatic free→paid fallback. The authorized Batch 1C
   policy is **capability-aware and failure-classified**: OpenRouter is invoked **only
@@ -1697,6 +1936,11 @@ authorized Batch 1C addition (2026-09-12 amendment):
   Phase 14/15.**
 - Provider **availability**, **capability**, **fallback**, **retry**, and
   **substitution** remain separate concepts.
+- Track 9's real Standard planner invokes the resolved text/JSON adapter rather than
+  a missing bridge or forced mock. Explicit models retain their identity, metadata
+  Auto remains deterministic, and local `ready` / `not_configured` / `unknown`
+  projections never expose provider/wire IDs or invent remaining quota/cost.
+  Invalid model JSON/grounding fails without a mock downgrade or automatic resend.
 - The architecture should eventually permit broader **capability-aware routing**
   (Phase 14/15 territory) without weakening existing truthfulness/scope guarantees —
   including the visual-source fall-through ladder, which reports truthful failure
@@ -1905,29 +2149,42 @@ LEVEL 3 is claimed as achieved today.
 |---|---|
 | FOUNDATION | ✅ COMPLETE |
 | PERSONAL PRODUCTION ENGINE | ✅ COMPLETE THROUGH PHASE 8 |
+| PERSONAL AVM V1 PRODUCT — PHASE 11C | ✅ COMPLETE — TRACKS 1–14 VERIFIED & SIGNED OFF (2026-10-24) |
 | PERSONAL AVM MATURITY | 🟡 NOT YET COMPLETE |
+| NEXT ROADMAP PHASE | 🟡 PHASE 12 — AUTOMATED PUBLISHING, SCHEDULING & V1.x OPERATOR POLISH |
 | PROVEN AVM CORE | 🔵 FUTURE MILESTONE |
 | PUBLIC AVM PRODUCT | 🔵 FUTURE |
 | AVM CONTENT PLATFORM | 🔵 LONG TERM |
 
-The current repository state (six visual providers, provider-agnostic execution
-boundary, durable per-scene checkpoints/resume, hybrid routing, audio policy, captions,
-assembly, publishing, plus the completed Phase 9 durable production plan, Phase 10
-plan-backed execution, the Phase 11 Personal Command Center, the accepted Phase 11B
-Command Center experience, and the Phase 11C Batch 1 hardening) corresponds to **LEVEL 3**
-on the autonomy maturity model.
+The current Core/K3 product integrates provider-agnostic scene execution, durable
+checkpoints/resume, hybrid routing, explicit audio policy/captions/assembly,
+canonical model selection, source/transcript/segment/derived-unit lineage,
+real Standard and Pro narrated summaries, and verified manual YouTube/TikTok
+publishing. Phase 9 intent, Phase 10 executor/binding authority, Phase 11/accepted
+11B Command Center, and Phase 11C Tracks 1–14 are complete for the signed-off V1
+scope. This still corresponds to **LEVEL 3**, not autonomous LEVEL 4–6: no scheduler,
+unattended publishing, generalized recovery, SaaS billing/auth or native mobile
+product has been silently introduced.
 
-**The immediate next phase is:**
+**Current phase disposition:**
 
-> **PHASE 11C — AVM V1 PRODUCT IMPLEMENTATION & EXPANSION** 🟡 — **in progress**
-> (Batch 1 core production and local creation committed; Batch 1 continues as
-> workstreams 1A/1B/1C — see Section 4.10 and Section 13)
+> **PHASE 11C COMPLETE (Tracks 1–14 Verified & Signed Off)** ✅ — **2026-10-24**.
+> Core: **1,904 passed, 0 failed, 1 skipped** (opt-in live E2E), zero external
+> network attempts via `tools/run_hermetic_pytest.py`; K3: **86 passed, 0 failed**,
+> production build exit 0 / zero errors. Code checkpoints: Core `a1bb5ed`, K3
+> `b6a7f3d`; formal V1/V1.x decision and amendment record below.
 
-Phase 11B remains the bounded predecessor experience phase and must be completed and
-accepted before 11C is accepted as complete. Phase 11C is the approved roadmap bridge
-from the existing Phase 1–11B architecture into the integrated AVM V1 product; it is
-not a greenfield rebuild and this roadmap entry does **not** authorize implementation
-without separately scoped implementation tasks and checkpoints.
+**The immediate next roadmap phase is:**
+
+> **PHASE 12 — AUTOMATED PUBLISHING, SCHEDULING & V1.x OPERATOR POLISH** 🟡.
+
+Phase 11B's bounded specification/recovered implementation are accepted (`dd21b26`,
+`cc551ca`); Batch 1A/1B/1C implementation and validation are reconciled in Section
+4.10. Phase 11C sign-off is the controlled V1 baseline, not a greenfield rebuild or
+permission for future work. Phase 12 receives separately scoped implementation and
+validation gates. Track 8 bypass clip rendering and Track 9 automatic standalone
+summary-to-project publishing promotion remain V1.x, while accepted bound projects
+continue through the canonical execution/manual publishing path.
 
 ---
 
@@ -1942,9 +2199,12 @@ later:
 - Phase 8 non-blocking concern: `build_scene_request` provider-name conditional
 - Phase 8 non-blocking concern: OpenRouter `audio_facts` null/omission cosmetic
   checkpoint difference
-- Pre-existing Gemini generation-cost reporting truthfulness issue (zero-cost figures
-  recorded for a cost-bearing provider in the boundary pass)
-- README factual drift (stale "Current Phase" and "Planned Pipeline" statements)
+- Historical Gemini generation-cost reporting truthfulness issue (zero-cost figures
+  recorded for a cost-bearing provider in the boundary pass): reconciled by V1
+  operation accounting/native-vs-synthetic provenance. Cost-bearing/unknown evidence
+  is never fabricated as zero; future economics aggregation remains separate.
+- README factual drift (stale "Current Phase" and "Planned Pipeline" statements):
+  corrected by the 2026-10-24 closure; historical Phase 1 instructions remain labelled.
 - Pydantic deprecation warning cleanup
 - ⚠️ Phase 7E live acceptance remains **externally blocked** while no compatible free
   OpenRouter video model is available; it must never be forced via paid generation
@@ -1967,9 +2227,10 @@ later:
       ├── visual duration
       └── final assembly duration
   ```
-  Phase 11C Batch 1A (2026-09-08 scope amendment) is the immediate synchronization
-  fix for the observed divergence; the broader Production Timeline abstraction
-  remains **Batch 2** and is not authorized by Batch 1A.
+  Phase 11C Batch 1A's immediate local-render synchronization is **implemented and
+  verified** (`reconcile_local_render_durations`, 8 tests). It does not transfer
+  ownership of native generated audio/duration. The broader Production Timeline
+  abstraction remains **Batch 2 / V1.x**, separately authorized future work.
 - **Visual relevance is textual-only today (CURRENT LIMITATION).** The Batch 1 gate is
   textual token overlap on provider metadata; the system does not inspect image pixels
   for semantic relevance (see Section 8A.17).
@@ -1979,6 +2240,15 @@ later:
   as the Batch 1C target by the Alibaba Cloud provider-integration decision; remains an
   optional future local/owned generation engine under Sections 8A.9/8A.19 with all
   capability-gating constraints intact. Not implemented in Batch 1C.
+- **Track 8 standalone direct clip rendering — V1.x (Founder/CTO, 2026-10-24).**
+  V1's owned source/transcript/segments/candidate-selection/derived-unit lineage
+  workflow is complete. Rendering shortcuts that bypass canonical `ProductionUnit`
+  project execution are not part of the V1 sign-off.
+- **Track 9 automatic summary publishing promotion — V1.x (Founder/CTO, 2026-10-24).**
+  Standalone `narrated_summary.mp4` is inspectable/downloadable, not a canonical
+  project completion/binding/publication record. Without an accepted completed
+  project binding, V1 returns `422 SUMMARY_HANDOFF_REQUIRED`; automatic sidecar
+  promotion needs a separately designed handoff, never fabricated binding.
 
 ---
 
@@ -2230,6 +2500,55 @@ convention: amendments require an explicit, documented update to this file.
     .env/configuration, dependencies, packages, or any other implementation are
     included. **Batch 1C remains NOT IMPLEMENTED / PENDING IMPLEMENTATION**; this
     amendment authorizes scope only and does not mark any implementation complete.
+
+- **2026-10-24 — Phase 11C Tracks 1–14 completion, exit-criteria sign-off and V1/V1.x
+  scope reconciliation (Founder/CTO authorized closure).**
+  - **Formal disposition:** **Phase 11C COMPLETE (Tracks 1–14 Verified & Signed Off)**.
+    Phase 11B specification/recovered implementation acceptance (`dd21b26`, `cc551ca`)
+    and Batch 1A/1B/1C implemented/verified status are reconciled in the current
+    sections. Earlier discovery, scope-only and pending/no-application-code entries
+    above remain unchanged as dated historical audit records.
+  - **Code checkpoints:** Core Standard grounded narration/hermetic-test fixes
+    [`a1bb5edb6b8574554548a1682b9427f84cc28ff3`](https://github.com/7DayWalker/AUTO-VIDEO-MAKER/commit/a1bb5edb6b8574554548a1682b9427f84cc28ff3);
+    K3 real-execution SummaryStudio/explicit sandbox toggle
+    [`b6a7f3d9b3b37ff072456c1d4525e3b7f4cd73c7`](https://github.com/7DayWalker/avm-studio-pro/commit/b6a7f3d9b3b37ff072456c1d4525e3b7f4cd73c7).
+    Earlier Track 9 canonical routing/Pro/assembly (`114bad3`), Core HTTP (`20713eb`),
+    and Core/K3 manual publishing parity (`39ff7d3` / `d59225b`) remain part of the
+    implementation chain. This documentation sign-off is a separate follow-up
+    commit over the Core code checkpoint; its hash is recorded by Git history.
+  - **Validation:** **1,904 Core passed / 0 failed / 1 skipped** via
+    `tools/run_hermetic_pytest.py` (one opt-in live E2E; **0 external network
+    attempts**); **86 K3 passed / 0 failed**, production build exit 0 / zero errors.
+    Track 9: 188 passed; HTTP routes: 17; original 10 configuration/profile blockers:
+    10 passed, all four affected files directly: 85 passed. The actual pre-fix
+    checkout collected 1,865 tests; 40 new cases yield 1,905 collected. No live AI,
+    YouTube or TikTok call was used to obtain closure evidence. Existing Pydantic/
+    bundle-size warnings and the passing sequential recheck after an earlier
+    loopback-only `WinError 10053` remain documented, not hidden.
+  - **Track 8 decision:** V1 complete for source registration, timestamped
+    transcription, validated segments, deterministic/AI candidate moment selection
+    through shared grounded planners, and derived `ProductionUnit` lineage.
+    Publishing uses the canonical accepted-completed-project path once bound.
+    Direct standalone clip-rendering shortcuts bypassing that execution remain
+    **V1.x**; no new clipping engine or autonomous selection endpoint is claimed.
+  - **Track 9 decision:** V1 complete for real Summary Standard text+JSON grounding,
+    Summary Pro windowed visual understanding/narration, TTS synthesis,
+    `narrated_summary.mp4`, Core `/api` and K3 SummaryStudio. Standalone sidecars are
+    inspectable/downloadable via `/summary-video` and `/summary-video/media`.
+    Automatic promotion into a canonical `ProjectManifest` publishing record without
+    a bound completed project remains **V1.x** (`422 SUMMARY_HANDOFF_REQUIRED` in V1).
+    Users select canonical models; providers/wire IDs are internal, same-model
+    failover preserves identity, and readiness/cost unknowns remain truthful.
+  - **Tracks 11–13 decision:** V1 ownership/configurable-storage/non-interactive
+    credential/range-media, durable operation/attempt accounting, and two-repo HTTP
+    client/mobile-readiness seams are complete. Status GET reconciliation side
+    effects are explicit. No tenant DB/auth, fabricated credit balance, billing
+    tables, subscription economy, native mobile app or premature infrastructure.
+  - **Next phase:** **Phase 12 — Automated Publishing, Scheduling & V1.x Operator
+    Polish**. Phase 13 quality/scale, Phase 14 intelligent optimization and Phase 15
+    generalized recovery retain their original distinct gates. This closure does
+    not implement automation, Batch 2 semantic/timeline infrastructure, mandatory
+    continuity intelligence, ComfyUI or a second AVM Core.
 
 ---
 
