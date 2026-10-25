@@ -17,6 +17,14 @@ passed, 0 failed, 1 skipped** (opt-in live E2E) in Core and **86 passed, 0 faile
 in K3, with a successful production build. **Phase 12 — Automated Publishing,
 Scheduling & V1.x Operator Polish** is next; this closure does not implement it.
 
+**V1.x increment — 2026-10-25:** **Phase 11C-PLUS Standalone AI Summary → Canonical
+Publishable Project Handoff IMPLEMENTED & VERIFIED**. Explicit summary promotion
+now binds an accepted project for the existing manual YouTube/TikTok engines:
+**170/170 Core Track 9/10 handoff and parity tests**, **97/97 K3 tests**, zero live
+external network calls, and a successful K3 production build. Unpromoted
+summary-only units still return **`422 SUMMARY_HANDOFF_REQUIRED`**. Phase 12
+automation/scheduling remains not implemented.
+
 ---
 
 ## 1. Strategic Vision
@@ -527,7 +535,7 @@ product extension.
 | Production Bible-required series workflow | Core Bible remains optional; context/episode semantics are verified, while automatic Bible creation and mandatory continuity enforcement remain an explicit future product decision | **V1 COMPLETE optional-context seam; mandatory gate V1.x / DECISION REQUIRED** |
 | Long-video repurposing from approximately 45–60 minute source | Owned source registration, timestamped transcription, validated moment ranges, shared deterministic/AI candidate selection, and derived-unit lineage are implemented | **Track 8 V1 COMPLETE; standalone clip-rendering shortcut V1.x** |
 | Approximately 60-second derived clips/episodes | Derived units participate in canonical planning/execution and manual publishing once bound to an accepted completed project; source lineage alone is never completion | **V1 COMPLETE unit/lineage path; bypass rendering V1.x** |
-| Video Upload → AI Narration / Summary Video | Real Standard and windowed Pro planners, TTS synthesis, `narrated_summary.mp4`, Core routes, and K3 SummaryStudio are integrated | **Track 9 V1 COMPLETE; automatic sidecar-to-project promotion V1.x** |
+| Video Upload → AI Narration / Summary Video | Real Standard and windowed Pro planners, TTS synthesis, `narrated_summary.mp4`, Core routes, and K3 SummaryStudio are integrated; explicit canonical project promotion is implemented | **Track 9 V1 COMPLETE; Phase 11C-PLUS V1.x handoff COMPLETE (2026-10-25); no silent promotion** |
 | Manual publishing | Core/K3 YouTube/TikTok commands require accepted completed project evidence and retain durable publication outcomes | **V1 COMPLETE** |
 | Automated publishing | No automatic publishing/scheduler was added by 11C | **Phase 12 — next, not implemented** |
 | Additional publishing platforms | Platform registry and adapter direction exist; Instagram/Facebook are not implemented | **V1.x / DECISION REQUIRED** |
@@ -564,6 +572,43 @@ percentage is established by this amendment.
   complete, or fabricate a publishing record. Automatic promotion into a canonical
   publishing record without a bound completed project remains **V1.x**; V1 refuses
   that handoff with **`422 SUMMARY_HANDOFF_REQUIRED`**.
+
+#### Phase 11C-PLUS — Standalone AI Summary → Canonical Publishable Project Handoff ✅
+
+**V1.x status: IMPLEMENTED & VERIFIED — 2026-10-25.** This separately authorized
+increment closes the Track 9 → Track 10 handoff gap without changing the dated
+2026-10-24 V1 sign-off above or implementing Phase 12 automation.
+
+- `app/production/summary_handoff.py` promotes the unit's assembled
+  `narrated_summary.mp4` via the explicit promotion endpoint:
+  **`POST /api/productions/{pid}/units/{uid}/summary-video/promote`**. Assembly also accepts
+  the explicit optional `promote_to_publishable: true` flag (default `false`).
+- The canonical bound `ProjectManifest` records **`source_summary_handoff`**
+  provenance, project-owned media/grounded narration snapshots, and the existing
+  production/unit plan identity, version, and content-hash binding. The same
+  reconciliation oracle validates the import and final media as **`PROJECT_COMPLETE`**;
+  `ProductionExecutor` derives **`COMPLETED`**. Engine voice/scene generation stays
+  truthfully **SKIPPED**; no fake checkpoints or voice timing are fabricated.
+- Existing YouTube/TikTok publishing reconciliation remains the sole publication
+  authority. Standard project bindings are not clobbered; publication evidence is
+  retained, changed published media/narration is protected, and unchanged
+  re-promotion is a no-op. Promotion itself never uploads.
+- K3 `SummaryStudio` offers **Promote to Publishable Master & Open Export**;
+  Export/Manual Publishing offers **Promote Summary Video for Publishing** with
+  exact-unit evidence refresh. Protected styling/views and separate platform
+  inspection/confirmation remain unchanged.
+- Summary-only units continue to return **`422 SUMMARY_HANDOFF_REQUIRED`** until
+  explicitly promoted. Summary metadata and unit detail report promotion/binding
+  status; rendered sidecars alone never imply canonical publishing eligibility.
+- **Validation:** **170/170 Core** handoff/Track 9 routes/Track 10 parity tests via
+  `tools/run_hermetic_pytest.py`, plus **96/96** existing binding/reconciliation/
+  publishing regressions; **97/97 K3** tests and `npm run build` exit 0. All test
+  runs used local media/fake providers and publishers with **0 external network
+  attempts**. Existing Pydantic and non-fatal bundle-size warnings remain.
+- **K3 checkpoint:**
+  [`fe2719d2ad15f02f3ee29a8e60bb5929a1cfb215`](https://github.com/7DayWalker/avm-studio-pro/commit/fe2719d2ad15f02f3ee29a8e60bb5929a1cfb215).
+  The matching Core implementation/documentation checkpoint is recorded by Git
+  history. Automated publishing/scheduling remains **Phase 12 / NOT IMPLEMENTED**.
 
 #### Major capability tracks
 
@@ -1709,8 +1754,11 @@ and `narrated_summary.mp4` assembly. Core `/api` and K3 `SummaryStudio` are inte
 with real execution by default and explicit opt-in sandbox execution. Model users
 select canonical identities; providers/wire IDs remain internal. Summary sidecars
 are inspectable/downloadable through `/summary-video` and `/summary-video/media`;
-automatic promotion to a `ProjectManifest` publication record without an accepted
-completed project binding remains **V1.x** (`422 SUMMARY_HANDOFF_REQUIRED` in V1).
+**Phase 11C-PLUS V1.x explicit canonical project handoff is implemented and verified
+(2026-10-25)** through `/summary-video/promote` and `source_summary_handoff`
+provenance. Unpromoted summary-only units still return `422 SUMMARY_HANDOFF_REQUIRED`;
+promotion accepts/binds the master before the existing manual publishing engine
+can upload it. Silent or unattended promotion is not implemented.
 Plan-driven TTS by itself remains distinct from this complete source workflow.
 
 **ROUTE 6 — PUBLISHING / DISTRIBUTION.** Publishing remains **downstream of
@@ -2150,6 +2198,7 @@ LEVEL 3 is claimed as achieved today.
 | FOUNDATION | ✅ COMPLETE |
 | PERSONAL PRODUCTION ENGINE | ✅ COMPLETE THROUGH PHASE 8 |
 | PERSONAL AVM V1 PRODUCT — PHASE 11C | ✅ COMPLETE — TRACKS 1–14 VERIFIED & SIGNED OFF (2026-10-24) |
+| PHASE 11C-PLUS — V1.x SUMMARY-TO-PUBLISH HANDOFF | ✅ IMPLEMENTED & VERIFIED (2026-10-25): CORE 170/170, K3 97/97 |
 | PERSONAL AVM MATURITY | 🟡 NOT YET COMPLETE |
 | NEXT ROADMAP PHASE | 🟡 PHASE 12 — AUTOMATED PUBLISHING, SCHEDULING & V1.x OPERATOR POLISH |
 | PROVEN AVM CORE | 🔵 FUTURE MILESTONE |
@@ -2159,7 +2208,8 @@ LEVEL 3 is claimed as achieved today.
 The current Core/K3 product integrates provider-agnostic scene execution, durable
 checkpoints/resume, hybrid routing, explicit audio policy/captions/assembly,
 canonical model selection, source/transcript/segment/derived-unit lineage,
-real Standard and Pro narrated summaries, and verified manual YouTube/TikTok
+real Standard and Pro narrated summaries, explicit canonical summary project
+promotion, and verified manual YouTube/TikTok
 publishing. Phase 9 intent, Phase 10 executor/binding authority, Phase 11/accepted
 11B Command Center, and Phase 11C Tracks 1–14 are complete for the signed-off V1
 scope. This still corresponds to **LEVEL 3**, not autonomous LEVEL 4–6: no scheduler,
@@ -2182,9 +2232,13 @@ Phase 11B's bounded specification/recovered implementation are accepted (`dd21b2
 `cc551ca`); Batch 1A/1B/1C implementation and validation are reconciled in Section
 4.10. Phase 11C sign-off is the controlled V1 baseline, not a greenfield rebuild or
 permission for future work. Phase 12 receives separately scoped implementation and
-validation gates. Track 8 bypass clip rendering and Track 9 automatic standalone
-summary-to-project publishing promotion remain V1.x, while accepted bound projects
-continue through the canonical execution/manual publishing path.
+validation gates. Track 8 bypass clip rendering remains V1.x. Track 9's explicitly
+authorized **Phase 11C-PLUS canonical summary handoff is implemented and verified**:
+170/170 focused Core tests, 96/96 additional regressions, 97/97 K3 tests, successful
+K3 build, and zero live external network calls. Unpromoted summary-only units still
+return `422 SUMMARY_HANDOFF_REQUIRED`; promotion and upload remain separate operator
+actions. Accepted bound projects use the existing execution/manual publishing
+authorities, not a second state machine or unattended scheduler.
 
 ---
 
@@ -2244,11 +2298,13 @@ later:
   V1's owned source/transcript/segments/candidate-selection/derived-unit lineage
   workflow is complete. Rendering shortcuts that bypass canonical `ProductionUnit`
   project execution are not part of the V1 sign-off.
-- **Track 9 automatic summary publishing promotion — V1.x (Founder/CTO, 2026-10-24).**
-  Standalone `narrated_summary.mp4` is inspectable/downloadable, not a canonical
-  project completion/binding/publication record. Without an accepted completed
-  project binding, V1 returns `422 SUMMARY_HANDOFF_REQUIRED`; automatic sidecar
-  promotion needs a separately designed handoff, never fabricated binding.
+- **Track 9 summary publishing handoff — V1.x gap CLOSED by Phase 11C-PLUS
+  (2026-10-25).** The gap deferred at the 2026-10-24 sign-off now has an explicit,
+  verified `/summary-video/promote` canonical project handoff with
+  `source_summary_handoff` provenance. Unpromoted summary-only units continue to
+  return `422 SUMMARY_HANDOFF_REQUIRED`. Promotion does not fabricate stage or
+  publication evidence and never silently uploads; automation/scheduling remains
+  deferred to Phase 12.
 
 ---
 
@@ -2549,6 +2605,20 @@ convention: amendments require an explicit, documented update to this file.
     generalized recovery retain their original distinct gates. This closure does
     not implement automation, Batch 2 semantic/timeline infrastructure, mandatory
     continuity intelligence, ComfyUI or a second AVM Core.
+
+- **2026-10-25 — Phase 11C-PLUS V1.x standalone AI summary → canonical publishable
+  project handoff implemented and verified (Founder/CTO authorized increment).**
+  - `app/production/summary_handoff.py`, the endpoint
+    `POST /api/productions/{pid}/units/{uid}/summary-video/promote`, optional explicit
+    build-and-promote, and `source_summary_handoff` provenance close the Track 9/10
+    gap. Existing `ProductionExecutor` binding/acceptance and YouTube/TikTok
+    reconciliation remain authoritative; standard projects/publication records
+    are protected and unpromoted units still return `422 SUMMARY_HANDOFF_REQUIRED`.
+  - **Evidence:** Core **170/170** focused handoff/routes/parity tests and **96/96**
+    additional regressions; K3 **97/97** tests, production build exit 0, **0 live
+    external network calls**. K3 checkpoint: **`fe2719d`**; the matching Core
+    checkpoint is recorded by Git history. The 2026-10-24 closure remains a
+    historical V1 baseline; Phase 12 automation/scheduling is not implemented.
 
 ---
 

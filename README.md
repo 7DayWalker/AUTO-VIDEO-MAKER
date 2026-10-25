@@ -21,6 +21,13 @@ Verified closure: **Core 1,904 passed, 0 failed, 1 skipped** (opt-in live E2E),
 **K3 86 passed, 0 failed**, and a successful K3 production build with zero errors.
 Core code checkpoint: `a1bb5ed`; K3 real-mode Summary checkpoint: `b6a7f3d`.
 
+**Phase 11C-PLUS V1.x increment — implemented and verified (2026-10-25):** standalone
+AI Summary → canonical publishable project handoff, with **170/170 focused Core
+Track 9/10 tests**, **96/96 additional Core regressions**, **97/97 K3 tests**, zero
+live external network calls, and a successful K3 build. K3 handoff checkpoint:
+`fe2719d`. The dated V1 closure above remains the historical baseline; Phase 12
+automation/scheduling is still not implemented.
+
 ---
 
 ## Setup Instructions (Windows)
@@ -259,8 +266,20 @@ explicit manual YouTube/TikTok publishing and durable reconciliation evidence.
   SummaryStudio defaults to real execution; its sandbox checkbox is opt-in.
 - Standalone summary sidecars are inspectable/downloadable through
   `/api/productions/{id}/units/{unitId}/summary-video` and `/summary-video/media`.
-  Automatic promotion into a canonical `ProjectManifest` publishing record without
-  a bound completed project is **V1.x**; V1 returns **`422 SUMMARY_HANDOFF_REQUIRED`**.
+  **Phase 11C-PLUS — V1.x handoff implemented and verified:** explicitly call
+  `POST /api/productions/{pid}/units/{uid}/summary-video/promote`, or request
+  `promote_to_publishable: true` during assembly (default `false`).
+  `app/production/summary_handoff.py` binds a project-owned accepted master and
+  records `source_summary_handoff` provenance on its canonical `ProjectManifest`.
+  The existing `ProductionExecutor` binding checks and reconciliation validate
+  `PROJECT_COMPLETE` / `COMPLETED`; engine voice/scene generation is truthfully
+  skipped, not fabricated. Standard bound projects and existing publication
+  records are protected. **Unpromoted summary-only units still return
+  `422 SUMMARY_HANDOFF_REQUIRED` until explicitly promoted.**
+  K3 offers **Promote to Publishable Master & Open Export** in SummaryStudio and
+  **Promote Summary Video for Publishing** in Export. Promotion never uploads;
+  YouTube/TikTok use the existing manual publishing engine with separate platform
+  inspection/confirmation. Automated publishing/scheduling remains Phase 12.
 - Tracks 11–13 are complete as ownership/storage/credential/media, operation-accounting
   and two-repo HTTP/mobile-readiness seams, not implemented SaaS billing/auth or a
   native mobile app. Costs and attempt/fallback provenance are durable evidence;

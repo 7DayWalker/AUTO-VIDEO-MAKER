@@ -1,7 +1,7 @@
 """Track 9 Phase 3 — grounded narrated summary video assembly."""
 from __future__ import annotations
 
-import json, logging, os, shutil, tempfile
+import hashlib, json, logging, os, shutil, tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -15,7 +15,7 @@ from app.assembly.pipeline import assemble_project
 from app.production.models import NarrationArtifact, NarrationAudioArtifact, SourceAsset, SourceTranscript
 from app.production.storage import (
     load_narration_artifact, load_narration_audio, load_production,
-    production_dir, unit_plan_dir,
+    compute_content_hash, production_dir, unit_plan_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,10 @@ class NarratedSummaryArtifact(BaseModel):
     file_size: int = Field(ge=1)
     generated_at: str = Field(min_length=1)
     validation: Dict = Field(default_factory=dict)
+    # Assembly-time fingerprints tie promotion to the bytes/script actually
+    # assembled. Optional for existing, already signed-off Track 9 sidecars.
+    file_fingerprint: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    narration_content_hash: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     @model_validator(mode="after")
     def _check(self) -> "NarratedSummaryArtifact":
         if not _is_relative_path(self.output_path):
@@ -73,6 +77,21 @@ def load_narrated_summary(production_id: str, unit_id: str, root: Optional[Path]
     if not p.is_file():
         raise FileNotFoundError(f"narrated summary not found: {p}")
     return NarratedSummaryArtifact.model_validate(json.loads(p.read_text(encoding="utf-8")))
+
+
+def narration_content_hash(artifact: NarrationArtifact) -> str:
+    """Hash grounded content plus declared audio provenance, not timestamps.
+
+    A newly selected/synthesized voice must not be attributed to an older MP4
+    that still contains the previous voice. Reassembly establishes that link.
+    """
+    content = artifact.model_dump(mode="json", include={
+        "production_id", "unit_id", "narration_id", "source_asset_id",
+        "narration_text", "summary", "beats", "source_refs", "transcript_refs",
+        "audio_artifact_path", "audio_duration_seconds", "audio_provider",
+        "audio_voice", "audio_format", "audio_status",
+    })
+    return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -272,6 +291,8 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
             if not _is_relative_path(rel_narration): rel_narration=narration_audio.audio_path
         except Exception: rel_narration=narration_audio.audio_path
         artifact=NarratedSummaryArtifact(production_id=production_id, unit_id=unit_id, source_asset_id=source_asset.asset_id, narration_id=narration_artifact.narration_id, narration_audio_path=rel_narration, source_refs_count=len(ordered_refs), output_path=rel_output, output_duration_seconds=float(dest_info.duration or final_info.duration), video_width=dest_info.width, video_height=dest_info.height, video_codec=dest_info.video_codec, audio_codec=dest_info.audio_codec, source_duration_seconds=float(source_asset.duration), target_duration_seconds=float(narration_artifact.target_duration_seconds), narration_duration_seconds=float(narration_duration), file_size=int(final_dest.stat().st_size), generated_at=datetime.now().isoformat(), validation={'has_video': dest_info.has_video, 'has_audio': dest_info.has_audio, 'valid': True})
+        artifact.file_fingerprint = compute_content_hash(final_dest)
+        artifact.narration_content_hash = narration_content_hash(narration_artifact)
         _atomic_write_json(summary_video_metadata_path(production_id, unit_id, root=root_p), artifact.model_dump())
         return artifact
     finally:

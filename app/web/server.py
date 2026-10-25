@@ -941,14 +941,17 @@ def _artifact_payload(manifest, project_id: str | None = None) -> dict:
         "voice_audio": _artifact_state(
             project_dir, artifact_type="Voice audio", raw_path=manifest.voice_audio_path,
             failed=_stage_failed(manifest, "voice"), media=True,
+            applicable=manifest.source_summary_handoff is None,
         ),
         "voice_timing": _artifact_state(
             project_dir, artifact_type="Voice timing", raw_path=manifest.voice_timing_path,
             failed=_stage_failed(manifest, "voice"),
+            applicable=manifest.source_summary_handoff is None,
         ),
         "scene_manifest": _artifact_state(
             project_dir, artifact_type="Scene manifest", raw_path=manifest.scene_manifest_path,
             failed=_stage_failed(manifest, "scenes"),
+            applicable=manifest.source_summary_handoff is None,
         ),
         "captions": _artifact_state(
             project_dir, artifact_type="Captions", raw_path=manifest.captions_path,
@@ -2626,6 +2629,7 @@ def _manifest_payload(manifest, project_id: str | None = None) -> dict:
             manifest.scene_video_paths,
         ),
         "production_binding": data.get("production_binding"),
+        "source_summary_handoff": data.get("source_summary_handoff"),
         # G3: the route Core COMPILED for this unit (route-compilation
         # evidence, written once at project initialization).  This is a route
         # fact only: it is not scene provider/model provenance, not media
@@ -3043,6 +3047,9 @@ def unit_detail_payload(production_id: str, unit_id: str):
         "blocking_units": _blocking_units(unit, progress_by_id),
         "plan_evidence": _plan_evidence(production_id, unit_id),
         "bound_project": manifest_payload,
+        "summary_video": _summary_video_status(
+            production_id, unit_id, bound=bound, inspect_binding=False,
+        ),
         "scene_checkpoint_rows": (
             _scene_checkpoint_rows(
                 bound.manifest.scene_checkpoints, bound.directory_id
@@ -4092,11 +4099,13 @@ def _summary_handoff_required(production_id: str, unit_id: str):
         "error": "SUMMARY_HANDOFF_REQUIRED",
         "production_id": production_id, "unit_id": unit_id,
         "message": (
-            "The standalone narrated summary is inspectable through /summary-video. "
-            "Platform upload requires an authoritative bound PROJECT_COMPLETE "
-            "execution project; summary sidecars never fabricate completion or binding."
+            "Promote the assembled narrated summary first: POST "
+            f"/api/productions/{production_id}/units/{unit_id}/summary-video/promote. "
+            "This explicitly binds a canonical PROJECT_COMPLETE project. "
+            "Then repeat this confirmed publish request; promotion itself never uploads."
         ),
         "inspection_url": f"/api/productions/{production_id}/units/{unit_id}/summary-video",
+        "promote_url": f"/api/productions/{production_id}/units/{unit_id}/summary-video/promote",
     }
 
 
@@ -4143,10 +4152,16 @@ def _unit_publish_payload(production_id: str, unit_id: str, body: dict):
             "message": "Only the existing manual YouTube and TikTok bridges are supported.",
         }
     has_summary = _unit_has_summary(production_id, unit_id)
+    summary_binding = None
+    if has_summary:
+        try:
+            summary_binding = _production_executor(production_id).discover_bindings(production).get(unit_id)
+        except Exception as exc:
+            return 409, {"error": "BOUND_PROJECT_CONFLICT", "message": _browser_safe_diagnostic(exc)}
     try:
         report = _derive_progress(production_id)
     except Exception as exc:
-        if has_summary:
+        if has_summary and summary_binding is None:
             return _summary_handoff_required(production_id, unit_id)
         return 500, _executor_error(exc)
     progress_by_id = {item.unit_id: item for item in report.units}
@@ -4159,8 +4174,18 @@ def _unit_publish_payload(production_id: str, unit_id: str, body: dict):
         }
     progress = progress_by_id[unit_id]
     if progress.state.value != "COMPLETED":
-        if has_summary:
+        if has_summary and summary_binding is None:
             return _summary_handoff_required(production_id, unit_id)
+        if summary_binding is not None and summary_binding.manifest.source_summary_handoff is not None:
+            return 422, {
+                "error": "SUMMARY_HANDOFF_INVALID", "production_id": production_id,
+                "unit_id": unit_id, "project_id": summary_binding.directory_id,
+                "message": (
+                    "The promoted summary's canonical project no longer passes acceptance. "
+                    "Restore its accepted evidence or explicitly rebuild/promote the summary. "
+                    "Existing publication records are protected; do not resume it through scene generation."
+                ),
+            }
         return 400, {
             "error": "UNIT_NOT_COMPLETED",
             "production_id": production_id,
@@ -4408,7 +4433,92 @@ def narration_synthesize_payload(production_id: str, unit_id: str, body: dict):
     payload["audio"]=meta.model_dump(); payload["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return 200, payload
 
 
+def _summary_video_status(production_id, unit_id, *, bound=None, inspect_binding=True):
+    """Read-only promotion evidence; no media generation, upload or repair."""
+    from app.production.storage import compute_content_hash
+    from app.production.summary_video import load_narrated_summary, summary_video_output_path
+
+    data = {
+        "production_id": production_id, "unit_id": unit_id, "rendered": False,
+        "promoted": False, "promotion_required": False, "promotion_error": None,
+        "bound_project_id": None, "handoff_kind": None, "media_matches_promoted": None,
+        "promote_url": f"/api/productions/{production_id}/units/{unit_id}/summary-video/promote",
+    }
+    if inspect_binding:
+        try:
+            bound = _production_executor(production_id).discover_bindings().get(unit_id)
+        except Exception as exc:
+            data.update({"promotion_error": "SUMMARY_HANDOFF_INVALID", "message": _browser_safe_diagnostic(exc)})
+    # A canonical binding survives removal/rebuilding of mutable Track 9
+    # sidecars. Absence of a preview must never erase the accepted lineage.
+    if bound:
+        data["bound_project_id"] = bound.directory_id
+        handoff = bound.manifest.source_summary_handoff
+        if handoff:
+            data.update({"promoted": True, "handoff_kind": handoff.handoff_kind})
+    try:
+        summary = load_narrated_summary(production_id, unit_id, root=PRODUCTIONS_DIR)
+        media = summary_video_output_path(production_id, unit_id, root=PRODUCTIONS_DIR)
+        media.resolve().relative_to(PRODUCTIONS_DIR.resolve())
+        data["rendered"] = (media.is_file() and media.stat().st_size > 0
+                            and (summary.production_id, summary.unit_id) == (production_id, unit_id))
+        if data["rendered"] and bound:
+            if data["promoted"]:
+                data["media_matches_promoted"] = compute_content_hash(media) == bound.manifest.source_summary_handoff.file_fingerprint
+            else:
+                data["promotion_error"] = "BOUND_PROJECT_CONFLICT"
+        data["promotion_required"] = data["rendered"] and bound is None and data["promotion_error"] is None
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        data.update({"promotion_error": "SUMMARY_HANDOFF_INVALID", "message": _browser_safe_diagnostic(exc)})
+    return data
+
+
+def summary_video_promote_payload(production_id: str, unit_id: str, body=None):
+    _, err = _track9_check_unit(production_id, unit_id)
+    if err:
+        return err
+    if body is not None and (not isinstance(body, dict) or body):
+        return 400, {"error": "INVALID_REQUEST", "message": "Summary promotion takes an empty JSON object; it never accepts project retargeting or upload options."}
+    if not _publish_lock.acquire(blocking=False):
+        return 409, {"error": "PUBLISH_ALREADY_RUNNING", "message": "A publishing operation is active. Inspect its durable outcome before promoting another master."}
+    try:
+        from app.production.summary_handoff import SummaryHandoffError, promote_narrated_summary_to_project
+
+        # Serialize against web execution admission: a standard executor must
+        # not initialize a competing binding while promotion accepts a master.
+        with _production_runs_lock:
+            if (_production_runs.get(production_id) or {}).get("running"):
+                return 409, {"error": "EXECUTION_ALREADY_RUNNING", "message": "Wait for the active production execution before summary promotion."}
+            try:
+                result = promote_narrated_summary_to_project(
+                    production_id, unit_id, root=PRODUCTIONS_DIR, projects_root=PROJECTS_DIR,
+                )
+            except SummaryHandoffError as exc:
+                return exc.status, _sanitize_publishing_payload({
+                    "error": exc.code, "production_id": production_id, "unit_id": unit_id,
+                    "message": _browser_safe_diagnostic(exc),
+                })
+            except FileNotFoundError as exc:
+                return 404, {"error": "SUMMARY_HANDOFF_ARTIFACT_NOT_FOUND", "message": _browser_safe_diagnostic(exc)}
+            except ValueError as exc:
+                return 422, {"error": "SUMMARY_HANDOFF_INVALID", "message": _browser_safe_diagnostic(exc)}
+            except Exception as exc:
+                return 500, {"error": "SUMMARY_PROMOTION_FAILED", "message": _browser_safe_diagnostic(exc)}
+        return 201 if result.created else 200, _redact_secrets({
+            "production_id": production_id, "unit_id": unit_id,
+            "project_id": result.manifest.project_id, "promoted": True,
+            "bound_project": _manifest_payload(result.manifest, result.project_dir.name),
+            "summary_video": _summary_video_status(production_id, unit_id),
+        })
+    finally:
+        _publish_lock.release()
+
+
 def summary_video_build_payload(production_id: str, unit_id: str, body: dict):
+    if not isinstance(body, dict) or not isinstance(body.get("promote_to_publishable", False), bool):
+        return 400, {"error": "INVALID_REQUEST", "message": "promote_to_publishable must be a JSON boolean (default false)."}
     _, err=_track9_check_unit(production_id, unit_id)
     if err:
         return err
@@ -4440,7 +4550,15 @@ def summary_video_build_payload(production_id: str, unit_id: str, body: dict):
         return 500, {"error": "SUMMARY_ASSEMBLY_FAILED", "message": msg}
     except Exception as exc:
         return 500, {"error": "SUMMARY_ASSEMBLY_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
-    data=sv.model_dump(); data["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/summary-video/media"; return 201, data
+    data = sv.model_dump()
+    data["media_url"] = f"/api/productions/{production_id}/units/{unit_id}/summary-video/media"
+    if body.get("promote_to_publishable", False):
+        status, promotion = summary_video_promote_payload(production_id, unit_id)
+        if status not in {200, 201}:
+            return status, {**promotion, "summary_video": {**data, **_summary_video_status(production_id, unit_id)}}
+        data["bound_project"] = promotion["bound_project"]
+    data.update(_summary_video_status(production_id, unit_id))
+    return 201, data
 
 
 def summary_video_get_payload(production_id: str, unit_id: str):
@@ -4454,7 +4572,10 @@ def summary_video_get_payload(production_id: str, unit_id: str):
         return 404, {"error": "SUMMARY_VIDEO_NOT_FOUND", "production_id": production_id, "unit_id": unit_id}
     except Exception as exc:
         return 500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
-    data=sv.model_dump(); data["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/summary-video/media"; return 200, data
+    data = sv.model_dump()
+    data["media_url"] = f"/api/productions/{production_id}/units/{unit_id}/summary-video/media"
+    data.update(_summary_video_status(production_id, unit_id))
+    return 200, data
 
 
 def _serve_summary_video_media(handler, production_id: str, unit_id: str):
@@ -4684,6 +4805,24 @@ class AVMHandler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "INVALID_JSON"})
             status, payload = narration_build_payload(m.group(1), m.group(2), body)
             return self._json(status, payload)
+        m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/summary-video/promote/?$", path)
+        if m:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                return self._json(400, {"error": "INVALID_REQUEST", "message": "Invalid Content-Length."})
+            if length < 0 or length > 64 * 1024:
+                return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8") if length else "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return self._json(400, {"error": "INVALID_JSON"})
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "INVALID_REQUEST", "message": "Summary promotion requires an empty JSON object."})
+            status, payload = summary_video_promote_payload(
+                m.group(1), m.group(2), body,
+            )
+            return self._json(status, payload)
         m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/summary-video/?$", path)
         if m:
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -4828,6 +4967,10 @@ class AVMHandler(BaseHTTPRequestHandler):
                 status, payload = _start_connect(match.group(1))
                 return self._json(status, payload)
             if re.match(r"^/api/projects/[^/]+/publish/(youtube|tiktok)/status$", path):
+                # Drain the bounded body before HTTP/1.0 closes the socket.
+                # Unread POST bytes can reset Windows loopback connections and
+                # hide the truthful 405 response. This never invokes publishing.
+                self._request_json_body()
                 return self._json(405, {"error": "METHOD_NOT_ALLOWED", "message": "Publication status is GET-only."})
             match = re.match(r"^/api/projects/([^/]+)/publish/youtube$", path)
             if match:

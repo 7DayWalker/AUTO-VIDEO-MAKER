@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 import os
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.publishing.models import PublicationRecord, TikTokPublicationRecord
@@ -241,6 +241,57 @@ class ProductionBinding(BaseModel):
     # mutable top-level manifest.project_id field.
     project_id: str = Field(min_length=1)
     bound_at: str = Field(min_length=1)
+    # Additive import lineage. Directory identity is relative to projects_root,
+    # never an absolute workstation path. Legacy engine bindings omit both.
+    execution_dir: Optional[str] = None
+    handoff_kind: Optional[Literal["narrated_summary"]] = None
+
+
+class SourceSummaryHandoff(BaseModel):
+    """Accepted Track 9 import provenance, NOT generated-stage checkpoints.
+
+    Project-owned snapshots and media are fingerprinted independently of the
+    mutable production sidecars. Neither platform's publication record lives
+    here; the existing publication state machines remain their sole owners.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    handoff_kind: Literal["narrated_summary"] = "narrated_summary"
+    production_id: str = Field(min_length=1)
+    unit_id: str = Field(min_length=1)
+    narration_id: str = Field(pattern=r"^narr-[a-z0-9_-]+$")
+    source_asset_id: str = Field(pattern=r"^src-\d{3}$")
+    source_summary_path: str = Field(min_length=1)
+    snapshot_dir: str = Field(min_length=1)
+    artifact_hashes: Dict[str, str]
+    narration_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    file_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    file_size: int = Field(ge=1)
+    promoted_at: str = Field(min_length=1)
+    summary_generated_at: str = Field(min_length=1)
+
+    @field_validator("source_summary_path", "snapshot_dir")
+    @classmethod
+    def _relative_handoff_path(cls, value: str) -> str:
+        import re
+
+        normalized = value.replace("\\", "/")
+        if (not re.fullmatch(r"[a-zA-Z0-9_./-]+", normalized)
+                or normalized.startswith("/")
+                or any(part in {"", ".", ".."} for part in normalized.split("/"))):
+            raise ValueError("summary handoff paths must be safe relative paths")
+        return normalized
+
+    @field_validator("artifact_hashes")
+    @classmethod
+    def _snapshot_hashes(cls, value: Dict[str, str]) -> Dict[str, str]:
+        import re
+
+        expected = {"narration.json", "narrated_summary.json", "source_asset.json", "transcript.json"}
+        if set(value) != expected or any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in value.values()):
+            raise ValueError("summary handoff requires four SHA-256 snapshot hashes")
+        return value
 
 
 class ProjectManifest(BaseModel):
@@ -255,6 +306,9 @@ class ProjectManifest(BaseModel):
     topic: str = Field(min_length=1, description="Video topic")
     # Phase 10: optional execution-side binding. Legacy manifests omit it.
     production_binding: Optional[ProductionBinding] = None
+    # Explicit Track 9 -> canonical project import. None for every standard
+    # execution; it must never be inferred from a filename or COMPLETE flag.
+    source_summary_handoff: Optional[SourceSummaryHandoff] = None
     # G3: the PRODUCTION ROUTE Core compiled for this unit's execution
     # (route-compilation evidence).  Distinct from the plan binding above,
     # from scene provider provenance, from media/engine configuration, and

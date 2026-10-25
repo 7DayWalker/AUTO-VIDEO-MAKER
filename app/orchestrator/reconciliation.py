@@ -703,8 +703,34 @@ def reconcile_project(
     plan = None
     if content.get("status") == ArtifactStatus.VALID.value:
         plan = ProductionPlan.model_validate(json.loads(Path(content["path"]).read_text(encoding="utf-8")))
-    voice = _voice_evidence(manifest, project_dir, len(plan.scenes) if plan else 0)
-    scenes = _scene_evidence(manifest, project_dir, plan)
+    # Explicit imported master evidence, never inferred from a filename or a
+    # COMPLETE flag. Keep the SAME verdict/acceptance and final-media gate;
+    # do not pretend an engine voice/scene generation stage ran for Track 9.
+    summary_handoff = bool(
+        manifest.source_summary_handoff is not None
+        or (manifest.production_binding is not None
+            and manifest.production_binding.handoff_kind == "narrated_summary")
+    )
+    if summary_handoff:
+        from app.production.summary_handoff import validate_source_summary_handoff
+
+        try:
+            validate_source_summary_handoff(manifest, project_dir)
+        except Exception as exc:
+            content.update({"status": ArtifactStatus.INVALID.value, "error": str(exc)})
+        voice = {
+            "status": ArtifactStatus.NOT_REQUIRED.value,
+            "reason": "Engine voice generation/timing not run; Track 9 narration is baked into the imported master.",
+            "source_summary_handoff": True,
+        }
+        scenes = {
+            "status": ArtifactStatus.NOT_REQUIRED.value, "items": [],
+            "reason": "Engine scene generation not run; the accepted master is an assembled grounded source edit.",
+            "source_summary_handoff": True,
+        }
+    else:
+        voice = _voice_evidence(manifest, project_dir, len(plan.scenes) if plan else 0)
+        scenes = _scene_evidence(manifest, project_dir, plan)
     # V1 AUDIO POLICY FIX: in V1 captions are NARRATOR captions derived from
     # voice timing.  When the effective audio policy does not require narration
     # there is no timing to derive them from, so they are NOT REQUIRED (the
@@ -732,7 +758,8 @@ def reconcile_project(
             ArtifactStatus.VALID.value,
             ArtifactStatus.NOT_REQUIRED.value,
         }
-        and scenes.get("status") == ArtifactStatus.VALID.value
+        and (scenes.get("status") == ArtifactStatus.VALID.value
+             or (summary_handoff and scenes.get("status") == ArtifactStatus.NOT_REQUIRED.value))
         and captions.get("status") in {ArtifactStatus.VALID.value, ArtifactStatus.NOT_REQUIRED.value}
         and assembly.get("status") == ArtifactStatus.VALID.value
     )
