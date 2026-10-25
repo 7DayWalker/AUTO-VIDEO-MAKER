@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import (
     AliasChoices,
@@ -287,6 +287,8 @@ class SourceAsset(BaseModel):
     mime: Optional[str] = None
     file_size: Optional[int] = Field(default=None, ge=0)
     ingested_at: str = Field(min_length=1)
+    # Intake provenance is additive; legacy sources remain unknown, not inferred.
+    source_kind: Optional[Literal["local_file", "browser_upload", "sandbox_fixture"]] = None
 
     @model_validator(mode="after")
     def _validate_relative_path(self) -> "SourceAsset":

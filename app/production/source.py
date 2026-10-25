@@ -1,12 +1,13 @@
 """Track 8 V1: source media ingestion local-first."""
 from __future__ import annotations
-import hashlib, mimetypes, shutil, os, re
+import hashlib, mimetypes, shutil, os, re, tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from app.production.models import Production, SourceAsset
 from app.production.storage import load_production, production_source_dir, production_source_meta
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm"}
+MAX_SOURCE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -50,7 +51,86 @@ def _atomic_write_json(path: Path, obj: dict) -> None:
             tmp.unlink()
         except OSError:
             pass
-def register_source(production_id: str, source_path: str, *, root: Optional[Path]=None):
+def register_source(production_id: str, source_path: str = "", *, root: Optional[Path]=None, mock_mode: bool=False):
+    """Canonical local intake with an explicitly requested synthetic fixture only.
+
+    Missing real sources still fail. A provided bad path is never replaced by a
+    fixture, even in sandbox mode. Fixtures pass the same media/storage gate.
+    """
+    if not isinstance(mock_mode, bool):
+        return 400, {"error": "INVALID_REQUEST", "message": "mock_mode must be a JSON boolean"}
+    if not isinstance(source_path, str):
+        return 400, {"error": "INVALID_SOURCE", "message": "source_path must be text"}
+    if source_path.strip() or not mock_mode:
+        return _register_local_source(production_id, source_path, root=root)
+    try:
+        prod = load_production(production_id, root=root)
+    except FileNotFoundError:
+        return 404, {"error": "PRODUCTION_NOT_FOUND", "message": "Create or select a production first."}
+    except Exception:
+        return 500, {"error": "LOAD_FAILED", "message": "Production intent could not be loaded."}
+    if prod.production_id != production_id:
+        return 400, {"error": "INVALID_REQUEST", "message": "Production identity does not match its directory."}
+    source_dir = production_source_dir(production_id, root=root)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from app.assembly.video import create_test_video
+
+        with tempfile.TemporaryDirectory(prefix=".sandbox-", dir=source_dir) as scratch:
+            fixture = Path(scratch) / "sandbox-summary-fixture.mp4"
+            create_test_video(fixture, duration=12, width=640, height=360, fps=24, color="purple")
+            status, payload = _register_local_source(production_id, str(fixture), root=root, source_kind="sandbox_fixture")
+            if status == 201:
+                payload.update({"mock_mode": True, "sandbox_fixture": True,
+                                "message": "Synthetic sandbox source registered locally; no provider or platform call was made."})
+            return status, payload
+    except Exception:
+        return 503, {"error": "SANDBOX_FIXTURE_UNAVAILABLE", "message": "Local FFmpeg/FFprobe is required to create the sandbox source fixture."}
+
+
+def register_uploaded_source(production_id: str, filename: str, stream, length: int, *, root: Optional[Path]=None):
+    """Bounded streaming adapter to the SAME source validation/storage authority.
+
+    Client filenames are metadata only, never writable paths. Invalid, oversized
+    or truncated uploads cannot create a SourceAsset or escape production storage.
+    """
+    if (not isinstance(filename, str) or not filename.strip() or len(filename) > 255
+            or any(char in filename for char in ("/", "\\", "\x00"))
+            or Path(filename).suffix.lower() not in VIDEO_EXTS):
+        return 400, {"error": "INVALID_SOURCE", "message": "Provide a plain MP4, MOV, MKV or WebM filename."}
+    if not isinstance(length, int) or isinstance(length, bool) or length <= 0:
+        return 400, {"error": "INVALID_SOURCE", "message": "A non-empty upload with Content-Length is required."}
+    if length > MAX_SOURCE_UPLOAD_BYTES:
+        return 413, {"error": "PAYLOAD_TOO_LARGE", "message": "Source upload limit is 2 GiB. Use a Core-local file path for larger media."}
+    try:
+        prod = load_production(production_id, root=root)
+    except FileNotFoundError:
+        return 404, {"error": "PRODUCTION_NOT_FOUND", "message": "Create or select a production first."}
+    except Exception:
+        return 500, {"error": "LOAD_FAILED", "message": "Production intent could not be loaded."}
+    if prod.production_id != production_id:
+        return 400, {"error": "INVALID_REQUEST", "message": "Production identity does not match its directory."}
+    source_dir = production_source_dir(production_id, root=root)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".upload-", dir=source_dir) as scratch:
+        incoming = Path(scratch) / ("upload" + Path(filename).suffix.lower())
+        remaining = length
+        try:
+            with incoming.open("wb") as handle:
+                while remaining:
+                    chunk = stream.read(min(remaining, 1024 * 1024))
+                    if not chunk or len(chunk) > remaining:
+                        raise ValueError("truncated source upload")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+        except (OSError, ValueError):
+            return 400, {"error": "INVALID_SOURCE", "message": "Source upload did not complete; no source was registered."}
+        return _register_local_source(production_id, str(incoming), root=root,
+                                      original_filename=filename.strip(), source_kind="browser_upload")
+
+
+def _register_local_source(production_id: str, source_path: str, *, root: Optional[Path]=None,
+                           original_filename: Optional[str]=None, source_kind: str="local_file"):
     if not isinstance(source_path, str):
         return 400, {"error":"INVALID_SOURCE","message":"source_path must be text"}
     if "\x00" in source_path:
@@ -95,7 +175,7 @@ def register_source(production_id: str, source_path: str, *, root: Optional[Path
     except Exception:
         _atomic_copy(p, dst); sha = sha256_file(dst)
     mime, _ = mimetypes.guess_type(p.name)
-    asset = SourceAsset(asset_id=asset_id, original_filename=p.name, stored_path=rel_path, sha256=sha, duration=float(info.duration), width=info.width, height=info.height, video_codec=info.video_codec, audio_codec=info.audio_codec, mime=mime, file_size=dst.stat().st_size, ingested_at=datetime.now().isoformat())
+    asset = SourceAsset(asset_id=asset_id, original_filename=original_filename or p.name, stored_path=rel_path, sha256=sha, duration=float(info.duration), width=info.width, height=info.height, video_codec=info.video_codec, audio_codec=info.audio_codec, mime=mime, file_size=dst.stat().st_size, ingested_at=datetime.now().isoformat(), source_kind=source_kind)
     from app.production.storage import save_revision
     revised = prod.model_copy(update={"plan_version": prod.plan_version+1, "revised_at": datetime.now().isoformat(), "source_assets": list(prod.source_assets or [])+[asset]})
     try:

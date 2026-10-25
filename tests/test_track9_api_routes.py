@@ -1,6 +1,7 @@
 """Track 9 HTTP /api surface -- hermetic mock and real paths, no live calls."""
 from __future__ import annotations
 import json, threading, urllib.request, urllib.error
+import io
 from pathlib import Path
 import pytest
 from app.assembly.video import create_test_video
@@ -296,6 +297,112 @@ def test_standard_real_http_uses_resolved_adapter_and_persists(monkeypatch, tmp_
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_empty_real_source_intake_does_not_create_fixture(monkeypatch, tmp_path):
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        for body in ({}, {"mock_mode": False}, {"mock_mode": "true"}):
+            status, payload, _ = _post(base, f"/api/productions/{PID}/source", body)
+            assert status == 400, payload
+        from app.production.storage import load_production
+
+        assert not load_production(PID, root=tmp_path / "productions").source_assets
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_sandbox_source_registration_is_explicit_canonical_and_zero_typing(monkeypatch, tmp_path):
+    from app.orchestrator.production_execution import ProductionExecutor
+    from app.production.storage import load_production
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        status, creation, _ = _post(base, "/api/productions", {
+            "mode": "single_video", "creation_method": "local", "title": "AI Summary Recap",
+            "brief": "Prepare a source-grounded narrated AI Summary recap.", "output_intent": "youtube_shorts",
+        })
+        assert status == 201, creation
+        pid = creation["production_id"]
+        executor = ProductionExecutor(pid, productions_root=tmp_path / "productions", projects_root=tmp_path / "projects")
+        monkeypatch.setattr(web, "_production_executor", lambda id: executor)
+        status, registered, _ = _post(base, f"/api/productions/{pid}/source", {"mock_mode": True})
+        assert status == 201 and registered["sandbox_fixture"] is True, registered
+        source = registered["source_asset"]
+        assert source["source_kind"] == "sandbox_fixture" and source["original_filename"] == "sandbox-summary-fixture.mp4"
+        media = tmp_path / "productions" / pid / source["stored_path"]
+        assert media.is_file() and media.stat().st_size > 0
+        assert load_production(pid, root=tmp_path / "productions").source_assets[0].source_kind == "sandbox_fixture"
+        assert not list(media.parent.glob(".sandbox-*"))
+        for route, body in [
+            (f"/source/{source['asset_id']}/transcript", {"provider": "mock", "mock_mode": True}),
+            ("/units/unit-001/narration", {"mock_mode": True, "asset_id": source["asset_id"]}),
+            ("/units/unit-001/narration/synthesize", {"mock_mode": True}),
+            ("/units/unit-001/summary-video", {}),
+            ("/units/unit-001/summary-video/promote", {}),
+        ]:
+            status, payload, _ = _post(base, f"/api/productions/{pid}" + route, body)
+            assert status in {200, 201}, (route, payload)
+        assert executor.derive_progress().complete
+        manifest = next(executor.projects_root.glob("*/manifest.json"))
+        accepted = json.loads(manifest.read_text(encoding="utf-8"))
+        assert accepted["source_summary_handoff"]
+        assert accepted["publication"] is None and accepted["tiktok_publication"] is None
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_sandbox_does_not_substitute_a_bad_explicit_source_path(monkeypatch, tmp_path):
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        status, _, _ = _post(base, f"/api/productions/{PID}/source", {"mock_mode": True, "source_path": str(tmp_path / "missing.mp4")})
+        assert status == 400
+        status, _, _ = _post(base, "/api/productions/unknown/source", {"mock_mode": True})
+        assert status == 404
+        assert not (tmp_path / "productions" / "unknown").exists()
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_browser_source_upload_reuses_intake_without_client_path(monkeypatch, tmp_path):
+    from app.production.storage import compute_content_hash, load_production
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        video = tmp_path / "picked.mp4"
+        create_test_video(video, duration=2, width=320, height=180, fps=24)
+        request = urllib.request.Request(base + f"/api/productions/{PID}/source/upload", data=video.read_bytes(),
+                                         method="POST", headers={"Content-Type": "application/octet-stream", "X-AVM-Filename": "My%20source.mp4"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert response.status == 201
+            payload = json.loads(response.read())
+        asset = payload["source_asset"]
+        assert asset["original_filename"] == "My source.mp4" and asset["source_kind"] == "browser_upload"
+        stored = tmp_path / "productions" / PID / asset["stored_path"]
+        assert compute_content_hash(stored) == compute_content_hash(video)
+        assert not list(stored.parent.glob(".upload-*"))
+        assert load_production(PID, root=tmp_path / "productions").source_assets[0].original_filename == "My source.mp4"
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("filename,body,length", [
+    ("../escape.mp4", b"video", 5), ("C:\\fakepath\\source.mp4", b"video", 5),
+    ("source.txt", b"video", 5), ("source.mp4", b"", 0),
+    ("source.mp4", b"short", 100), ("source.mp4", b"", 2 * 1024 * 1024 * 1024 + 1),
+])
+def test_upload_limits_names_and_truncation_never_register_invalid_source(monkeypatch, tmp_path, filename, body, length):
+    from app.production.source import register_uploaded_source
+    from app.production.storage import load_production
+
+    _make_prod(tmp_path)
+    status, _ = register_uploaded_source(PID, filename, io.BytesIO(body), length, root=tmp_path / "productions")
+    assert status in {400, 413}
+    assert not load_production(PID, root=tmp_path / "productions").source_assets
+    assert not list((tmp_path / "productions" / PID).rglob(".upload-*"))
 
 
 @pytest.mark.parametrize("failure", ["bad_grounding", "bad_json", "missing_configuration", "ineligible_model"])

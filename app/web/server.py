@@ -23,7 +23,7 @@ import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, unquote
 
 from app.config import PROJECT_ROOT
 from app.assembly.audio_contract import (
@@ -4735,6 +4735,26 @@ class AVMHandler(BaseHTTPRequestHandler):
         return self._json(404, {"detail": "not found"})
 
     def _productions_post(self, path: str):
+        upload = re.match(r"^/api/productions/([^/]+)/source/upload/?$", path)
+        if upload:
+            if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/octet-stream":
+                return self._json(415, {"error": "INVALID_REQUEST", "message": "Source uploads require application/octet-stream."})
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                return self._json(400, {"error": "INVALID_REQUEST", "message": "Invalid upload Content-Length."})
+            from app.production.source import register_uploaded_source
+
+            timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(120)
+                status, payload = register_uploaded_source(
+                    upload.group(1), unquote(self.headers.get("X-AVM-Filename", "")),
+                    self.rfile, length, root=PRODUCTIONS_DIR,
+                )
+            finally:
+                self.connection.settimeout(timeout)
+            return self._json(status, _redact_secrets(payload))
         m = re.match(r"^/api/productions/([^/]+)/source/?$", path)
         if m:
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -4745,8 +4765,11 @@ class AVMHandler(BaseHTTPRequestHandler):
                 body = json.loads(raw.decode("utf-8") or "{}")
             except Exception:
                 return self._json(400, {"error": "INVALID_JSON"})
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "INVALID_REQUEST", "message": "Source intake requires a JSON object."})
             from app.production.source import register_source
-            status, payload = register_source(m.group(1), body.get("source_path") or "", root=PRODUCTIONS_DIR)
+            status, payload = register_source(m.group(1), body.get("source_path", ""), root=PRODUCTIONS_DIR,
+                                              mock_mode=body.get("mock_mode", False))
             return self._json(status, payload)
         # Track 8 source segment save (operator-selected ranges only).
         mseg = re.match(r"^/api/productions/([^/]+)/source/([^/]+)/segments/?$", path)
