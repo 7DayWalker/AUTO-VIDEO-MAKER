@@ -30,7 +30,7 @@ from app.production.models import NarrationArtifact, SourceAsset, SourceTranscri
 from app.production.narration import validate_narration_artifact
 from app.production.storage import (
     compute_content_hash, load_narration_artifact, load_production,
-    production_dir, transcript_path_for, unit_plan_dir,
+    production_dir, unit_plan_dir,
 )
 from app.production.summary_video import (
     NarratedSummaryArtifact, _atomic_write_json, load_narrated_summary,
@@ -247,7 +247,10 @@ def _promote(production_id, unit_id, *, root, projects_root):
     source = next((item for item in production.source_assets or [] if item.asset_id == narration.source_asset_id), None)
     if source is None:
         raise SummaryHandoffError("SOURCE_NOT_FOUND", "The summary's canonical source asset is missing.", 404)
-    transcript = SourceTranscript.model_validate(_read(transcript_path_for(production_id, source.asset_id, root=root)))
+    from app.transcription.transcribe import load_transcript
+    sandbox_transcript = narration.source_transcript_path == f"source/{source.asset_id}.sandbox.transcript.json"
+    transcript = load_transcript(production_id, source.asset_id, root=root,
+                                 mock_mode=sandbox_transcript or summary.validation.get("mock_mode") is True)
     validate_narration_artifact(narration, source_asset=source, source_transcript=transcript)
     validate_grounded_visual_refs(narration, source, source_transcript=transcript)
     # Stable, compact directory identity also fits Windows staging paths. Full
@@ -304,9 +307,14 @@ def _promote(production_id, unit_id, *, root, projects_root):
         manifest.final_video_path = str(package / "narrated_summary.mp4")
         manifest.assembly_config = {"resolution_width": info.width, "resolution_height": info.height,
                                     "enable_captions": False, "audio_policy": "narration_only", "handoff_kind": "narrated_summary"}
+        synthetic = summary.validation.get("mock_mode") is True
+        if synthetic:
+            manifest.assembly_config["summary_mock_mode"] = True
         manifest.stages = {
             "voice": StageResult.skipped(PipelineStage.VOICE, "Engine voice generation not run; Track 9 narration is baked into the accepted summary."),
-            "scenes": StageResult.skipped(PipelineStage.SCENES, "Engine scene generation not run; Track 9 assembled grounded source excerpts."),
+            "scenes": StageResult.skipped(PipelineStage.SCENES,
+                "Engine scene generation not run; Track 9 assembled explicitly synthetic sandbox visuals." if synthetic
+                else "Engine scene generation not run; Track 9 assembled grounded source excerpts."),
         }
         _atomic_write_json(staging / "manifest.json", manifest.to_dict())
         report = reconcile_project(project_id, staging, persist=False)

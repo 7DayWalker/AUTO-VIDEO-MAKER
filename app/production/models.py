@@ -614,6 +614,9 @@ class NarrationArtifact(BaseModel):
     transcript_refs: List[str] = Field(default_factory=list)
     generated_at: str = Field(min_length=1)
     revised_at: Optional[str] = None
+    # Exact sidecar used for grounding; sandbox and real STT never race for it.
+    # Optional so accepted legacy Track 9 artifacts retain their old identity.
+    source_transcript_path: Optional[str] = None
     audio_artifact_path: Optional[str] = Field(default=None, min_length=1)
     audio_duration_seconds: Optional[float] = Field(default=None, gt=0.0)
     audio_provider: Optional[str] = None
@@ -623,6 +626,11 @@ class NarrationArtifact(BaseModel):
 
     @model_validator(mode="after")
     def _validate_artifact(self) -> "NarrationArtifact":
+        if self.source_transcript_path is not None and self.source_transcript_path not in {
+            f"source/{self.source_asset_id}.transcript.json",
+            f"source/{self.source_asset_id}.sandbox.transcript.json",
+        }:
+            raise ValueError("source_transcript_path must name this source asset's canonical or sandbox sidecar")
         if self.status not in {"draft", "grounded", "approved", "rejected"}:
             raise ValueError("status must be one of: draft, grounded, approved, rejected")
         if self.audio_status is not None and self.audio_status not in {"pending", "completed", "failed"}:

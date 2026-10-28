@@ -23,6 +23,10 @@ class MockProvider:
     provider = "mock"
     provider_version = "mock-v1"
     def transcribe(self, media_path: Path, duration: float) -> TranscriptionResult:
+        from app.production.sandbox import sandbox_duration
+
+        # Metadata-only fast path. Never decode media, extract WAV, or load STT.
+        duration = sandbox_duration(duration)
         n = 2 if duration >= 2 else 1
         segs = []
         for i in range(n):
@@ -30,7 +34,7 @@ class MockProvider:
             end = (duration / n) * (i + 1)
             if i < n - 1:
                 end = round(end - 0.05, 3)
-            segs.append({"text": f"mock segment {i+1}", "start": round(start, 3), "end": round(end, 3)})
+            segs.append({"text": f"mock segment {i+1}", "start": start, "end": end})
         return TranscriptionResult(language="en", segments=segs, provider=self.provider, provider_version=self.provider_version)
 class LocalWhisperProvider:
     provider = "local_whisper"

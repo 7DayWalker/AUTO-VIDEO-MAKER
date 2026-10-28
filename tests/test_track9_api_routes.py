@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, threading, urllib.request, urllib.error
 import io
+import time
 from pathlib import Path
 import pytest
 from app.assembly.video import create_test_video
@@ -316,6 +317,9 @@ def test_empty_real_source_intake_does_not_create_fixture(monkeypatch, tmp_path)
 def test_sandbox_source_registration_is_explicit_canonical_and_zero_typing(monkeypatch, tmp_path):
     from app.orchestrator.production_execution import ProductionExecutor
     from app.production.storage import load_production
+    import mimetypes
+
+    monkeypatch.setattr(mimetypes, "init", lambda *args, **kwargs: pytest.fail("Sandbox intake must not scan the workstation MIME registry."))
 
     base, httpd, _ = _server(monkeypatch, tmp_path)
     try:
@@ -327,28 +331,221 @@ def test_sandbox_source_registration_is_explicit_canonical_and_zero_typing(monke
         pid = creation["production_id"]
         executor = ProductionExecutor(pid, productions_root=tmp_path / "productions", projects_root=tmp_path / "projects")
         monkeypatch.setattr(web, "_production_executor", lambda id: executor)
+        started = time.perf_counter()
         status, registered, _ = _post(base, f"/api/productions/{pid}/source", {"mock_mode": True})
+        timings = {"source": time.perf_counter() - started}
+        assert timings["source"] < 1.0, timings
         assert status == 201 and registered["sandbox_fixture"] is True, registered
         source = registered["source_asset"]
         assert source["source_kind"] == "sandbox_fixture" and source["original_filename"] == "sandbox-summary-fixture.mp4"
         media = tmp_path / "productions" / pid / source["stored_path"]
         assert media.is_file() and media.stat().st_size > 0
+        assert source["duration"] <= 4.0
         assert load_production(pid, root=tmp_path / "productions").source_assets[0].source_kind == "sandbox_fixture"
         assert not list(media.parent.glob(".sandbox-*"))
+        from app.production.storage import compute_content_hash
+        assert compute_content_hash(media) == source["sha256"]
         for route, body in [
             (f"/source/{source['asset_id']}/transcript", {"provider": "mock", "mock_mode": True}),
             ("/units/unit-001/narration", {"mock_mode": True, "asset_id": source["asset_id"]}),
             ("/units/unit-001/narration/synthesize", {"mock_mode": True}),
-            ("/units/unit-001/summary-video", {}),
-            ("/units/unit-001/summary-video/promote", {}),
+            ("/units/unit-001/summary-video", {"mock_mode": True}),
+            ("/units/unit-001/summary-video/promote", {"mock_mode": True}),
         ]:
+            started = time.perf_counter()
             status, payload, _ = _post(base, f"/api/productions/{pid}" + route, body)
+            timings[route] = time.perf_counter() - started
             assert status in {200, 201}, (route, payload)
+            assert timings[route] < 1.0, timings
+        print("Sandbox step timings: " + json.dumps(timings, sort_keys=True))
         assert executor.derive_progress().complete
         manifest = next(executor.projects_root.glob("*/manifest.json"))
         accepted = json.loads(manifest.read_text(encoding="utf-8"))
         assert accepted["source_summary_handoff"]
+        assert accepted["assembly_config"]["summary_mock_mode"] is True
         assert accepted["publication"] is None and accepted["tiktok_publication"] is None
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def _long_source_with_real_transcript(tmp_path):
+    from app.production.models import SourceAsset, SourceTranscript, TranscriptSegment
+    from app.production.storage import save_revision, transcript_path_for
+
+    production = _make_prod(tmp_path)
+    media = tmp_path / "productions" / PID / "source" / "src-001.mp4"
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"Long source must never be opened or decoded in sandbox tests.")
+    source = SourceAsset(asset_id=AID, original_filename="30-minute-movie.mp4", stored_path="source/src-001.mp4",
+                         sha256="a" * 64, duration=1800.0, width=3840, height=2160,
+                         ingested_at="2026-10-26T00:00:00", source_kind="local_file")
+    save_revision(production.model_copy(update={"plan_version": production.plan_version + 1, "source_assets": [source]}),
+                  root=tmp_path / "productions")
+    transcript = SourceTranscript(asset_id=AID, provider="local_whisper", provider_version="real-fixture",
+                                  language="en", created_at="2026-10-26T00:00:00",
+                                  transcript_path="source/src-001.transcript.json",
+                                  segments=[TranscriptSegment(text="Existing real transcript must be preserved.", start=0, end=1800)])
+    canonical = transcript_path_for(PID, AID, root=tmp_path / "productions")
+    canonical.write_text(transcript.model_dump_json(), encoding="utf-8")
+    return source, canonical, canonical.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("body", [{"mock_mode": True}, {"provider": "mock"}, {"mock_mode": True, "provider": "local_whisper"}])
+@pytest.mark.parametrize("route", ["/transcribe", f"/source/{AID}/transcript"])
+def test_mock_transcription_is_instant_for_long_source_and_preserves_real_transcript(monkeypatch, tmp_path, body, route):
+    from app.transcription.providers import LocalWhisperProvider
+    from app.transcription.transcribe import load_transcript
+    import app.assembly.ffmpeg as ffmpeg
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _, canonical, before = _long_source_with_real_transcript(tmp_path)
+        def forbidden(*args, **kwargs):
+            pytest.fail("Sandbox transcription must not load Whisper, run FFmpeg, or probe the full movie.")
+        monkeypatch.setattr(LocalWhisperProvider, "transcribe", forbidden)
+        monkeypatch.setattr(ffmpeg, "run_ffmpeg", forbidden)
+        monkeypatch.setattr(ffmpeg, "probe_media", forbidden)
+        started = time.perf_counter()
+        status, payload, _ = _post(base, f"/api/productions/{PID}" + route, body)
+        assert status == 201, payload
+        assert time.perf_counter() - started < 1.0
+        assert payload["provider"] == "mock" and payload["mock_mode"] is True
+        assert max(segment["end"] for segment in payload["segments"]) <= 4.0
+        assert canonical.read_text(encoding="utf-8") == before
+        assert load_transcript(PID, AID, root=tmp_path / "productions").provider == "local_whisper"
+        assert load_transcript(PID, AID, root=tmp_path / "productions", mock_mode=True).provider == "mock"
+        assert payload["transcript_path"] != "source/src-001.transcript.json"
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_mock_transcription_does_not_wait_for_an_active_real_transcriber(monkeypatch, tmp_path):
+    from app.transcription.providers import LocalWhisperProvider, TranscriptionResult
+    from app.transcription.transcribe import transcribe_source
+
+    _, canonical, before = _long_source_with_real_transcript(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    result = []
+    def slow_real(self, media_path, duration):
+        entered.set()
+        assert release.wait(5), "test did not release its real transcription fixture"
+        return TranscriptionResult("en", [{"text": "Finished real transcript", "start": 0, "end": duration}], "local_whisper", "real-fixture")
+    monkeypatch.setattr(LocalWhisperProvider, "transcribe", slow_real)
+    worker = threading.Thread(target=lambda: result.append(transcribe_source(PID, AID, root=tmp_path / "productions", provider="local_whisper")))
+    worker.start()
+    try:
+        assert entered.wait(2)
+        started = time.perf_counter()
+        status, payload = transcribe_source(PID, AID, root=tmp_path / "productions", mock_mode=True)
+        assert time.perf_counter() - started < 0.2
+        assert status == 201 and payload["provider"] == "mock"
+        assert worker.is_alive() and not release.is_set()
+        assert canonical.read_text(encoding="utf-8") == before
+    finally:
+        release.set(); worker.join(timeout=5)
+    assert not worker.is_alive() and result[0][0] == 201
+    assert "Finished real transcript" in canonical.read_text(encoding="utf-8")
+
+
+def test_real_transcription_remains_real_after_a_sandbox_transcript_exists(monkeypatch, tmp_path):
+    from app.transcription.providers import LocalWhisperProvider, TranscriptionResult
+    from app.transcription.transcribe import load_transcript
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _long_source_with_real_transcript(tmp_path)
+        status, _, _ = _post(base, f"/api/productions/{PID}/transcribe", {"mock_mode": True})
+        assert status == 201
+        calls = []
+        def real(self, media_path, duration):
+            calls.append((media_path.name, duration))
+            return TranscriptionResult("en", [{"text": "New real transcript", "start": 0, "end": duration}], "local_whisper", "fixture")
+        monkeypatch.setattr(LocalWhisperProvider, "transcribe", real)
+        status, payload, _ = _post(base, f"/api/productions/{PID}/transcribe", {})
+        assert status == 201 and payload["provider"] == "local_whisper" and payload["mock_mode"] is False
+        assert calls == [("src-001.mp4", 1800.0)]
+        assert load_transcript(PID, AID, root=tmp_path / "productions").segments[0].text == "New real transcript"
+        assert load_transcript(PID, AID, root=tmp_path / "productions", mock_mode=True).provider == "mock"
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_failed_sandbox_media_generation_never_registers_a_false_source(monkeypatch, tmp_path):
+    from app.production import sandbox
+    from app.production.storage import load_production
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        def fail(output_path):
+            raise RuntimeError("ffmpeg sandbox fixture failure")
+        monkeypatch.setattr(sandbox, "create_sandbox_source", fail)
+        status, payload, _ = _post(base, f"/api/productions/{PID}/source", {"mock_mode": True})
+        assert status == 503 and payload["error"] == "SANDBOX_FIXTURE_UNAVAILABLE"
+        assert not load_production(PID, root=tmp_path / "productions").source_assets
+        assert not list((tmp_path / "productions" / PID / "source").glob(".sandbox-*"))
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("summary_mode", ["standard", "pro"])
+def test_sandbox_long_source_pipeline_never_decodes_movie_and_passes_canonical_promotion(monkeypatch, tmp_path, summary_mode):
+    from app.orchestrator.production_execution import ProductionExecutor
+    from app.transcription.providers import LocalWhisperProvider
+    from app.assembly import pipeline
+    from app.production import summary_video
+    from app.production import narration
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _, canonical, before = _long_source_with_real_transcript(tmp_path)
+        executor = ProductionExecutor(PID, productions_root=tmp_path / "productions", projects_root=tmp_path / "projects")
+        monkeypatch.setattr(web, "_production_executor", lambda pid: executor)
+        def forbidden(*args, **kwargs):
+            pytest.fail("Sandbox must not call Whisper, decode source clips, or enter the full real assembly pipeline.")
+        monkeypatch.setattr(LocalWhisperProvider, "transcribe", forbidden)
+        monkeypatch.setattr(pipeline, "assemble_project", forbidden)
+        monkeypatch.setattr(summary_video, "_build_intermediate_clips", forbidden)
+        monkeypatch.setattr(narration, "get_provider", forbidden)
+        timings = {}
+        for route, body in [
+            ("/transcribe", {"mock_mode": True}),
+            (f"/units/{UID}/narration", {"mock_mode": True, "asset_id": AID, "summary_mode": summary_mode}),
+            (f"/units/{UID}/narration/synthesize", {"mock_mode": True}),
+            (f"/units/{UID}/summary-video", {"mock_mode": True}),
+            (f"/units/{UID}/summary-video/promote", {"mock_mode": True}),
+        ]:
+            started = time.perf_counter()
+            status, payload, _ = _post(base, f"/api/productions/{PID}" + route, body)
+            timings[route] = time.perf_counter() - started
+            assert status in {200, 201}, (route, payload)
+            assert timings[route] < 1.0, timings
+            if route.endswith("/summary-video"):
+                assert payload["validation"]["mock_mode"] is True
+                assert payload["validation"]["synthetic_visuals"] is True
+                assert payload["output_duration_seconds"] <= 4.2
+            if route.endswith("/narration"):
+                assert payload["source_transcript_path"] == f"source/{AID}.sandbox.transcript.json"
+            if route.endswith("/narration/synthesize"):
+                assert payload["audio"]["provider"] == "mock"
+                assert payload["audio"]["voice"] == "sandbox-tone"
+        assert executor.derive_progress().complete
+        assert canonical.read_text(encoding="utf-8") == before
+        print("Long-source sandbox timings: " + json.dumps(timings, sort_keys=True))
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("route", ["/source", "/transcribe", f"/source/{AID}/transcript",
+                                  f"/units/{UID}/narration", f"/units/{UID}/narration/synthesize",
+                                  f"/units/{UID}/summary-video", f"/units/{UID}/summary-video/promote"])
+@pytest.mark.parametrize("value", ["true", 1])
+def test_mock_flags_require_json_booleans_before_any_provider_or_media_work(monkeypatch, tmp_path, route, value):
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        status, payload, _ = _post(base, f"/api/productions/{PID}" + route, {"mock_mode": value})
+        assert status == 400 and payload["error"] == "INVALID_REQUEST", payload
     finally:
         httpd.shutdown(); httpd.server_close()
 

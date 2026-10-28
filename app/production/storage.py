@@ -196,6 +196,11 @@ def transcript_path_for(production_id: str, asset_id: str, root: Optional[Path] 
     return production_source_dir(production_id, root) / f"{asset_id}.transcript.json"
 
 
+def sandbox_transcript_path_for(production_id: str, asset_id: str, root: Optional[Path] = None) -> Path:
+    """Sandbox never waits for or overwrites a real transcript on the same asset."""
+    return production_source_dir(production_id, root) / f"{asset_id}.sandbox.transcript.json"
+
+
 def segments_path_for(production_id: str, asset_id: str, root: Optional[Path] = None) -> Path:
     return production_source_dir(production_id, root) / f"{asset_id}.segments.json"
 

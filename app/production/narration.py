@@ -346,6 +346,9 @@ def validate_narration_artifact(
     source_asset: Optional[SourceAsset] = None,
     source_transcript: Optional[SourceTranscript] = None,
 ) -> None:
+    if (source_transcript is not None and artifact.source_transcript_path is not None
+            and artifact.source_transcript_path != source_transcript.transcript_path):
+        raise ValueError("narration source transcript provenance does not match its grounding sidecar")
     if source_asset is not None and artifact.source_asset_id != source_asset.asset_id:
         raise ValueError("artifact source_asset_id does not match the supplied source_asset")
     if artifact.target_duration_seconds <= 0:
@@ -426,8 +429,11 @@ def synthesize_narration_audio(
     pitch: str = TTS_PITCH,
     volume: str = TTS_VOLUME,
     output_format: str = TTS_OUTPUT_FORMAT,
+    mock_mode: bool = False,
 ) -> NarrationAudioArtifact:
-    """Generate and validate real narration audio using the repo's canonical TTS authority."""
+    """Validate canonical TTS audio, or an explicitly requested bounded sandbox tone."""
+    if not isinstance(mock_mode, bool):
+        raise ValueError("mock_mode must be a boolean")
     validate_narration_artifact(artifact)
     if not artifact.narration_text.strip():
         raise ValueError("narration_text must not be empty")
@@ -447,17 +453,24 @@ def synthesize_narration_audio(
     relative_path = output_path.relative_to(relative_root).as_posix()
 
     try:
-        provider = _resolve_narration_provider(provider_name)
-        asyncio.run(
-            provider.generate(
-                text=artifact.narration_text,
-                output_path=output_path,
-                voice=chosen_voice,
-                rate=rate,
-                pitch=pitch,
-                volume=volume,
+        if mock_mode or (provider_name or "").strip().lower() == "mock":
+            from app.production.sandbox import create_sandbox_audio, sandbox_duration
+            create_sandbox_audio(output_path, sandbox_duration(artifact.target_duration_seconds))
+            chosen_voice = "sandbox-tone" if mock_mode else voice or "sandbox-tone"
+            provider_id = "mock"
+        else:
+            provider = _resolve_narration_provider(provider_name)
+            asyncio.run(
+                provider.generate(
+                    text=artifact.narration_text,
+                    output_path=output_path,
+                    voice=chosen_voice,
+                    rate=rate,
+                    pitch=pitch,
+                    volume=volume,
+                )
             )
-        )
+            provider_id = provider.name
         validation = validate_audio_file(output_path)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors) or "audio validation failed")
@@ -467,7 +480,7 @@ def synthesize_narration_audio(
             production_id=production_id,
             unit_id=unit_id,
             audio_path=relative_path,
-            provider=provider.name,
+            provider=provider_id,
             voice=chosen_voice,
             format=(output_format or TTS_OUTPUT_FORMAT).lower(),
             duration_seconds=float(validation.duration or 0.0),

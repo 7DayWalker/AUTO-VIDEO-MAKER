@@ -85,12 +85,15 @@ def narration_content_hash(artifact: NarrationArtifact) -> str:
     A newly selected/synthesized voice must not be attributed to an older MP4
     that still contains the previous voice. Reassembly establishes that link.
     """
-    content = artifact.model_dump(mode="json", include={
+    fields = {
         "production_id", "unit_id", "narration_id", "source_asset_id",
         "narration_text", "summary", "beats", "source_refs", "transcript_refs",
         "audio_artifact_path", "audio_duration_seconds", "audio_provider",
         "audio_voice", "audio_format", "audio_status",
-    })
+    }
+    if artifact.source_transcript_path is not None:
+        fields.add("source_transcript_path")
+    content = artifact.model_dump(mode="json", include=fields)
     return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -194,7 +197,50 @@ def _measure_narration_audio_duration(narration_audio: NarrationAudioArtifact, a
     raise ValueError("narration audio artifact has no resolvable audio_path")
 
 
-def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_artifact=None, narration_audio=None, source_asset_override=None):
+def _assemble_sandbox_summary(production_id, unit_id, root, narration, audio, source_asset):
+    from app.production.narration import validate_narration_artifact
+    from app.production.sandbox import create_sandbox_summary, sandbox_duration
+    from app.transcription.transcribe import load_transcript
+
+    transcript = load_transcript(production_id, source_asset.asset_id, root=root, mock_mode=True)
+    validate_narration_artifact(narration, source_asset=source_asset, source_transcript=transcript)
+    validate_grounded_visual_refs(narration, source_asset, transcript)
+    if not _resolve_source_path(source_asset, root, production_id).is_file():
+        raise FileNotFoundError("The registered sandbox source file is missing")
+    if audio.provider != "mock" or audio.status != "completed":
+        raise ValueError("Synthesize sandbox narration audio before sandbox assembly")
+    audio_path = production_dir(production_id, root=root) / audio.audio_path
+    audio_info = probe_media(audio_path)
+    if not audio_info.has_audio or not audio_info.duration or audio_info.duration <= 0:
+        raise ValueError("sandbox narration audio failed its media validation")
+    duration = sandbox_duration(min(audio_info.duration, narration.target_duration_seconds))
+    final = summary_video_output_path(production_id, unit_id, root=root)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".sandbox-summary-", dir=final.parent) as scratch:
+        temporary = Path(scratch) / "narrated_summary.mp4"
+        create_sandbox_summary(temporary, audio_path, duration)
+        info = probe_media(temporary)
+        if not info.has_video or not info.has_audio or not info.duration or info.duration <= 0:
+            raise ValueError("sandbox summary failed its fresh video/audio validation")
+        os.replace(temporary, final)
+    artifact = NarratedSummaryArtifact(
+        production_id=production_id, unit_id=unit_id, source_asset_id=source_asset.asset_id,
+        narration_id=narration.narration_id, narration_audio_path=audio.audio_path,
+        source_refs_count=len(_ordered_visual_refs(narration)), output_path=final.relative_to(production_dir(production_id, root=root)).as_posix(),
+        output_duration_seconds=info.duration, video_width=info.width, video_height=info.height,
+        video_codec=info.video_codec, audio_codec=info.audio_codec, source_duration_seconds=source_asset.duration,
+        target_duration_seconds=narration.target_duration_seconds, narration_duration_seconds=audio_info.duration,
+        file_size=final.stat().st_size, generated_at=datetime.now().isoformat(),
+        validation={"has_video": True, "has_audio": True, "valid": True, "mock_mode": True, "synthetic_visuals": True},
+        file_fingerprint=compute_content_hash(final), narration_content_hash=narration_content_hash(narration),
+    )
+    _atomic_write_json(summary_video_metadata_path(production_id, unit_id, root=root), artifact.model_dump())
+    return artifact
+
+
+def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_artifact=None, narration_audio=None, source_asset_override=None, mock_mode=False):
+    if not isinstance(mock_mode, bool):
+        raise ValueError("mock_mode must be a boolean")
     from app.production.storage import load_production, production_dir
     from app.production.narration import validate_narration_artifact
     import json, shutil, tempfile, pathlib
@@ -220,13 +266,21 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
                 source_asset=a; break
     if source_asset is None:
         raise FileNotFoundError(f'source asset {narration_artifact.source_asset_id!r} not present')
+    if mock_mode:
+        return _assemble_sandbox_summary(production_id, unit_id, root_p, narration_artifact, narration_audio, source_asset)
     transcription=None
-    tp=production_dir(production_id, root=root_p) / f'source/{source_asset.asset_id}.transcript.json'
+    transcript_rel = narration_artifact.source_transcript_path or f'source/{source_asset.asset_id}.transcript.json'
+    tp=production_dir(production_id, root=root_p) / transcript_rel
+    if narration_artifact.source_transcript_path is not None and not tp.is_file():
+        raise FileNotFoundError('The transcript used to ground this narration is missing; transcribe and rebuild narration first')
     if tp.is_file():
         try:
             from app.production.models import SourceTranscript
             transcription=SourceTranscript.model_validate(json.loads(tp.read_text(encoding='utf-8')))
-        except Exception: transcription=None
+        except Exception:
+            if narration_artifact.source_transcript_path is not None:
+                raise ValueError('The transcript used to ground this narration is invalid')
+            transcription=None
     segments=None
     sp=production_dir(production_id, root=root_p) / f'source/{source_asset.asset_id}.segments.json'
     if sp.is_file():

@@ -4281,7 +4281,47 @@ def narration_get_payload(production_id: str, unit_id: str):
     return 200, artifact.model_dump()
 
 
+def _track9_mock_mode(body: dict) -> bool:
+    if not isinstance(body, dict):
+        raise ValueError("Track 9 commands require a JSON object")
+    value = body.get("mock_mode", False)
+    if not isinstance(value, bool):
+        raise ValueError("mock_mode must be a JSON boolean")
+    return value
+
+
+def transcribe_payload(production_id: str, body: dict, asset_id=None):
+    """Both transcript routes share explicit, validated sandbox admission."""
+    try:
+        mock_mode = _track9_mock_mode(body)
+    except ValueError as exc:
+        return 400, {"error": "INVALID_REQUEST", "message": str(exc)}
+    provider = body.get("provider")
+    if provider is not None and (not isinstance(provider, str) or "\x00" in provider):
+        return 400, {"error": "INVALID_REQUEST", "message": "provider must be text without null bytes"}
+    if asset_id is None:
+        asset_id = body.get("asset_id")
+        if asset_id is None:
+            try:
+                from app.production.storage import load_production
+                production = load_production(production_id, root=PRODUCTIONS_DIR)
+            except FileNotFoundError:
+                return 404, {"error": "PRODUCTION_NOT_FOUND", "message": "Select a valid production first."}
+            except Exception as exc:
+                return 500, {"error": "LOAD_FAILED", "message": _browser_safe_diagnostic(exc)}
+            assets = list(production.source_assets or [])
+            if not assets:
+                return 404, {"error": "SOURCE_NOT_FOUND", "message": "Register a source first."}
+            asset_id = assets[-1].asset_id
+    from app.transcription.transcribe import transcribe_source
+    return transcribe_source(production_id, asset_id, root=PRODUCTIONS_DIR, provider=provider, mock_mode=mock_mode)
+
+
 def narration_build_payload(production_id: str, unit_id: str, body: dict):
+    try:
+        mock_mode = _track9_mock_mode(body)
+    except ValueError as exc:
+        return 400, {"error": "INVALID_REQUEST", "message": str(exc)}
     prod, err = _track9_check_unit(production_id, unit_id)
     if err:
         return err
@@ -4309,7 +4349,6 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
             return 400, {"error": "INVALID_REQUEST", "message": "model id must be text"}
     if sel in ("explicit", "manual") and not explicit:
         return 400, {"error": "INVALID_REQUEST", "message": "explicit selection_mode requires a model id"}
-    mock_mode = bool(body.get("mock_mode"))
     raw_dur = body.get("target_duration_seconds")
     tds = None
     if raw_dur is not None:
@@ -4344,7 +4383,7 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         tds = min(30.0, float(sa.duration) * 0.6) if float(sa.duration) > 0 else 30.0
     try:
         from app.transcription.transcribe import load_transcript as _lt
-        tr = _lt(production_id, sa.asset_id, root=PRODUCTIONS_DIR)
+        tr = _lt(production_id, sa.asset_id, root=PRODUCTIONS_DIR, mock_mode=mock_mode)
     except FileNotFoundError:
         return 404, {"error": "TRANSCRIPT_NOT_FOUND", "production_id": production_id, "asset_id": sa.asset_id, "message": "Transcribe the source first."}
     except Exception as exc:
@@ -4360,6 +4399,7 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
     try:
         from app.production.narration import build_grounded_narration_plan
         art = build_grounded_narration_plan(production_id, unit_id, sa, tr, target_duration_seconds=float(tds), canonical_model_id=explicit, summary_understanding_model_id=explicit, summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR)
+        art.source_transcript_path = tr.transcript_path
         from app.production.storage import save_narration_artifact
         save_narration_artifact(art, production_id=production_id, unit_id=unit_id, root=PRODUCTIONS_DIR, source_asset=sa, source_transcript=tr)
     except FileNotFoundError as exc:
@@ -4381,8 +4421,10 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
 
 
 def narration_synthesize_payload(production_id: str, unit_id: str, body: dict):
-    if not isinstance(body, dict):
-        body={}
+    try:
+        mock_mode = _track9_mock_mode(body)
+    except ValueError as exc:
+        return 400, {"error": "INVALID_REQUEST", "message": str(exc)}
     _, err=_track9_check_unit(production_id, unit_id)
     if err:
         return err
@@ -4412,11 +4454,11 @@ def narration_synthesize_payload(production_id: str, unit_id: str, body: dict):
             return 400, {"error": "INVALID_REQUEST", "message": "format must be mp3 or wav"}
     else:
         fmt="mp3"
-    if bool(body.get("mock_mode")) and not pn:
+    if mock_mode:
         pn="mock"
     try:
         from app.production.narration import synthesize_narration_audio
-        meta=synthesize_narration_audio(art, root=PRODUCTIONS_DIR, provider_name=pn, voice=voice, output_format=fmt)
+        meta=synthesize_narration_audio(art, root=PRODUCTIONS_DIR, provider_name=pn, voice=voice, output_format=fmt, mock_mode=mock_mode)
     except Exception as exc:
         from app.voice.exceptions import VoiceProviderError
         if isinstance(exc, VoiceProviderError):
@@ -4476,11 +4518,15 @@ def _summary_video_status(production_id, unit_id, *, bound=None, inspect_binding
 
 
 def summary_video_promote_payload(production_id: str, unit_id: str, body=None):
+    try:
+        _track9_mock_mode(body if body is not None else {})
+    except ValueError as exc:
+        return 400, {"error": "INVALID_REQUEST", "message": str(exc)}
+    if body is not None and set(body) - {"mock_mode"}:
+        return 400, {"error": "INVALID_REQUEST", "message": "Summary promotion accepts only mock_mode; never project retargeting or upload options."}
     _, err = _track9_check_unit(production_id, unit_id)
     if err:
         return err
-    if body is not None and (not isinstance(body, dict) or body):
-        return 400, {"error": "INVALID_REQUEST", "message": "Summary promotion takes an empty JSON object; it never accepts project retargeting or upload options."}
     if not _publish_lock.acquire(blocking=False):
         return 409, {"error": "PUBLISH_ALREADY_RUNNING", "message": "A publishing operation is active. Inspect its durable outcome before promoting another master."}
     try:
@@ -4517,6 +4563,10 @@ def summary_video_promote_payload(production_id: str, unit_id: str, body=None):
 
 
 def summary_video_build_payload(production_id: str, unit_id: str, body: dict):
+    try:
+        mock_mode = _track9_mock_mode(body)
+    except ValueError as exc:
+        return 400, {"error": "INVALID_REQUEST", "message": str(exc)}
     if not isinstance(body, dict) or not isinstance(body.get("promote_to_publishable", False), bool):
         return 400, {"error": "INVALID_REQUEST", "message": "promote_to_publishable must be a JSON boolean (default false)."}
     _, err=_track9_check_unit(production_id, unit_id)
@@ -4538,7 +4588,7 @@ def summary_video_build_payload(production_id: str, unit_id: str, body: dict):
         narr_audio=None
     try:
         from app.production.summary_video import assemble_narrated_summary
-        sv=assemble_narrated_summary(production_id, unit_id, root=PRODUCTIONS_DIR, narration_artifact=narr, narration_audio=narr_audio)
+        sv=assemble_narrated_summary(production_id, unit_id, root=PRODUCTIONS_DIR, narration_artifact=narr, narration_audio=narr_audio, mock_mode=mock_mode)
     except FileNotFoundError as exc:
         return 404, {"error": "SOURCE_NOT_FOUND", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
     except ValueError as exc:
@@ -4787,7 +4837,8 @@ class AVMHandler(BaseHTTPRequestHandler):
             return self._json(status, payload)
         # Track 8 V1 transcript
         m2 = re.match(r"^/api/productions/([^/]+)/source/([^/]+)/transcript/?$", path)
-        if m2:
+        transcribe = re.match(r"^/api/productions/([^/]+)/transcribe/?$", path)
+        if m2 or transcribe:
             length = int(self.headers.get("Content-Length", "0") or 0)
             if length > 64 * 1024:
                 return self._json(413, {"error": "PAYLOAD_TOO_LARGE"})
@@ -4796,12 +4847,7 @@ class AVMHandler(BaseHTTPRequestHandler):
                 body = json.loads(raw.decode("utf-8") or "{}") if raw.strip() else {}
             except Exception:
                 return self._json(400, {"error": "INVALID_JSON"})
-            from app.transcription.transcribe import transcribe_source
-            # Truthfulness: omitted provider -> production default (local_whisper),
-            # NOT silent mock.  Mock requires explicit provider="mock".
-            raw_prov = body.get("provider")
-            prov = str(raw_prov).strip() if isinstance(raw_prov, str) and raw_prov.strip() else None
-            status, payload = transcribe_source(m2.group(1), m2.group(2), root=PRODUCTIONS_DIR, provider=prov)
+            status, payload = transcribe_payload((m2 or transcribe).group(1), body, m2.group(2) if m2 else None)
             return self._json(status, payload)
         # Track 9: narration + summary-video POST routes
         m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/narration/synthesize/?$", path)

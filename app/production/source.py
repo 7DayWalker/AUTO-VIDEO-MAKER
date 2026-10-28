@@ -1,12 +1,13 @@
 """Track 8 V1: source media ingestion local-first."""
 from __future__ import annotations
-import hashlib, mimetypes, shutil, os, re, tempfile
+import hashlib, shutil, os, re, tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from app.production.models import Production, SourceAsset
 from app.production.storage import load_production, production_source_dir, production_source_meta
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm"}
+VIDEO_MIME_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".mkv": "video/x-matroska", ".webm": "video/webm"}
 MAX_SOURCE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -74,11 +75,11 @@ def register_source(production_id: str, source_path: str = "", *, root: Optional
     source_dir = production_source_dir(production_id, root=root)
     source_dir.mkdir(parents=True, exist_ok=True)
     try:
-        from app.assembly.video import create_test_video
+        from app.production.sandbox import create_sandbox_source
 
         with tempfile.TemporaryDirectory(prefix=".sandbox-", dir=source_dir) as scratch:
             fixture = Path(scratch) / "sandbox-summary-fixture.mp4"
-            create_test_video(fixture, duration=12, width=640, height=360, fps=24, color="purple")
+            create_sandbox_source(fixture)
             status, payload = _register_local_source(production_id, str(fixture), root=root, source_kind="sandbox_fixture")
             if status == 201:
                 payload.update({"mock_mode": True, "sandbox_fixture": True,
@@ -174,7 +175,9 @@ def _register_local_source(production_id: str, source_path: str, *, root: Option
             _atomic_copy(p, dst); sha = sha256_file(dst)
     except Exception:
         _atomic_copy(p, dst); sha = sha256_file(dst)
-    mime, _ = mimetypes.guess_type(p.name)
+    # Allowed formats have fixed MIME types. Windows mimetypes initialization
+    # scans the registry on the first request and can take multiple seconds.
+    mime = VIDEO_MIME_TYPES[ext]
     asset = SourceAsset(asset_id=asset_id, original_filename=original_filename or p.name, stored_path=rel_path, sha256=sha, duration=float(info.duration), width=info.width, height=info.height, video_codec=info.video_codec, audio_codec=info.audio_codec, mime=mime, file_size=dst.stat().st_size, ingested_at=datetime.now().isoformat(), source_kind=source_kind)
     from app.production.storage import save_revision
     revised = prod.model_copy(update={"plan_version": prod.plan_version+1, "revised_at": datetime.now().isoformat(), "source_assets": list(prod.source_assets or [])+[asset]})
