@@ -192,6 +192,14 @@ def production_source_meta(production_id: str, root: Optional[Path] = None) -> P
     return production_source_dir(production_id, root) / _SOURCE_META
 
 
+def sandbox_source_dir(production_id: str, root: Optional[Path] = None) -> Path:
+    return production_source_dir(production_id, root) / "sandbox"
+
+
+def sandbox_source_meta(production_id: str, root: Optional[Path] = None) -> Path:
+    return sandbox_source_dir(production_id, root) / "source.json"
+
+
 def transcript_path_for(production_id: str, asset_id: str, root: Optional[Path] = None) -> Path:
     return production_source_dir(production_id, root) / f"{asset_id}.transcript.json"
 

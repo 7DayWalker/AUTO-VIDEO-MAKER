@@ -244,7 +244,9 @@ def _promote(production_id, unit_id, *, root, projects_root):
             raise SummaryHandoffError("SUMMARY_HANDOFF_INVALID", "The accepted project evidence is missing or changed. Promotion will not overwrite it; inspect the bound project.", 422)
         return SummaryHandoffResult(bound.project_dir, bound.manifest, False)
 
-    source = next((item for item in production.source_assets or [] if item.asset_id == narration.source_asset_id), None)
+    from app.production.source import find_source_asset
+    source = find_source_asset(production, narration.source_asset_id, root=root, include_sandbox=True,
+                               stored_path=narration.source_media_path)
     if source is None:
         raise SummaryHandoffError("SOURCE_NOT_FOUND", "The summary's canonical source asset is missing.", 404)
     from app.transcription.transcribe import load_transcript

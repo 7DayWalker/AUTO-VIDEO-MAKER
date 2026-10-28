@@ -1632,7 +1632,8 @@ def _browser_safe_diagnostic(value) -> str | None:
     """Preserve useful error context without returning paths, URLs, or tokens."""
     if value is None:
         return None
-    text = str(value)
+    from app.transcription.diagnostics import media_error_reason
+    text = media_error_reason(value)
     text = _REMOTE_URL_IN_TEXT.sub("<remote-url-omitted>", text)
     text = _WINDOWS_PATH_IN_TEXT.sub("<absolute-path-omitted>", text)
     text = _UNC_PATH_IN_TEXT.sub("<absolute-path-omitted>", text)
@@ -4309,12 +4310,20 @@ def transcribe_payload(production_id: str, body: dict, asset_id=None):
                 return 404, {"error": "PRODUCTION_NOT_FOUND", "message": "Select a valid production first."}
             except Exception as exc:
                 return 500, {"error": "LOAD_FAILED", "message": _browser_safe_diagnostic(exc)}
-            assets = list(production.source_assets or [])
-            if not assets:
-                return 404, {"error": "SOURCE_NOT_FOUND", "message": "Register a source first."}
-            asset_id = assets[-1].asset_id
+            from app.production.source import select_source_asset
+            try:
+                selected = select_source_asset(production, root=PRODUCTIONS_DIR,
+                    mock_mode=mock_mode or (provider or "").strip().lower() == "mock")
+            except (ValueError, KeyError, OSError, RuntimeError) as exc:
+                return 500, {"error": "LOAD_FAILED", "message": _browser_safe_diagnostic(exc)}
+            if selected is None:
+                return 404, {"error": "SOURCE_NOT_FOUND", "message": "Register a real source or enable Mock / sandbox mode."}
+            asset_id = selected.asset_id
     from app.transcription.transcribe import transcribe_source
-    return transcribe_source(production_id, asset_id, root=PRODUCTIONS_DIR, provider=provider, mock_mode=mock_mode)
+    status, payload = transcribe_source(production_id, asset_id, root=PRODUCTIONS_DIR, provider=provider, mock_mode=mock_mode)
+    if status >= 400 and "message" in payload:
+        payload = {**payload, "message": _browser_safe_diagnostic(payload["message"])}
+    return status, payload
 
 
 def narration_build_payload(production_id: str, unit_id: str, body: dict):
@@ -4367,15 +4376,11 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         if not re.match(r"^src-\d{3}$", aid.strip()):
             return 400, {"error": "INVALID_REQUEST", "message": "asset_id must match src-NNN"}
         aid = aid.strip()
-    assets = list(prod.source_assets or [])
-    sa = None
-    if aid is not None:
-        sa = next((a for a in assets if a.asset_id == aid), None)
-        if sa is None:
-            return 404, {"error": "SOURCE_NOT_FOUND", "production_id": production_id, "asset_id": aid}
-    else:
-        if assets:
-            sa = assets[-1]
+    from app.production.source import select_source_asset
+    try:
+        sa = select_source_asset(prod, aid, root=PRODUCTIONS_DIR, mock_mode=mock_mode)
+    except (ValueError, KeyError, OSError, RuntimeError) as exc:
+        return 500, {"error": "LOAD_FAILED", "message": _browser_safe_diagnostic(exc)}
     if sa is None:
         return 404, {"error": "SOURCE_NOT_FOUND", "production_id": production_id, "message": "No source asset ingested; register a source first."}
     if tds is None:
@@ -4400,21 +4405,22 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         from app.production.narration import build_grounded_narration_plan
         art = build_grounded_narration_plan(production_id, unit_id, sa, tr, target_duration_seconds=float(tds), canonical_model_id=explicit, summary_understanding_model_id=explicit, summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR)
         art.source_transcript_path = tr.transcript_path
+        art.source_media_path = sa.stored_path
         from app.production.storage import save_narration_artifact
         save_narration_artifact(art, production_id=production_id, unit_id=unit_id, root=PRODUCTIONS_DIR, source_asset=sa, source_transcript=tr)
     except FileNotFoundError as exc:
         return 404, {"error": "SOURCE_NOT_FOUND", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
     except ValueError as exc:
-        msg=str(exc); lo=msg.lower()
+        msg=_browser_safe_diagnostic(exc); lo=msg.lower()
         if "unknown canonical" in lo or "unknown summary" in lo or "unknown selection_mode" in lo:
             return 400, {"error": "INVALID_REQUEST", "message": msg}
         if "not multimodal" in lo or "cannot satisfy" in lo:
             return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": msg}
         return 400, {"error": "INVALID_REQUEST", "message": msg}
     except KeyError as exc:
-        return 404, {"error": "MODEL_NOT_FOUND", "message": str(exc)}
+        return 404, {"error": "MODEL_NOT_FOUND", "message": _browser_safe_diagnostic(exc)}
     except RuntimeError as exc:
-        return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": str(exc)}
+        return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": _browser_safe_diagnostic(exc)}
     except Exception as exc:
         return 500, {"error": "NARRATION_BUILD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
     d=art.model_dump(); d["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return 201, d

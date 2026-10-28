@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
+from app.transcription.diagnostics import SOURCE_AUDIO_MISSING_MESSAGE, media_error_reason
 class TranscriptionResult:
     def __init__(self, language: Optional[str], segments: List[Dict], provider: str, provider_version: Optional[str]):
         self.language = language
@@ -40,6 +41,12 @@ class LocalWhisperProvider:
     provider = "local_whisper"
     provider_version = "whisper-base"
     def transcribe(self, media_path: Path, duration: float) -> TranscriptionResult:
+        # Reject silent real media before importing/loading a Whisper model.
+        # MockProvider never reaches this probe or an audio extraction process.
+        if media_path.is_file():
+            from app.assembly.ffmpeg import probe_media
+            if not probe_media(media_path).has_audio:
+                raise RuntimeError("SOURCE_AUDIO_MISSING: " + SOURCE_AUDIO_MISSING_MESSAGE)
         try:
             import whisper  # type: ignore
         except Exception as exc:
@@ -72,7 +79,7 @@ class LocalWhisperProvider:
             # Typically ffmpeg not on PATH for whisper.audio.load_audio
             raise RuntimeError(f"TRANSCRIPTION_FAILED: ffmpeg not found on PATH for Whisper audio decode ({exc})")
         except Exception as exc:
-            raise RuntimeError(f"TRANSCRIPTION_FAILED: {exc}")
+            raise RuntimeError("TRANSCRIPTION_FAILED: " + media_error_reason(exc)) from exc
         segs = []
         for s in result.get("segments", []) or []:
             text = (s.get("text") or "").strip()

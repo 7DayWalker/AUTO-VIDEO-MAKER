@@ -346,6 +346,9 @@ def validate_narration_artifact(
     source_asset: Optional[SourceAsset] = None,
     source_transcript: Optional[SourceTranscript] = None,
 ) -> None:
+    if (source_asset is not None and artifact.source_media_path is not None
+            and artifact.source_media_path != source_asset.stored_path):
+        raise ValueError("narration source media provenance does not match its registered asset")
     if (source_transcript is not None and artifact.source_transcript_path is not None
             and artifact.source_transcript_path != source_transcript.transcript_path):
         raise ValueError("narration source transcript provenance does not match its grounding sidecar")

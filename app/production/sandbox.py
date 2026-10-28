@@ -36,7 +36,9 @@ def create_sandbox_source(output_path: Path) -> None:
     _run([
         "-y", "-f", "lavfi", "-i",
         f"color=c=purple:s={SANDBOX_WIDTH}x{SANDBOX_HEIGHT}:r={SANDBOX_FPS}:d={SANDBOX_DURATION_SECONDS}",
-        "-an", "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast",
+        "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=16000:duration={SANDBOX_DURATION_SECONDS}",
+        "-map", "0:v:0", "-map", "1:a:0", "-t", str(SANDBOX_DURATION_SECONDS),
+        "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-c:a", "aac", "-ac", "1", "-ar", "16000",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path),
     ], "creating explicit bounded sandbox source")
 

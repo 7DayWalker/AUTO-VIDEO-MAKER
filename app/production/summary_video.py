@@ -93,6 +93,8 @@ def narration_content_hash(artifact: NarrationArtifact) -> str:
     }
     if artifact.source_transcript_path is not None:
         fields.add("source_transcript_path")
+    if artifact.source_media_path is not None:
+        fields.add("source_media_path")
     content = artifact.model_dump(mode="json", include=fields)
     return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
@@ -261,9 +263,9 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
     production=load_production(production_id, root=root_p)
     source_asset=source_asset_override
     if source_asset is None:
-        for a in (production.source_assets or []):
-            if a.asset_id==narration_artifact.source_asset_id:
-                source_asset=a; break
+        from app.production.source import find_source_asset
+        source_asset = find_source_asset(production, narration_artifact.source_asset_id, root=root_p,
+            include_sandbox=True, stored_path=narration_artifact.source_media_path)
     if source_asset is None:
         raise FileNotFoundError(f'source asset {narration_artifact.source_asset_id!r} not present')
     if mock_mode:

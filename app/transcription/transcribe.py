@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 from app.production.models import SourceTranscript, TranscriptSegment
 from app.production.storage import load_production, transcript_path_for, sandbox_transcript_path_for, source_artifact_path
 from app.transcription.providers import MockProvider, get_provider
+from app.transcription.diagnostics import SOURCE_AUDIO_MISSING_MESSAGE, media_error_reason
 def _atomic_write_json(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = None
@@ -39,9 +40,15 @@ def transcribe_source(production_id: str, asset_id: str, *, root: Optional[Path]
         return 404, {"error":"PRODUCTION_NOT_FOUND","message":f"production '{production_id}' not found"}
     except Exception as e:
         return 500, {"error":"LOAD_FAILED","message":f"{e.__class__.__name__}: {e}"}
-    asset = next((a for a in (prod.source_assets or []) if a.asset_id==asset_id), None)
+    from app.production.source import select_source_asset
+    requested_id = asset_id
+    try:
+        asset = select_source_asset(prod, asset_id, root=root, mock_mode=sandbox or (provider or "").strip().lower() == "mock")
+    except (ValueError, KeyError, OSError, RuntimeError) as exc:
+        return 500, {"error":"LOAD_FAILED","message":media_error_reason(exc)}
     if asset is None:
-        return 404, {"error":"SOURCE_NOT_FOUND","message":f"source asset '{asset_id}' not found in {production_id}"}
+        return 404, {"error":"SOURCE_NOT_FOUND","message":"No matching real source. Register a video with audio or enable Mock / sandbox mode."}
+    asset_id = asset.asset_id
     if asset.duration is None or asset.duration <= 0:
         return 500, {"error":"INVALID_SOURCE_ASSET","message":"source duration missing"}
     media_path = source_artifact_path(production_id, asset.stored_path, root=root)
@@ -55,12 +62,14 @@ def transcribe_source(production_id: str, asset_id: str, *, root: Optional[Path]
     try:
         result = prov.transcribe(media_path, float(asset.duration))
     except RuntimeError as e:
-        msg=str(e)
+        msg=media_error_reason(e)
+        if "SOURCE_AUDIO_MISSING" in msg or msg == SOURCE_AUDIO_MISSING_MESSAGE:
+            return 422, {"error":"SOURCE_AUDIO_MISSING","message":SOURCE_AUDIO_MISSING_MESSAGE}
         if "STT_ENGINE_UNAVAILABLE" in msg:
             return 503, {"error":"STT_ENGINE_UNAVAILABLE","message":msg}
         return 500, {"error":"TRANSCRIPTION_FAILED","message":msg}
     except Exception as e:
-        return 500, {"error":"TRANSCRIPTION_FAILED","message":f"{e.__class__.__name__}: {e}"}
+        return 500, {"error":"TRANSCRIPTION_FAILED","message":f"{e.__class__.__name__}: {media_error_reason(e)}"}
     duration=float(asset.duration)
     segments: List[TranscriptSegment]=[]
     for idx, raw in enumerate(result.segments):
@@ -90,7 +99,8 @@ def transcribe_source(production_id: str, asset_id: str, *, root: Optional[Path]
         _atomic_write_json(tpath, transcript.model_dump())
     except Exception as e:
         return 500, {"error":"PERSIST_FAILED","message":f"{e.__class__.__name__}: {e}"}
-    return 201, {"production_id":production_id,"asset_id":asset_id,"transcript_path":rel,"provider":transcript.provider,"provider_version":transcript.provider_version,"language":transcript.language,"segment_count":len(segments),"segments":[s.model_dump() for s in segments],"mock_mode":transcript.provider == "mock"}
+    return 201, {"production_id":production_id,"asset_id":asset_id,"transcript_path":rel,"provider":transcript.provider,"provider_version":transcript.provider_version,"language":transcript.language,"segment_count":len(segments),"segments":[s.model_dump() for s in segments],"mock_mode":transcript.provider == "mock",
+                 "source_asset": asset.model_dump(), "requested_asset_id": requested_id, "source_fallback": requested_id != asset_id}
 def load_transcript(production_id: str, asset_id: str, *, root: Optional[Path]=None, mock_mode: bool=False):
     from app.production.models import SourceTranscript as ST
     tpath=transcript_path_for(production_id, asset_id, root=root)

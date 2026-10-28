@@ -331,6 +331,11 @@ def test_sandbox_source_registration_is_explicit_canonical_and_zero_typing(monke
         pid = creation["production_id"]
         executor = ProductionExecutor(pid, productions_root=tmp_path / "productions", projects_root=tmp_path / "projects")
         monkeypatch.setattr(web, "_production_executor", lambda id: executor)
+        # Measure per-command work, not first-use executable availability checks
+        # (which start extra Windows processes and vary with cold antivirus I/O).
+        from app.assembly.ffmpeg import get_ffmpeg_runner
+        runner = get_ffmpeg_runner()
+        runner.ensure_ffmpeg(); runner.ensure_ffprobe()
         started = time.perf_counter()
         status, registered, _ = _post(base, f"/api/productions/{pid}/source", {"mock_mode": True})
         timings = {"source": time.perf_counter() - started}
@@ -341,7 +346,14 @@ def test_sandbox_source_registration_is_explicit_canonical_and_zero_typing(monke
         media = tmp_path / "productions" / pid / source["stored_path"]
         assert media.is_file() and media.stat().st_size > 0
         assert source["duration"] <= 4.0
-        assert load_production(pid, root=tmp_path / "productions").source_assets[0].source_kind == "sandbox_fixture"
+        assert not load_production(pid, root=tmp_path / "productions").source_assets
+        from app.production.source import load_sandbox_source
+        from app.assembly.ffmpeg import probe_media
+        assert load_sandbox_source(pid, root=tmp_path / "productions").asset_id == source["asset_id"]
+        assert source["stored_path"].startswith("source/sandbox/")
+        info = probe_media(media)
+        assert info.has_video and info.has_audio and info.audio_codec == "aac"
+        assert info.sample_rate == 16000
         assert not list(media.parent.glob(".sandbox-*"))
         from app.production.storage import compute_content_hash
         assert compute_content_hash(media) == source["sha256"]
@@ -561,6 +573,268 @@ def test_sandbox_does_not_substitute_a_bad_explicit_source_path(monkeypatch, tmp
         assert not (tmp_path / "productions" / "unknown").exists()
     finally:
         httpd.shutdown(); httpd.server_close()
+
+
+def test_sandbox_source_sidecar_never_changes_real_intent_media_or_source_pointer(monkeypatch, tmp_path):
+    from app.production.storage import compute_content_hash, current_path, load_production, production_source_meta
+    from app.production.source import load_sandbox_source
+    from app.transcription.providers import LocalWhisperProvider, TranscriptionResult
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path); real = _ingest(tmp_path, duration=2)
+        root = tmp_path / "productions"
+        media = root / PID / real["stored_path"]
+        paths = [media, current_path(PID, root), production_source_meta(PID, root)]
+        before = {path: compute_content_hash(path) for path in paths}
+        status, fixture, _ = _post(base, f"/api/productions/{PID}/source", {"mock_mode": True})
+        assert status == 201 and fixture["sandbox_fixture"] is True, fixture
+        assert fixture["source_asset"]["asset_id"] != real["asset_id"]
+        assert fixture["source_asset"]["stored_path"].startswith("source/sandbox/")
+        assert {path: compute_content_hash(path) for path in paths} == before
+        assert [source.asset_id for source in load_production(PID, root=root).source_assets] == [AID]
+        assert load_sandbox_source(PID, root=root).asset_id == fixture["source_asset"]["asset_id"]
+        calls = []
+        def real_transcribe(self, path, duration):
+            calls.append(path)
+            return TranscriptionResult("en", [{"text": "Real source", "start": 0, "end": duration}], "local_whisper", "fixture")
+        monkeypatch.setattr(LocalWhisperProvider, "transcribe", real_transcribe)
+        status, result, _ = _post(base, f"/api/productions/{PID}/transcribe", {"mock_mode": False})
+        assert status == 201 and result["asset_id"] == AID and result["provider"] == "local_whisper"
+        assert calls == [media]
+        assert {path: compute_content_hash(path) for path in paths} == before
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_real_registration_reserves_sandbox_identity_without_replacing_either_media(monkeypatch, tmp_path):
+    from app.assembly.ffmpeg import probe_media
+    from app.production.source import load_sandbox_source
+    from app.production.storage import compute_content_hash, load_production
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        status, fixture, _ = _post(base, f"/api/productions/{PID}/source", {"mock_mode": True})
+        assert status == 201, fixture
+        sandbox = load_sandbox_source(PID, root=tmp_path / "productions")
+        sandbox_media = tmp_path / "productions" / PID / sandbox.stored_path
+        before = compute_content_hash(sandbox_media)
+        real = _ingest(tmp_path, duration=2)
+        assert real["asset_id"] != sandbox.asset_id
+        assert compute_content_hash(sandbox_media) == before
+        assert probe_media(sandbox_media).has_audio
+        assert [source.asset_id for source in load_production(PID, root=tmp_path / "productions").source_assets] == [real["asset_id"]]
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("route", ["/transcribe", "/source/src-002/transcript"])
+def test_real_transcription_skips_legacy_video_only_sandbox_without_touching_it(monkeypatch, tmp_path, route):
+    from app.assembly.ffmpeg import run_ffmpeg, probe_media
+    from app.production.models import SourceAsset
+    from app.production.storage import compute_content_hash, load_production, save_revision
+    from app.transcription.providers import LocalWhisperProvider, TranscriptionResult
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path); real = _ingest(tmp_path, duration=2)
+        root = tmp_path / "productions"
+        legacy = root / PID / "source" / "src-002.mp4"
+        run_ffmpeg(["-y", "-f", "lavfi", "-i", "color=c=purple:s=320x180:r=12:d=4",
+                    "-an", "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", str(legacy)], "legacy video-only fixture")
+        production = load_production(PID, root=root)
+        asset = SourceAsset(asset_id="src-002", stored_path="source/src-002.mp4", original_filename="sandbox-summary-fixture.mp4",
+                            source_kind="sandbox_fixture", duration=4, width=320, height=180, video_codec="h264",
+                            sha256=compute_content_hash(legacy), file_size=legacy.stat().st_size, ingested_at=production.created_at)
+        save_revision(production.model_copy(update={"plan_version": production.plan_version + 1,
+                                                   "source_assets": [*production.source_assets, asset]}), root=root)
+        before = compute_content_hash(legacy)
+        assert not probe_media(legacy).has_audio
+        calls = []
+        def real_transcribe(self, path, duration):
+            calls.append(path.name)
+            return TranscriptionResult("en", [{"text": "Last real source", "start": 0, "end": duration}], "local_whisper", "fixture")
+        monkeypatch.setattr(LocalWhisperProvider, "transcribe", real_transcribe)
+        status, payload, _ = _post(base, f"/api/productions/{PID}" + route, {"mock_mode": False})
+        assert status == 201 and payload["asset_id"] == real["asset_id"], payload
+        assert payload["source_asset"]["source_kind"] == "local_file"
+        if "src-002" in route:
+            assert payload["requested_asset_id"] == "src-002" and payload["source_fallback"] is True
+        assert calls == ["src-001.mp4"]
+        assert compute_content_hash(legacy) == before
+        assert not (legacy.parent / "src-002.transcript.json").exists()
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+FFMPEG_BANNER = (
+    "ffmpeg version 8.0-full_build Copyright (c) FFmpeg developers\n"
+    "  built with gcc 15.1.0\n"
+    "  configuration: --enable-gpl --enable-version3 --enable-libx264 --enable-libmp3lame\n"
+    "  libavutil      60.  8.100 / 60.  8.100\n"
+    "  libavcodec     62. 11.100 / 62. 11.100\n"
+    "Input #0, mov,mp4, from 'C:/private/source.mp4':\n"
+    "  Metadata:\n    encoder : Lavf62.3.100\n"
+    "  Duration: 00:00:04.00, start: 0.000000\n"
+    "  Stream #0:0: Video: h264, yuv420p, 320x180\n"
+)
+
+
+@pytest.mark.parametrize("reason", ["Output file does not contain any stream", "Error opening input files: Permission denied"])
+@pytest.mark.parametrize("route", ["/transcribe", f"/source/{AID}/transcript"])
+def test_transcription_ffmpeg_errors_are_short_and_banner_free(monkeypatch, tmp_path, reason, route):
+    from app.transcription.providers import LocalWhisperProvider
+    from app.production.storage import transcript_path_for
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path); _ingest(tmp_path, duration=1)
+        def failure(*args, **kwargs):
+            raise RuntimeError("TRANSCRIPTION_FAILED: Failed to load audio:\n" + FFMPEG_BANNER + reason + "\nConversion failed!\n")
+        monkeypatch.setattr(LocalWhisperProvider, "transcribe", failure)
+        status, payload, _ = _post(base, f"/api/productions/{PID}" + route, {})
+        assert status in {422, 500}, payload
+        assert not any(noise in payload["message"] for noise in ["ffmpeg version", "configuration:", "--enable-", "libavcodec", "C:/private", "Stream #"])
+        assert len(payload["message"]) < 400 and "\n" not in payload["message"]
+        if "does not contain" in reason:
+            assert "no audio track" in payload["message"] and "Mock / sandbox" in payload["message"]
+        else:
+            assert "Permission denied" in payload["message"]
+        assert not transcript_path_for(PID, AID, root=tmp_path / "productions").exists()
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_video_without_audio_fails_before_loading_whisper_and_does_not_enable_mock(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+    from app.assembly.ffmpeg import run_ffmpeg
+    from app.production.storage import transcript_path_for
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        video = tmp_path / "silent-real.mp4"
+        run_ffmpeg(["-y", "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=12:d=1", "-an",
+                    "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", str(video)], "silent real source")
+        status, _, _ = _post(base, f"/api/productions/{PID}/source", {"source_path": str(video)})
+        assert status == 201
+        monkeypatch.setitem(sys.modules, "whisper", SimpleNamespace(load_model=lambda *args: pytest.fail("Whisper must not load for audio-less media")))
+        status, payload, _ = _post(base, f"/api/productions/{PID}/transcribe", {})
+        assert status == 422 and payload["error"] == "SOURCE_AUDIO_MISSING", payload
+        assert "Source video has no audio track" in payload["message"]
+        assert "configuration:" not in payload["message"]
+        assert not transcript_path_for(PID, AID, root=tmp_path / "productions").exists()
+        assert not list((tmp_path / "productions" / PID / "source").glob("*.sandbox.transcript.json"))
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_browser_diagnostic_discards_ffmpeg_build_banner_but_keeps_terminal_reason():
+    message = web._browser_safe_diagnostic(FFMPEG_BANNER + "Error opening input file C:/private/source.mp4: Permission denied\nConversion failed!")
+    assert "Permission denied" in message
+    assert not any(noise in message for noise in ["ffmpeg version", "configuration:", "--enable-", "libavcodec", "C:/private", "Stream #"])
+
+
+def test_ffmpeg_exception_uses_full_stderr_instead_of_its_truncated_banner_preview():
+    from app.assembly.exceptions import FFmpegExecutionError
+    from app.transcription.diagnostics import media_error_reason
+
+    exception = FFmpegExecutionError("ffmpeg command", 1, FFMPEG_BANNER * 3 + "Error opening output file: Permission denied\nConversion failed!")
+    assert "Permission denied" not in str(exception), "fixture must exercise the truncated preview"
+    for message in (media_error_reason(exception), web._browser_safe_diagnostic(exception)):
+        assert "Permission denied" in message
+        assert len(message) < 400
+        assert not any(noise in message for noise in ["ffmpeg version", "configuration:", "--enable-", "libavcodec", "Stream #"])
+
+
+def test_legacy_fixture_without_real_fallback_is_upgraded_with_audio_only_in_sandbox_sidecar(monkeypatch, tmp_path):
+    from app.assembly.ffmpeg import probe_media, run_ffmpeg
+    from app.production.models import SourceAsset
+    from app.production.storage import compute_content_hash, current_path, load_production, save_revision
+    from app.transcription.providers import LocalWhisperProvider, TranscriptionResult
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        production = _make_prod(tmp_path)
+        root = tmp_path / "productions"
+        legacy = root / PID / "source" / "src-001.mp4"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        run_ffmpeg(["-y", "-f", "lavfi", "-i", "color=c=purple:s=320x180:r=12:d=4", "-an",
+                    "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", str(legacy)], "legacy video-only source")
+        asset = SourceAsset(asset_id=AID, stored_path="source/src-001.mp4", source_kind="sandbox_fixture",
+                            original_filename="sandbox-summary-fixture.mp4", duration=4, width=320, height=180,
+                            video_codec="h264", sha256=compute_content_hash(legacy), ingested_at=production.created_at)
+        save_revision(production.model_copy(update={"plan_version": 2, "source_assets": [asset]}), root=root)
+        intent = current_path(PID, root)
+        before = {path: compute_content_hash(path) for path in (intent, legacy)}
+        calls = []
+        def real_transcribe(self, path, duration):
+            info = probe_media(path)
+            assert info.has_video and info.has_audio and info.audio_codec == "aac"
+            assert path.parent.name == "sandbox"
+            calls.append(path)
+            return TranscriptionResult("en", [{"text": "Real STT fixture response", "start": 0, "end": duration}], "local_whisper", "fixture")
+        monkeypatch.setattr(LocalWhisperProvider, "transcribe", real_transcribe)
+        for _ in range(2):
+            status, payload, _ = _post(base, f"/api/productions/{PID}/transcribe", {"mock_mode": False})
+            assert status == 201 and payload["provider"] == "local_whisper" and payload["mock_mode"] is False, payload
+            assert payload["source_asset"]["stored_path"].startswith("source/sandbox/")
+        assert len(calls) == 2 and calls[0] == calls[1]
+        assert {path: compute_content_hash(path) for path in before} == before
+        assert not probe_media(legacy).has_audio
+        assert [source.asset_id for source in load_production(PID, root=root).source_assets] == [AID]
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+def test_isolated_sandbox_full_pipeline_preserves_real_source_and_transcript_through_promotion(monkeypatch, tmp_path):
+    from app.orchestrator.production_execution import ProductionExecutor
+    from app.production.storage import compute_content_hash, current_path, load_production
+    from app.assembly.ffmpeg import probe_media
+
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        real, transcript, _ = _long_source_with_real_transcript(tmp_path)
+        root = tmp_path / "productions"
+        media = root / PID / real.stored_path
+        protected = {path: compute_content_hash(path) for path in (media, transcript, current_path(PID, root))}
+        executor = ProductionExecutor(PID, productions_root=root, projects_root=tmp_path / "projects")
+        monkeypatch.setattr(web, "_production_executor", lambda pid: executor)
+        status, payload, _ = _post(base, f"/api/productions/{PID}/source", {"mock_mode": True})
+        assert status == 201, payload
+        sandbox = payload["source_asset"]
+        assert sandbox["asset_id"] != real.asset_id and sandbox["stored_path"].startswith("source/sandbox/")
+        assert probe_media(root / PID / sandbox["stored_path"]).has_audio
+        for route, body in [
+            ("/transcribe", {"mock_mode": True}),
+            (f"/units/{UID}/narration", {"mock_mode": True}),
+            (f"/units/{UID}/narration/synthesize", {"mock_mode": True}),
+            (f"/units/{UID}/summary-video", {"mock_mode": True}),
+            (f"/units/{UID}/summary-video/promote", {"mock_mode": True}),
+        ]:
+            status, payload, _ = _post(base, f"/api/productions/{PID}" + route, body)
+            assert status in {200, 201}, (route, payload)
+            if route.endswith("/transcribe"):
+                assert payload["asset_id"] == sandbox["asset_id"]
+            if route.endswith("/narration"):
+                assert payload["source_asset_id"] == sandbox["asset_id"]
+                assert payload["source_media_path"] == sandbox["stored_path"]
+            assert {path: compute_content_hash(path) for path in protected} == protected
+        assert executor.derive_progress().complete
+        assert [source.asset_id for source in load_production(PID, root=root).source_assets] == [real.asset_id]
+        binding = executor.discover_bindings()[UID]
+        assert binding.manifest.source_summary_handoff.source_asset_id == sandbox["asset_id"]
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("message", ["FFmpeg command failed: ffmpeg version 8.0-full_build", "TRANSCRIPTION_FAILED: configuration: --enable-gpl --enable-libx264"])
+def test_even_truncated_or_single_line_ffmpeg_banners_are_not_browser_errors(message):
+    result = web._browser_safe_diagnostic(message)
+    assert result and "Media processing failed" in result
+    assert not any(noise in result for noise in ("ffmpeg version", "configuration:", "--enable-"))
 
 
 def test_browser_source_upload_reuses_intake_without_client_path(monkeypatch, tmp_path):
