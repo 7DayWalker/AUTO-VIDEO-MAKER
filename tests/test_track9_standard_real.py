@@ -157,7 +157,8 @@ def test_quota_blocked_route_never_invokes_adapter(monkeypatch):
     record_quota_blocker(binding.provider, binding.provider_model_id, "synthetic quota evidence")
     asset, transcript = standard_evidence()
     with pytest.raises(RuntimeError, match="no eligible route"):
-        build_grounded_narration_plan(PID, UID, asset, transcript, target_duration_seconds=30.0, mock_mode=False)
+        build_grounded_narration_plan(PID, UID, asset, transcript, target_duration_seconds=30.0,
+                                     canonical_model_id="qwen-3.8-flash", mock_mode=False)
     assert factory_calls == provider.calls == []
 
 
@@ -221,3 +222,166 @@ def test_provider_error_is_not_retried_or_replaced():
     with pytest.raises(TypeError, match="synthetic adapter failure"):
         build(provider)
     assert provider.json_calls == len(provider.calls) == 1
+
+
+def install_auto_pool(monkeypatch, primary_error=None, *, secondary_error=None, secondary_raw=None):
+    from app.content import provider_registry
+
+    candidates = []
+    providers = []
+    for index, error in enumerate((primary_error, secondary_error)):
+        name, wire = f"auto-provider-{index}", f"auto-wire-{index}"
+        key = f"AUTO_STANDARD_TEST_KEY_{index}"
+        model = CanonicalModel(id=f"auto-model-{index}", display_name=f"Auto Model {index}", family="fixture",
+            capabilities=ModelCapabilities(text=True, json_=True),
+            bindings=(ProviderBinding(provider=name, provider_model_id=wire, config_keys=(key,),
+                supported_input_modalities=(InputModality.TEXT,)),))
+        monkeypatch.setitem(MODEL_REGISTRY, model.id, model)
+        monkeypatch.setenv(key, "synthetic-test-only")
+        provider = StubNarrationProvider(name=name, model=wire, error=error,
+                                        **({"raw": secondary_raw} if index == 1 and secondary_raw is not None else {}))
+        monkeypatch.setitem(provider_registry._REGISTRY, name, lambda wire_id, provider=provider: provider)
+        candidates.append(model); providers.append(provider)
+    monkeypatch.setattr("app.content.model_registry.list_models", lambda: tuple(candidates))
+    return candidates, providers
+
+
+def build_auto(**kwargs):
+    asset, transcript = standard_evidence()
+    return build_grounded_narration_plan(PID, UID, asset, transcript, target_duration_seconds=30,
+        summary_mode="standard", summary_understanding_mode="auto", mock_mode=False, **kwargs)
+
+
+@pytest.mark.parametrize("failure", ["503", "busy", "network", "timeout", "requests_connection", "http_status"])
+def test_standard_auto_failover_tries_next_eligible_configured_model_after_transient_error(monkeypatch, failure):
+    import requests
+    from app.content.providers.codecraft import CodeCraftServerBusyError
+    from app.content.exceptions import LLMConnectionError
+
+    failures = {
+        "503": RuntimeError("HTTP 503: service being upgraded"),
+        "busy": CodeCraftServerBusyError("fixture", "service being upgraded"),
+        "network": LLMConnectionError("fixture", "connection failed"),
+        "timeout": TimeoutError("timed out"),
+        "requests_connection": requests.exceptions.ConnectionError("connection refused"),
+        "http_status": requests.exceptions.HTTPError(response=type("Response", (), {"status_code": 503})()),
+    }
+    candidates, providers = install_auto_pool(monkeypatch, failures[failure])
+    artifact = build_auto()
+    assert [len(provider.calls) for provider in providers] == [1, 1]
+    assert artifact.summary == standard_response()["summary"]
+    assert artifact.summary_understanding_model_id == candidates[1].id
+    assert artifact.summary_selection_mode == "auto"
+    assert artifact.summary_failover_used is True
+    validate_narration_artifact(artifact, source_asset=standard_evidence()[0], source_transcript=standard_evidence()[1])
+    assert providers[0].calls[0] == providers[1].calls[0], "each candidate must receive the same grounded request"
+
+
+def test_standard_auto_first_success_never_calls_a_backup_model(monkeypatch):
+    candidates, providers = install_auto_pool(monkeypatch)
+    artifact = build_auto()
+    assert [len(provider.calls) for provider in providers] == [1, 0]
+    assert artifact.summary_understanding_model_id == candidates[0].id
+    assert artifact.summary_failover_used is False
+
+
+def test_standard_auto_skips_unconfigured_primary_instead_of_calling_dead_route(monkeypatch):
+    candidates, providers = install_auto_pool(monkeypatch)
+    monkeypatch.delenv("AUTO_STANDARD_TEST_KEY_0")
+    artifact = build_auto()
+    assert [len(provider.calls) for provider in providers] == [0, 1]
+    assert artifact.summary_understanding_model_id == candidates[1].id
+
+
+@pytest.mark.parametrize("selection", ["explicit", "manual", None, "auto"])
+def test_locked_standard_model_never_cross_model_fails_over_even_on_503(monkeypatch, selection):
+    from app.content.providers.codecraft import CodeCraftServerBusyError
+    candidates, providers = install_auto_pool(monkeypatch, CodeCraftServerBusyError("fixture", "HTTP 503"))
+    with pytest.raises(CodeCraftServerBusyError):
+        asset, transcript = standard_evidence()
+        build_grounded_narration_plan(PID, UID, asset, transcript, target_duration_seconds=30,
+            summary_mode="standard", summary_understanding_mode=selection,
+            summary_understanding_model_id=candidates[0].id, mock_mode=False)
+    assert [len(provider.calls) for provider in providers] == [1, 0]
+
+
+@pytest.mark.parametrize("failure", ["auth", "quota", "bad_json", "bad_grounding", "invalid_request", "bug"])
+def test_standard_auto_never_hides_nontransient_or_grounding_failures(monkeypatch, failure):
+    from app.content.exceptions import LLMAuthenticationError, LLMQuotaError
+    from app.content.providers.codecraft import CodeCraftInvalidRequestError
+    error = {"auth": LLMAuthenticationError("fixture"), "quota": LLMQuotaError("fixture"),
+             "invalid_request": CodeCraftInvalidRequestError("invalid request"), "bug": TypeError("adapter bug")}.get(failure)
+    _, providers = install_auto_pool(monkeypatch, error)
+    if failure == "bad_json": providers[0].raw = "not json"
+    if failure == "bad_grounding":
+        data = standard_response(); data["beats"][0]["source_refs"][0]["transcript_segment_ids"] = [999]
+        providers[0].raw = json.dumps(data)
+    with pytest.raises(Exception):
+        build_auto()
+    assert [len(provider.calls) for provider in providers] == [1, 0]
+
+
+def test_standard_auto_all_transient_failures_are_bounded_actionable_and_never_persist(monkeypatch, tmp_path):
+    _, providers = install_auto_pool(monkeypatch, RuntimeError("HTTP 503: secret-fixture must not reach error"),
+                                     secondary_error=ConnectionError("private transport detail"))
+    with pytest.raises(RuntimeError, match="eligible.*temporarily unavailable") as error:
+        build_auto(root=tmp_path)
+    assert [len(provider.calls) for provider in providers] == [1, 1]
+    assert "secret-fixture" not in str(error.value) and "private transport" not in str(error.value)
+    assert not list(tmp_path.rglob("narration.json"))
+
+
+def test_explicit_test_adapter_is_not_replaced_by_auto_failover(monkeypatch):
+    _, providers = install_auto_pool(monkeypatch)
+    override = StubNarrationProvider(error=RuntimeError("HTTP 503"))
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        build_auto(llm_provider_override=override)
+    assert len(override.calls) == 1
+    assert [len(provider.calls) for provider in providers] == [0, 0]
+
+
+def test_standard_auto_can_fail_over_to_next_route_of_same_canonical_model(monkeypatch):
+    from app.content import provider_registry
+    candidates, providers = install_auto_pool(monkeypatch, RuntimeError("HTTP 503"))
+    first = candidates[0]
+    second_binding = candidates[1].bindings[0]
+    model = first.model_copy(update={"bindings": (*first.bindings, second_binding)})
+    monkeypatch.setitem(MODEL_REGISTRY, model.id, model)
+    monkeypatch.setattr("app.content.model_registry.list_models", lambda: (model,))
+    artifact = build_auto()
+    assert [len(provider.calls) for provider in providers] == [1, 1]
+    assert artifact.summary_understanding_model_id == first.id
+    assert artifact.summary_failover_used is True
+
+
+def test_codecraft_runtime_quarantine_wins_over_key_presence_without_changing_catalogue(monkeypatch):
+    from app.content.providers.codecraft import CodeCraftProvider
+    from app.web.server import _ai_summary_projection
+    monkeypatch.setenv("CODECRAFT_API_KEY", "synthetic-key-not-a-real-secret")
+    monkeypatch.setenv("CODECRAFT_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("AVM_ENABLE_CODECRAFT", "0")
+    assessment = assess_model_for_job("qwen-3.8-flash", JOB_SOURCE_TRANSCRIPT_RECAP)
+    assert assessment.capability_ok and not assessment.eligible
+    assert "runtime_quarantined" in assessment.routes[0].reasons
+    assert CodeCraftProvider().is_available() is False
+    entry = next(model for model in _ai_summary_projection()["understanding_models"] if model["id"] == "qwen-3.8-flash")
+    assert entry["configured"] is False and entry["status"] == "not_configured"
+    monkeypatch.setenv("AVM_ENABLE_CODECRAFT", "1")
+    assert assess_model_for_job("qwen-3.8-flash", JOB_SOURCE_TRANSCRIPT_RECAP).eligible
+    assert CodeCraftProvider().is_available() is True
+
+
+def test_quarantined_codecraft_is_not_instantiated_or_called_by_standard_auto(monkeypatch):
+    from app.content import provider_registry
+    from app.content.model_registry import get_model
+    qwen, gemini = get_model("qwen-3.8-flash"), get_model("gemini-3-flash-preview")
+    monkeypatch.setattr("app.content.model_registry.list_models", lambda: (qwen, gemini))
+    monkeypatch.setenv("AVM_ENABLE_CODECRAFT", "0")
+    monkeypatch.setenv("CODECRAFT_API_KEY", "synthetic-key")
+    monkeypatch.setenv("CODECRAFT_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-key")
+    monkeypatch.setitem(provider_registry._REGISTRY, "codecraft", lambda wire: pytest.fail("quarantined CodeCraft must never be instantiated"))
+    provider = StubNarrationProvider(name="gemini", model="gemini-3-flash-preview")
+    monkeypatch.setitem(provider_registry._REGISTRY, "gemini", lambda wire: provider)
+    artifact = build_auto()
+    assert len(provider.calls) == 1 and artifact.summary_understanding_model_id == gemini.id

@@ -69,6 +69,22 @@ def _normalize_summary_alias(model_id: str | None) -> str | None:
     return _SUMMARY_ALIAS_MAP.get(key, key)
 
 
+def standard_auto_model_ids() -> tuple[str, ...]:
+    """Configured text/JSON candidates in deterministic catalogue order.
+
+    Keep Standard's existing text-only preference, then the other capable
+    canonical identities. Route admission/quarantine/quota remain owned by
+    capability_router; this function makes no provider or network request.
+    """
+    from app.content.model_registry import list_models
+    from app.content.capability_router import assess_model_for_job
+
+    pool = [model for model in list_models()
+            if model_meets_job(model, JOB_REQUIREMENTS[JOB_SOURCE_TRANSCRIPT_RECAP])[0]]
+    pool.sort(key=lambda model: model.capabilities.is_multimodal_capable())
+    return tuple(model.id for model in pool if assess_model_for_job(model.id, JOB_SOURCE_TRANSCRIPT_RECAP).eligible)
+
+
 def resolve_summary_model(
     mode: str,
     preferred_model_id: str | None = None,
@@ -112,6 +128,10 @@ def resolve_summary_model(
             sel = "explicit"
         else:
             sel = "auto"
+    if mode == "standard" and explicit_id is not None:
+        # A supplied canonical identity is always a lock, even if an older
+        # caller also supplied selection_mode='auto'. Never silently ignore it.
+        sel = "explicit"
 
     # EXPLICIT path: the explicit canonical model wins, no ranking
     if sel == "explicit":
@@ -148,6 +168,11 @@ def resolve_summary_model(
         pool.sort(key=_score, reverse=True)
         return pool[0].id
     if mode == "standard":
+        configured = standard_auto_model_ids()
+        if configured:
+            return configured[0]
+        # Catalogue fallback is metadata only (also used by offline mock runs).
+        # Real Auto execution below refuses when no configured route exists.
         from app.content.model_registry import list_models
         for m in list_models():
             if model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_TRANSCRIPT_RECAP])[0] and not m.capabilities.is_multimodal_capable():
@@ -187,6 +212,70 @@ def _resolve_source_video_path(source_asset: SourceAsset, production_id: str, ro
     rel = Path(source_asset.stored_path)
     base = _pd(production_id, root=root)
     return base / rel
+
+
+def _standard_source_segments(production_id, source_asset, root):
+    from app.production.storage import segments_path_for
+    if not segments_path_for(production_id, source_asset.asset_id, root=root).is_file():
+        return []
+    from app.production.models import SourceSegment
+    from app.production.segments import load_segments
+    segment_status, segment_payload = load_segments(production_id, source_asset.asset_id, root=root)
+    if segment_status != 200:
+        raise ValueError("Cannot load validated source-segment evidence for narration")
+    return [SourceSegment.model_validate(item) for item in segment_payload["segments"]]
+
+
+def _build_standard_auto(production_id, unit_id, source_asset, transcript, *, duration, status, root):
+    from app.content.capability_router import assess_model_for_job
+    from app.content.model_resolver import AllExactModelProvidersFailedError
+    from app.production.narration_real import (
+        ai_grounded_plan, standard_transient_failure_category, SummaryStandardTemporarilyUnavailableError,
+    )
+    candidates = standard_auto_model_ids()
+    if not candidates:
+        raise RuntimeError("Summary Standard has no eligible route: configure an available text/JSON provider.")
+    segments = _standard_source_segments(production_id, source_asset, root)
+    failed = False
+    for model_id in candidates:
+        attempted = set()
+        # Existing exact-model resolver remains the only provider factory gate.
+        # An admitted route is attempted once; its transient failure can move
+        # to another route of this model, then another Auto canonical model.
+        while True:
+            routes = assess_model_for_job(model_id, JOB_SOURCE_TRANSCRIPT_RECAP).eligible_routes()
+            if not any((route.provider, route.provider_model_id) not in attempted for route in routes):
+                break
+            try:
+                resolved = resolve_model(model_id, mode="exact", try_next_on_failure=True,
+                    job_id=JOB_SOURCE_TRANSCRIPT_RECAP, excluded_bindings=tuple(attempted))
+            except AllExactModelProvidersFailedError as exc:
+                if exc.last_error is not None and standard_transient_failure_category(exc.last_error) is None:
+                    raise
+                failed = True
+                break
+            route_id = (resolved.provider, resolved.provider_model_id)
+            attempted.add(route_id)
+            try:
+                artifact = ai_grounded_plan(production_id, unit_id, source_asset, transcript,
+                    target_duration_seconds=duration, prov=resolved.provider_instance,
+                    status=status, source_segments=segments)
+            except Exception as exc:
+                if standard_transient_failure_category(exc) is None:
+                    raise
+                failed = True
+                continue
+            artifact.summary_understanding_model_id = resolved.canonical_model_id
+            artifact.summary_selection_mode = "auto"
+            artifact.summary_failover_used = failed
+            return artifact
+    # No raw provider text, credential values, prompt or transcript in the
+    # browser-facing error. Failed attempts never persist a narration artifact.
+    raise SummaryStandardTemporarilyUnavailableError(
+        "Summary Standard's eligible providers are temporarily unavailable. No narration was saved; try again after service recovery."
+    )
+
+
 def build_grounded_narration_plan(
     production_id: str,
     unit_id: str,
@@ -298,6 +387,11 @@ def build_grounded_narration_plan(
             return mock_grounded_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, status=status, provider_override=llm_provider_override)
         from app.production.narration_mock import mock_grounded_plan
         return mock_grounded_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, status=status, provider_override=llm_provider_override)
+    if (mode == "standard" and llm_provider_override is None
+            and canonical_model_id is None and summary_understanding_model_id is None
+            and (summary_understanding_mode or "auto").strip().lower() == "auto"):
+        return _build_standard_auto(production_id, unit_id, source_asset, source_transcript,
+            duration=duration, status=status, root=root)
     # Real provider path: hierarchical multimodal for Pro, text-only for Standard
     if mode == "pro":
         resolve_narration_model(summary_model_id)
@@ -323,21 +417,14 @@ def build_grounded_narration_plan(
         from app.production.narration_pro import build_pro_multimodal_plan
         return build_pro_multimodal_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, summary_model_id=summary_model_id, prov=prov_real, root=root)
     from app.production.narration_real import ai_grounded_plan
-    from app.production.storage import segments_path_for
-
-    source_segments = []
-    if segments_path_for(production_id, source_asset.asset_id, root=root).is_file():
-        from app.production.models import SourceSegment
-        from app.production.segments import load_segments
-
-        segment_status, segment_payload = load_segments(production_id, source_asset.asset_id, root=root)
-        if segment_status != 200:
-            raise ValueError("Cannot load validated source-segment evidence for narration")
-        source_segments = [SourceSegment.model_validate(item) for item in segment_payload["segments"]]
-    return ai_grounded_plan(
+    source_segments = _standard_source_segments(production_id, source_asset, root)
+    artifact = ai_grounded_plan(
         production_id, unit_id, source_asset, source_transcript,
         target_duration_seconds=duration, prov=prov_real, status=status, source_segments=source_segments,
     )
+    artifact.summary_understanding_model_id = summary_model_id
+    artifact.summary_selection_mode = "explicit" if canonical_model_id is not None or summary_understanding_model_id is not None else "auto"
+    return artifact
 
 
 def validate_narration_artifact(

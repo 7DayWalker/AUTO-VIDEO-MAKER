@@ -237,6 +237,10 @@ def assess_provider_route(
     import app.content.provider_registry as provider_registry
 
     reasons: list[str] = []
+    if binding.provider == "codecraft":
+        from app.content.providers.codecraft import codecraft_runtime_enabled
+        if not codecraft_runtime_enabled():
+            reasons.append("runtime_quarantined")
     ev = ProviderEvidence(
         provider=binding.provider,
         provider_model_id=binding.provider_model_id,

@@ -248,14 +248,15 @@ def _ai_summary_projection() -> dict:
     understanding_models = []
     status = "ready"
     try:
-        from app.production.narration import SUMMARY_PRO_MODEL, SUMMARY_STANDARD_MODEL
+        from app.production.narration import SUMMARY_PRO_MODEL, SUMMARY_STANDARD_MODEL, standard_auto_model_ids
+        configured_standard = standard_auto_model_ids()
         modes = {
             "standard": {
                 "id": "standard",
                 "label": "Standard",
                 "description": "transcript/audio-first understanding",
                 "understanding_method": "transcript_audio",
-                "default_model_id": SUMMARY_STANDARD_MODEL,
+                "default_model_id": configured_standard[0] if configured_standard else SUMMARY_STANDARD_MODEL,
             },
             "pro": {
                 "id": "pro",
@@ -4420,6 +4421,9 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
     except KeyError as exc:
         return 404, {"error": "MODEL_NOT_FOUND", "message": _browser_safe_diagnostic(exc)}
     except RuntimeError as exc:
+        from app.production.narration_real import SummaryStandardTemporarilyUnavailableError
+        if isinstance(exc, SummaryStandardTemporarilyUnavailableError):
+            return 503, {"error": "NARRATION_PROVIDER_TEMPORARILY_UNAVAILABLE", "message": _browser_safe_diagnostic(exc)}
         return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": _browser_safe_diagnostic(exc)}
     except Exception as exc:
         return 500, {"error": "NARRATION_BUILD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}

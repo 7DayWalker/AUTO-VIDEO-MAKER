@@ -20,6 +20,41 @@ from app.production.models import (
 )
 
 
+class SummaryStandardTemporarilyUnavailableError(RuntimeError):
+    """Every admitted Auto candidate failed transiently; no plan was invented."""
+
+
+def standard_transient_failure_category(exc: BaseException):
+    """Narrow Auto-only policy reusing Core's authoritative classification.
+
+    Malformed JSON, grounding, authentication, quota and AVM/request errors do
+    NOT trigger another model. Status/type inspection covers ordinary SDK and
+    requests transport errors that don't carry Core's category mixin.
+    """
+    from app.providers.fallback_policy import FailureCategory, classify_provider_failure
+    import requests
+
+    category = classify_provider_failure(exc)
+    transient = {FailureCategory.PROVIDER_5XX, FailureCategory.NETWORK, FailureCategory.TIMEOUT,
+                 FailureCategory.PROVIDER_UNAVAILABLE}
+    if category != FailureCategory.UNKNOWN:
+        return category if category in transient else None
+    if isinstance(exc, (ValueError, TypeError)):
+        return None
+    if isinstance(exc, (TimeoutError, requests.exceptions.Timeout)):
+        return FailureCategory.TIMEOUT
+    if isinstance(exc, (ConnectionError, requests.exceptions.ConnectionError)):
+        return FailureCategory.NETWORK
+    code = getattr(exc, "status_code", None)
+    if code is None:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(code, int):
+        return FailureCategory.PROVIDER_5XX if 500 <= code < 600 else None
+    if "serverbusy" in type(exc).__name__.lower() or re.search(r"\b(?:HTTP|Server error:)\s*5\d\d\b", str(exc), re.I):
+        return FailureCategory.PROVIDER_5XX
+    return None
+
+
 class _AISRef(NarrationSourceRef):
     transcript_segment_ids: List[StrictInt] = Field(min_length=1)
 
@@ -205,4 +240,4 @@ def ai_grounded_plan(
     return artifact
 
 
-__all__ = ["ai_grounded_plan"]
+__all__ = ["ai_grounded_plan", "standard_transient_failure_category", "SummaryStandardTemporarilyUnavailableError"]

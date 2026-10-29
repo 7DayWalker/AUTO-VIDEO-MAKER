@@ -166,6 +166,16 @@ def codecraft_api_key_from_env() -> str:
     return (os.getenv(CODECRAFT_API_KEY_ENV) or "").strip()
 
 
+def codecraft_runtime_enabled() -> bool:
+    """Deployment quarantine independent of credentials and canonical identity.
+
+    Existing isolated integrations remain backward-compatible when no switch
+    is supplied. Deployments explicitly set 0 to quarantine this gateway and
+    must opt back in with 1; a present API key never overrides the quarantine.
+    """
+    return (os.getenv("AVM_ENABLE_CODECRAFT", "1") or "").strip() == "1"
+
+
 def _normalize_usage(raw: Any) -> Optional[Dict[str, int]]:
     """Flatten CodeCraft's nested usage into the frozen ``Dict[str, int]`` contract.
 
@@ -324,7 +334,7 @@ class CodeCraftProvider(BaseLLMProvider):
         return self._model
 
     def is_available(self) -> bool:
-        return bool(self._api_key)
+        return codecraft_runtime_enabled() and bool(self._api_key)
 
     # ---- TASK C2: model-specific image capability ------------------------
 
@@ -552,6 +562,8 @@ class CodeCraftProvider(BaseLLMProvider):
         live). Explicit 4xx -- authentication, quota, invalid request -- is
         authoritative evidence and is raised immediately without retry.
         """
+        if not codecraft_runtime_enabled():
+            raise CodeCraftInvalidRequestError("CodeCraft runtime route is quarantined; enable it explicitly only after verifying service recovery.")
         url = f"{self._base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
         attempts = max(1, CODECRAFT_TRANSIENT_RETRIES + 1)
@@ -599,6 +611,8 @@ class CodeCraftProvider(BaseLLMProvider):
         Returns raw entries including ``architecture.input_modalities`` and the
         ``capabilities`` list. Network call -- callers decide when to invoke it.
         """
+        if not codecraft_runtime_enabled():
+            raise CodeCraftInvalidRequestError("CodeCraft runtime route is quarantined; model discovery is disabled.")
         if not self._api_key:
             raise CodeCraftAuthenticationError(self.name)
         url = f"{self._base_url}/models"

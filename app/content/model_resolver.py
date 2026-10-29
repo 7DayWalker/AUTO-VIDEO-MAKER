@@ -91,6 +91,7 @@ def resolve_model(
     mode: str = "exact",
     try_next_on_failure: bool = False,
     job_id: Optional[str] = None,
+    excluded_bindings: Tuple[Tuple[str, str], ...] = (),
 ) -> ResolvedModelProvider:
     """Resolve a canonical model to a provider instance.
 
@@ -103,6 +104,9 @@ def resolve_model(
         job_id: Optional capability job. When supplied, only locally eligible
             bindings for that job can be instantiated; canonical identity and
             declared binding order are preserved.
+        excluded_bindings: Routes already attempted by an explicit operation.
+            Excluding them keeps execution failover bounded and exact-model;
+            the resolver still never generates or selects a different model.
 
     No network call; provider.generate() is never invoked here.
     """
@@ -142,6 +146,14 @@ def resolve_model(
     for binding in bindings:
         provider_name = binding.provider
         wire_id = binding.provider_model_id
+        if (provider_name, wire_id) in excluded_bindings:
+            continue
+        if provider_name == "codecraft":
+            from app.content.providers.codecraft import codecraft_runtime_enabled
+            if not codecraft_runtime_enabled():
+                attempted.append({"provider": provider_name, "provider_model_id": wire_id,
+                                  "reason": "runtime_quarantined", "category": FailureCategory.CONFIGURATION})
+                continue
         if eligible_bindings is not None and (provider_name, wire_id) not in eligible_bindings:
             attempted.append({
                 "provider": provider_name, "provider_model_id": wire_id,

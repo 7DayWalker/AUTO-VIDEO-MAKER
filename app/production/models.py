@@ -618,6 +618,10 @@ class NarrationArtifact(BaseModel):
     # Optional so accepted legacy Track 9 artifacts retain their old identity.
     source_transcript_path: Optional[str] = None
     source_media_path: Optional[str] = None
+    # Actual successful Standard planning choice, not UI intent or provider ids.
+    summary_understanding_model_id: Optional[str] = None
+    summary_selection_mode: Optional[Literal["auto", "explicit"]] = None
+    summary_failover_used: bool = False
     audio_artifact_path: Optional[str] = Field(default=None, min_length=1)
     audio_duration_seconds: Optional[float] = Field(default=None, gt=0.0)
     audio_provider: Optional[str] = None
