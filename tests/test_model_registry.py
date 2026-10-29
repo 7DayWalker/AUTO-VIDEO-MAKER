@@ -132,7 +132,8 @@ def test_gemma_is_not_a_qwen_binding():
 
     gemma_wire = "google/gemma-4-26b-a4b-it:free"
     for m in list_models():
-        assert all(b.provider_model_id != gemma_wire for b in m.bindings)
+        if any(b.provider_model_id == gemma_wire for b in m.bindings):
+            assert m.id == "gemma-4-26b-a4b-it" and m.family == "gemma"
         if m.id == "qwen-3.8-flash":
             assert all("gemma" not in b.provider_model_id.lower() for b in m.bindings)
 

@@ -144,7 +144,7 @@ def test_e2e_narration_standard_pro_synthesize_summary_and_media(monkeypatch, tm
         assert s==200, j
         assert j["narration_id"]==payload["narration_id"]
         s,payload2,_=_post(base, f"/api/productions/{PID}/units/{UID}/narration", {"summary_mode":"pro","selection_mode":"explicit","preferred_model_id":"gemini-3-flash-preview","mock_mode": True,"target_duration_seconds":8})
-        assert s==201, payload2
+        assert s==200, payload2
         s,payload3,_=_post(base, f"/api/productions/{PID}/units/{UID}/narration/synthesize", {"mock_mode": True,"format":"mp3"})
         assert s==200, payload3
         assert "audio" in payload3
@@ -888,6 +888,9 @@ def test_standard_real_http_rejects_invalid_plan_without_persistence(monkeypatch
     provider, factory_calls, binding = install_standard_provider(
         monkeypatch, data=data, **({"raw": "malformed model output"} if failure == "bad_json" else {}),
     )
+    # This test exhausts ONE configured route; other canonical CodeCraft models
+    # share its credential names but are not implemented by this exact-wire fake.
+    monkeypatch.setattr("app.content.model_registry.list_models", lambda: (MODEL_REGISTRY["qwen-3.8-flash"],))
     if failure == "missing_configuration":
         for key in binding.config_keys:
             monkeypatch.delenv(key, raising=False)
@@ -900,13 +903,13 @@ def test_standard_real_http_rejects_invalid_plan_without_persistence(monkeypatch
             monkeypatch.setitem(MODEL_REGISTRY, model.id, model)
             body.update(selection_mode="explicit", summary_understanding_model_id=model.id)
         status, payload, _ = _post(base, f"/api/productions/{PID}/units/{UID}/narration", body)
-        assert status == (422 if failure in ("missing_configuration", "ineligible_model") else 400), payload
-        assert payload["error"] == ("MODEL_NOT_ELIGIBLE" if status == 422 else "INVALID_REQUEST")
+        assert status == (422 if failure in ("missing_configuration", "ineligible_model") else 503), payload
+        assert payload["error"] == ("MODEL_NOT_ELIGIBLE" if status == 422 else "NARRATION_PROVIDER_TEMPORARILY_UNAVAILABLE")
         assert not narration_artifact_path(PID, UID, root=tmp_path / "productions").exists()
         if failure in ("missing_configuration", "ineligible_model"):
             assert factory_calls == provider.calls == []
         else:
-            assert provider.json_calls == len(provider.calls) == 1
+            assert provider.json_calls == len(provider.calls) == 2
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -956,3 +959,33 @@ def test_standard_real_http_retains_validated_source_segment_ids(monkeypatch, tm
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_standard_real_http_auto_recovers_from_partial_json_and_regeneration_returns_200(monkeypatch, tmp_path):
+    from tests.test_track9_standard_real import install_auto_pool
+    from app.production.storage import load_narration_artifact
+    candidates, providers = install_auto_pool(monkeypatch)
+    providers[0].raw = '{"summary":"unfinished","beats":['
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _standard_real_source(tmp_path)
+        route = f"/api/productions/{PID}/units/{UID}/narration"
+        body = {"summary_mode": "standard", "mock_mode": False}
+        status, payload, _ = _post(base, route, body)
+        assert status == 201, payload
+        assert payload["summary_understanding_model_id"] == candidates[1].id
+        assert payload["summary_selection_mode"] == "auto" and payload["summary_failover_used"] is True
+        assert [len(provider.calls) for provider in providers] == [2, 1]
+        status, payload, _ = _post(base, route, body)
+        assert status == 200, payload
+        saved = load_narration_artifact(PID, UID, root=tmp_path / "productions")
+        assert saved.narration_text == payload["narration_text"]
+        assert saved.summary_understanding_model_id == candidates[1].id
+        snapshot = saved.model_dump()
+        providers[1].raw = "unparseable private-source content"
+        status, payload, _ = _post(base, route, body)
+        assert status == 503, payload
+        assert "private-source" not in json.dumps(payload)
+        assert load_narration_artifact(PID, UID, root=tmp_path / "productions").model_dump() == snapshot
+    finally:
+        httpd.shutdown(); httpd.server_close()

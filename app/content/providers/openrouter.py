@@ -32,6 +32,8 @@ from app.content.exceptions import (
     LLMRateLimitError,
     LLMResponseError,
     LLMConnectionError,
+    LLMModelUnavailableError,
+    LLMOutputTruncatedError,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,6 +192,8 @@ class OpenRouterProvider(BaseLLMProvider):
                     f"Server error: {response.status_code}"
                 )
             elif response.status_code != 200:
+                if response.status_code == 404:
+                    raise LLMModelUnavailableError()
                 raise LLMResponseError(
                     f"HTTP {response.status_code}",
                     response.text[:500]
@@ -205,7 +209,17 @@ class OpenRouterProvider(BaseLLMProvider):
             if "choices" not in data or not data["choices"]:
                 raise LLMResponseError("No choices in response", str(data)[:500])
             
-            content = data["choices"][0].get("message", {}).get("content", "")
+            choice = data["choices"][0]
+            finish_reason = choice.get("finish_reason", "")
+            if finish_reason in {"length", "max_tokens"}:
+                raise LLMOutputTruncatedError()
+            if finish_reason == "content_filter":
+                error = LLMResponseError("Response blocked due to content policy")
+                error.category = "content_moderation"
+                raise error
+            content = choice.get("message", {}).get("content", "")
+            if isinstance(content, list):
+                content = "".join(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
             if not content:
                 raise LLMResponseError("Empty content in response")
             
@@ -226,6 +240,7 @@ class OpenRouterProvider(BaseLLMProvider):
                 model=self._model,
                 usage=usage,
                 raw_response=data,
+                metadata={"finish_reason": finish_reason},
             )
             
         except requests.exceptions.Timeout:

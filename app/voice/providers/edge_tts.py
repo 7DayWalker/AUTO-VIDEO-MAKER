@@ -6,6 +6,7 @@ Microsoft Edge TTS provider using the edge-tts library.
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import List
 
@@ -65,6 +66,12 @@ class EdgeTTSProvider(BaseVoiceProvider):
         response = getattr(error, "response", None)
         status = getattr(response, "status", None)
         return status if isinstance(status, int) else None
+
+    @classmethod
+    def _diagnostic(cls, error: Exception) -> str:
+        """Keep useful status/reason, never WebSocket tokens or proxy URLs."""
+        reason = re.sub(r"(?:https?|wss?)://[^\s'\"]+", "[transport URL withheld]", str(error))
+        return f"{type(error).__name__}: {reason[:300]} (http_status={cls._status_code(error)!r})"
 
     @classmethod
     def _is_retryable(cls, error: Exception) -> bool:
@@ -135,10 +142,7 @@ class EdgeTTSProvider(BaseVoiceProvider):
                 return
             except Exception as exc:
                 last_error = exc
-                error_msg = (
-                    f"{type(exc).__name__}: {exc}"
-                    f" (http_status={self._status_code(exc)!r})"
-                )
+                error_msg = self._diagnostic(exc)
                 if "voice" in str(exc).lower() and "not found" in str(exc).lower():
                     raise VoiceNotFoundError(voice, self.name) from exc
                 if attempt >= total_attempts or not self._is_retryable(exc):
@@ -146,7 +150,7 @@ class EdgeTTSProvider(BaseVoiceProvider):
                         self.name,
                         f"Generation failed after {attempt}/{total_attempts} "
                         f"attempt(s): {error_msg}",
-                    ) from exc
+                    ) from None
 
                 delay = self.backoff_seconds * (2 ** (attempt - 1))
                 logger.warning(
@@ -158,7 +162,7 @@ class EdgeTTSProvider(BaseVoiceProvider):
 
         raise VoiceProviderError(
             self.name,
-            f"Generation failed: {last_error}",
+            f"Generation failed: {self._diagnostic(last_error)}",
         ) from last_error
 
     async def list_voices(self, locale: str = None) -> List[VoiceInfo]:
@@ -185,8 +189,8 @@ class EdgeTTSProvider(BaseVoiceProvider):
         except Exception as exc:
             raise VoiceProviderError(
                 self.name,
-                f"Failed to list voices: {type(exc).__name__}: {exc}",
-            ) from exc
+                f"Failed to list voices: {self._diagnostic(exc)}",
+            ) from None
 
     def is_available(self) -> bool:
         """Check if edge-tts is installed."""

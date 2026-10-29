@@ -168,11 +168,25 @@ def _extract_clip_range(source_path: Path, start: float, duration: float, output
         "-c:a","aac","-ac","2","-ar","44100","-b:a","128k", str(output_path)]
     run_ffmpeg(args, f"extracting source clip [{start:.3f}, {start+duration:.3f})")
 
-def _build_intermediate_clips(ordered_refs: List[Tuple[int, object]], source_asset: SourceAsset, source_path: Path, temp_dir: Path) -> List[Path]:
+def _visual_clip_durations(ordered_refs, narration_duration=None):
+    """Use subranges of cited evidence, not minutes of silence after the voice.
+
+    Evidence ranges may be much longer than the spoken recap. Shorten each
+    visual proportionally within its existing citation; never expand a source
+    range or change the persisted grounding. Short footage is padded later.
+    """
+    durations = [float(ref.end_seconds) - float(ref.start_seconds) for _, ref in ordered_refs]
+    total = sum(durations)
+    if narration_duration is not None and total > narration_duration > 0:
+        return [duration * narration_duration / total for duration in durations]
+    return durations
+
+
+def _build_intermediate_clips(ordered_refs: List[Tuple[int, object]], source_asset: SourceAsset, source_path: Path, temp_dir: Path, *, narration_duration=None) -> List[Path]:
     clips: List[Path]=[]
-    for idx,(order, ref) in enumerate(ordered_refs):
+    durations = _visual_clip_durations(ordered_refs, narration_duration)
+    for idx,((order, ref), dur) in enumerate(zip(ordered_refs, durations)):
         start=float(ref.start_seconds)
-        dur=float(ref.end_seconds)-float(ref.start_seconds)
         if dur <= 0:
             raise ValueError(f"ref order {order} has non-positive duration")
         clip=temp_dir / f"clip_{idx:04d}_b{order:03d}.mp4"
@@ -304,9 +318,9 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
     if not ordered_refs: raise ValueError('narrated summary requires at least one grounded visual reference')
     temp_base=pathlib.Path(tempfile.mkdtemp(prefix=f'track9_{production_id}_{unit_id}_'))
     try:
-        clips=_build_intermediate_clips(ordered_refs, source_asset, source_path, temp_base)
+        clips=_build_intermediate_clips(ordered_refs, source_asset, source_path, temp_base, narration_duration=narration_duration)
         try:
-            clip_total=sum(float(r.end_seconds)-float(r.start_seconds) for _,r in ordered_refs)
+            clip_total=sum(float(probe_media(clip).duration or 0) for clip in clips)
         except Exception:
             clip_total=None
         if clip_total is not None and narration_duration > clip_total + 0.3:

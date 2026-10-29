@@ -19,7 +19,7 @@ playwright==1.52.0
 requests==2.32.4
 
 # ----- TTS Voice Generation (Phase 2C) -----
-edge-tts==7.2.8
+edge-tts==7.3.1
 
 # ----- YouTube Publishing (Phase 7A) -----
 google-api-python-client==2.166.0

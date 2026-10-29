@@ -41,6 +41,8 @@ from app.content.exceptions import (
     LLMQuotaError,
     LLMRateLimitError,
     LLMResponseError,
+    LLMModelUnavailableError,
+    LLMOutputTruncatedError,
 )
 from app.content.providers.base import BaseLLMProvider, LLMResponse
 from app.providers.fallback_policy import (
@@ -347,8 +349,15 @@ class AlibabaProvider(BaseLLMProvider):
                 "response contained no choices",
                 _trim_key(json.dumps(data)[:2000], 500),
             )
+        finish_reason = choices[0].get("finish_reason", "")
+        if finish_reason in {"length", "max_tokens"}:
+            raise LLMOutputTruncatedError()
+        if finish_reason == "content_filter":
+            raise AlibabaContentModerationError("response was rejected by provider policy")
         message = choices[0].get("message") or {}
         content = message.get("content")
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
         if not isinstance(content, str) or not content.strip():
             raise AlibabaResponseError(
                 "response content was empty or not a string",
@@ -360,6 +369,7 @@ class AlibabaProvider(BaseLLMProvider):
             provider=self.name,
             model=selected_model,
             usage=usage,
+            metadata={"finish_reason": finish_reason},
         )
 
     # -- HTTP boundary --------------------------------------------------------
@@ -407,6 +417,9 @@ class AlibabaProvider(BaseLLMProvider):
 
         lowered = f"{code} {message}".lower()
         flat = lowered.replace("_", "").replace(".", "")
+
+        if status == 404 or any(marker in flat for marker in ("modelnotfound", "invalidmodel", "modelnotsupported")):
+            raise LLMModelUnavailableError()
 
         if status == 401 or (status == 403 and "invalidapikey" in flat):
             raise AlibabaAuthenticationError(self.name)

@@ -4404,6 +4404,8 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
             return 404, {"error": "MODEL_NOT_FOUND", "message": f"Unknown canonical model {explicit!r}"}
     try:
         from app.production.narration import build_grounded_narration_plan
+        from app.production.storage import narration_artifact_path
+        replacing = narration_artifact_path(production_id, unit_id, root=PRODUCTIONS_DIR).is_file()
         art = build_grounded_narration_plan(production_id, unit_id, sa, tr, target_duration_seconds=float(tds), canonical_model_id=explicit, summary_understanding_model_id=explicit, summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR)
         art.source_transcript_path = tr.transcript_path
         art.source_media_path = sa.stored_path
@@ -4427,7 +4429,7 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": _browser_safe_diagnostic(exc)}
     except Exception as exc:
         return 500, {"error": "NARRATION_BUILD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
-    d=art.model_dump(); d["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return 201, d
+    d=art.model_dump(); d["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return (200 if replacing else 201), d
 
 
 def narration_synthesize_payload(production_id: str, unit_id: str, body: dict):

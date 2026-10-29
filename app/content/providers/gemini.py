@@ -22,6 +22,8 @@ from app.content.exceptions import (
     LLMRateLimitError,
     LLMResponseError,
     LLMConnectionError,
+    LLMModelUnavailableError,
+    LLMOutputTruncatedError,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,12 +97,19 @@ class GeminiProvider(BaseLLMProvider):
         # Add JSON response format if schema provided
         if response_schema:
             payload["generationConfig"]["responseMimeType"] = "application/json"
+            # Thinking and visible JSON share maxOutputTokens. Default high
+            # thinking on Gemini 3 can spend 4K tokens before finishing one beat.
+            if self._model.startswith("gemini-3"):
+                payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
+            elif self._model.startswith("gemini-2.5-flash"):
+                payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
         
-        # Build URL with API key
-        url = f"{self._base_url}/models/{self._model}:generateContent?key={self._api_key}"
+        # Credentials must not appear in URLs/transport diagnostics.
+        url = f"{self._base_url}/models/{self._model}:generateContent"
         
         headers = {
             "Content-Type": "application/json",
+            "x-goog-api-key": self._api_key,
         }
         
         try:
@@ -130,6 +139,11 @@ class GeminiProvider(BaseLLMProvider):
             elif response.status_code != 200:
                 error_data = response.json() if response.text else {}
                 error_msg = error_data.get("error", {}).get("message", response.text[:500])
+                if response.status_code == 404 or (
+                    response.status_code == 400 and "model" in error_msg.lower()
+                    and any(word in error_msg.lower() for word in ("not found", "not supported", "unsupported"))
+                ):
+                    raise LLMModelUnavailableError()
                 raise LLMResponseError(
                     f"HTTP {response.status_code}",
                     error_msg
@@ -149,10 +163,9 @@ class GeminiProvider(BaseLLMProvider):
             if "promptFeedback" in data:
                 feedback = data["promptFeedback"]
                 if feedback.get("blockReason"):
-                    raise LLMResponseError(
-                        f"Content blocked: {feedback.get('blockReason')}",
-                        str(feedback)
-                    )
+                    error = LLMResponseError("Prompt blocked by provider content policy")
+                    error.category = "content_moderation"
+                    raise error
             
             # Extract content from candidates
             if "candidates" not in data or not data["candidates"]:
@@ -162,15 +175,22 @@ class GeminiProvider(BaseLLMProvider):
             
             # Check finish reason
             finish_reason = candidate.get("finishReason", "")
+            if finish_reason == "MAX_TOKENS":
+                raise LLMOutputTruncatedError()
             if finish_reason == "SAFETY":
-                raise LLMResponseError("Response blocked due to safety filters")
+                error = LLMResponseError("Response blocked due to safety filters")
+                error.category = "content_moderation"
+                raise error
             
             # Extract text content
             content_parts = candidate.get("content", {}).get("parts", [])
             if not content_parts:
                 raise LLMResponseError("No content parts in response")
             
-            content = content_parts[0].get("text", "")
+            content = "".join(
+                part.get("text", "") for part in content_parts
+                if isinstance(part, dict) and not part.get("thought")
+            )
             if not content:
                 raise LLMResponseError("Empty content in response")
             
@@ -192,12 +212,13 @@ class GeminiProvider(BaseLLMProvider):
                 model=self._model,
                 usage=usage,
                 raw_response=data,
+                metadata={"finish_reason": finish_reason},
             )
             
         except requests.exceptions.Timeout:
             raise LLMConnectionError(self.name, f"Request timed out after {self._timeout}s")
-        except requests.exceptions.ConnectionError as e:
-            raise LLMConnectionError(self.name, str(e))
+        except requests.exceptions.ConnectionError:
+            raise LLMConnectionError(self.name, "Transport connection failed") from None
         except (LLMAuthenticationError, LLMQuotaError, LLMRateLimitError, 
                 LLMResponseError, LLMConnectionError):
             raise
@@ -262,11 +283,11 @@ class GeminiProvider(BaseLLMProvider):
             payload["systemInstruction"] = system_instruction
         if response_schema is not None:
             payload["generationConfig"]["responseMimeType"] = "application/json"
-        url = f"{self._base_url}/models/{self._model}:generateContent?key={self._api_key}"
+        url = f"{self._base_url}/models/{self._model}:generateContent"
         import requests
         from app.content.exceptions import LLMAuthenticationError, LLMQuotaError, LLMRateLimitError, LLMResponseError, LLMConnectionError
         try:
-            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=self._timeout)
+            resp = requests.post(url, headers={"Content-Type": "application/json", "x-goog-api-key": self._api_key}, json=payload, timeout=self._timeout)
             if resp.status_code in (401, 403):
                 raise LLMAuthenticationError(self.name)
             if resp.status_code == 429:

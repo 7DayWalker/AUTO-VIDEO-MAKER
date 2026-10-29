@@ -677,6 +677,48 @@ def _build_registry() -> Dict[str, CanonicalModel]:
             default_binding="gemini",
         ),
         CanonicalModel(
+            id="gemini-2.5-flash",
+            display_name="Gemini 2.5 Flash",
+            family="gemini",
+            capabilities=ModelCapabilities(
+                text=True, json_=True, vision=True, video=True, multimodal=True,
+                long_context=True, tool_use=True, context_tokens=1_048_576,
+            ),
+            bindings=(
+                ProviderBinding(
+                    provider="gemini", provider_model_id="gemini-2.5-flash",
+                    config_keys=("GEMINI_API_KEY",),
+                    supported_input_modalities=(InputModality.TEXT, InputModality.IMAGE,
+                                                InputModality.NATIVE_VIDEO, InputModality.FRAME_SEQUENCE),
+                    supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
+                    identity_evidence="Google GET /v1beta/models lists gemini-2.5-flash (2026-10-29).",
+                ),
+                ProviderBinding(
+                    provider="openrouter", provider_model_id="google/gemini-2.5-flash",
+                    config_keys=("OPENROUTER_API_KEY",),
+                    supported_input_modalities=(InputModality.TEXT,),
+                    supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
+                    identity_evidence="OpenRouter GET /api/v1/models lists google/gemini-2.5-flash with response_format (2026-10-29); text JSON route.",
+                ),
+            ),
+            default_binding="gemini",
+        ),
+        CanonicalModel(
+            id="gemini-3.6-flash", display_name="Gemini 3.6 Flash", family="gemini",
+            capabilities=ModelCapabilities(
+                text=True, json_=True, vision=True, video=True, multimodal=True,
+                long_context=True, tool_use=True, context_tokens=1_048_576,
+            ),
+            bindings=(ProviderBinding(
+                provider="gemini", provider_model_id="gemini-3.6-flash", config_keys=("GEMINI_API_KEY",),
+                supported_input_modalities=(InputModality.TEXT, InputModality.IMAGE,
+                                            InputModality.NATIVE_VIDEO, InputModality.FRAME_SEQUENCE),
+                supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
+                identity_evidence="First-party Google GET /v1beta/models lists gemini-3.6-flash; generateContent JSON verified live (2026-10-30).",
+            ),),
+            default_binding="gemini",
+        ),
+        CanonicalModel(
             id="qwen-vl-max",
             display_name="Qwen VL Max",
             family="qwen",
@@ -765,6 +807,32 @@ def _build_registry() -> Dict[str, CanonicalModel]:
                     ),
                 ),
             ),
+            default_binding="openrouter",
+        ),
+        # Additional configured Standard choices retain their OWN identity.
+        # Never attach a cheaper/different wire model to a preview's binding.
+        CanonicalModel(
+            id="qwen-plus", display_name="Qwen Plus", family="qwen",
+            capabilities=ModelCapabilities(text=True, json_=True),
+            bindings=(ProviderBinding(
+                provider="alibaba", provider_model_id="qwen-plus", config_keys=("ALIBABA_API_KEY",),
+                supported_input_modalities=(InputModality.TEXT,),
+                supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
+                identity_evidence="First-party DashScope qwen-plus; configured text model supported by the Alibaba adapter.",
+            ),),
+            default_binding="alibaba",
+        ),
+        CanonicalModel(
+            id="gemma-4-26b-a4b-it", display_name="Gemma 4 26B A4B IT", family="gemma",
+            capabilities=ModelCapabilities(text=True, json_=True, vision=True, video=True, multimodal=True,
+                                           long_context=True, context_tokens=262_144),
+            bindings=(ProviderBinding(
+                provider="openrouter", provider_model_id="google/gemma-4-26b-a4b-it:free",
+                config_keys=("OPENROUTER_API_KEY",),
+                supported_input_modalities=(InputModality.TEXT,),
+                supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
+                identity_evidence="OpenRouter GET /api/v1/models lists google/gemma-4-26b-a4b-it:free with text/image/video input and response_format (2026-10-29); Standard text route only.",
+            ),),
             default_binding="openrouter",
         ),
         # ---- CodeCraft vision: DELIBERATELY NOT REGISTERED -----------------

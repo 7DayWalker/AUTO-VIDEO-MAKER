@@ -264,6 +264,12 @@ explicit manual YouTube/TikTok publishing and durable reconciliation evidence.
   Users select canonical models; AVM resolves providers internally with same-model
   failover and truthful `ready` / `not_configured` / `unknown` readiness.
   SummaryStudio defaults to real execution; its sandbox checkbox is opt-in.
+  Standard compacts/window-merges transcript evidence, tolerates complete fenced
+  JSON/beat arrays, and uses bounded output repair plus Auto cross-model failover
+  for provider/output failures. Explicit model selection never changes identity.
+  Edge TTS requires the pinned 7.3.1 client for the current speech protocol;
+  summary visuals are bounded to measured narration duration. See the
+  [real Dragon Queen verification](diagnostics/track9_standard_dragon_verification.md).
 - Standalone summary sidecars are inspectable/downloadable through
   `/api/productions/{id}/units/{unitId}/summary-video` and `/summary-video/media`.
   **Phase 11C-PLUS — V1.x handoff implemented and verified:** explicitly call

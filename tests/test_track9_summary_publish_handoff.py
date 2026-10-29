@@ -491,3 +491,19 @@ def test_status_post_rejection_delivers_405_with_unread_body_without_publication
     status, payload = request(runtime.base, f"/api/projects/unbound/publish/{platform}/status", {"ignored": "x" * 64000})
     assert status == 405 and payload["error"] == "METHOD_NOT_ALLOWED"
     assert list(runtime.projects.iterdir()) == []
+
+
+def test_grounded_visual_ranges_are_bounded_to_voice_without_mutating_citations():
+    from app.production.models import NarrationSourceRef
+    from app.production.summary_video import _visual_clip_durations
+    refs = [(1, NarrationSourceRef(asset_id="src-001", start_seconds=100, end_seconds=160, transcript_segment_ids=[1])),
+            (2, NarrationSourceRef(asset_id="src-001", start_seconds=900, end_seconds=1080, transcript_segment_ids=[9]))]
+    durations = _visual_clip_durations(refs, narration_duration=30)
+    assert durations == [7.5, 22.5] and sum(durations) == 30
+    assert [(ref.start_seconds, ref.end_seconds) for _, ref in refs] == [(100, 160), (900, 1080)]
+    assert _visual_clip_durations(refs, narration_duration=300) == [60, 180]
+
+
+def test_real_summary_duration_tracks_synthesized_voice_not_full_evidence(rendered):
+    narration = load_narration_artifact(PID, UID, root=rendered.productions)
+    assert abs(rendered.summary["output_duration_seconds"] - narration.audio_duration_seconds) < 1.5

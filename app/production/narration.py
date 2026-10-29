@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 from datetime import datetime
@@ -42,6 +43,9 @@ from app.voice.config import (
 from app.voice.exceptions import VoiceProviderError
 from app.voice.generator import get_provider
 from app.voice.validator import validate_audio_file
+
+
+logger = logging.getLogger(__name__)
 
 
 # True canonical identities (provider-neutral). Deprecated aliases retained via registry.
@@ -226,53 +230,73 @@ def _standard_source_segments(production_id, source_asset, root):
     return [SourceSegment.model_validate(item) for item in segment_payload["segments"]]
 
 
-def _build_standard_auto(production_id, unit_id, source_asset, transcript, *, duration, status, root):
+def _build_standard_routed(production_id, unit_id, source_asset, transcript, *, duration, status, root, model_id=None):
     from app.content.capability_router import assess_model_for_job
     from app.content.model_resolver import AllExactModelProvidersFailedError
     from app.production.narration_real import (
         ai_grounded_plan, standard_transient_failure_category, SummaryStandardTemporarilyUnavailableError,
     )
-    candidates = standard_auto_model_ids()
+    candidates = (model_id,) if model_id is not None else standard_auto_model_ids()
     if not candidates:
         raise RuntimeError("Summary Standard has no eligible route: configure an available text/JSON provider.")
     segments = _standard_source_segments(production_id, source_asset, root)
     failed = False
-    for model_id in candidates:
-        attempted = set()
+    last_error = None
+    attempted = set()
+    for candidate_id in candidates:
         # Existing exact-model resolver remains the only provider factory gate.
-        # An admitted route is attempted once; its transient failure can move
-        # to another route of this model, then another Auto canonical model.
+        # Each route is visited once, with bounded per-window output repair.
+        # Explicit selection can change routes, never canonical model identity.
         while True:
-            routes = assess_model_for_job(model_id, JOB_SOURCE_TRANSCRIPT_RECAP).eligible_routes()
+            routes = assess_model_for_job(candidate_id, JOB_SOURCE_TRANSCRIPT_RECAP).eligible_routes()
             if not any((route.provider, route.provider_model_id) not in attempted for route in routes):
                 break
             try:
-                resolved = resolve_model(model_id, mode="exact", try_next_on_failure=True,
+                resolved = resolve_model(candidate_id, mode="exact", try_next_on_failure=True,
                     job_id=JOB_SOURCE_TRANSCRIPT_RECAP, excluded_bindings=tuple(attempted))
             except AllExactModelProvidersFailedError as exc:
                 if exc.last_error is not None and standard_transient_failure_category(exc.last_error) is None:
                     raise
+                previous_attempts = len(attempted)
+                attempted.update((item["provider"], item["provider_model_id"]) for item in exc.attempted)
+                last_error = exc.last_error or exc
                 failed = True
-                break
+                if len(attempted) == previous_attempts:
+                    break
+                continue
+            attempted.update((item["provider"], item["provider_model_id"]) for item in resolved.attempted)
+            failed = failed or bool(resolved.attempted)
             route_id = (resolved.provider, resolved.provider_model_id)
             attempted.add(route_id)
             try:
                 artifact = ai_grounded_plan(production_id, unit_id, source_asset, transcript,
                     target_duration_seconds=duration, prov=resolved.provider_instance,
-                    status=status, source_segments=segments)
+                    status=status, source_segments=segments,
+                    context_tokens=get_model(candidate_id).capabilities.context_tokens, output_attempts=2)
             except Exception as exc:
-                if standard_transient_failure_category(exc) is None:
+                category = standard_transient_failure_category(exc)
+                if category is None:
                     raise
+                logger.warning("Standard narration route failed: canonical=%s provider=%s model=%s category=%s",
+                               resolved.canonical_model_id, resolved.provider, resolved.provider_model_id, category)
+                last_error = exc
                 failed = True
                 continue
             artifact.summary_understanding_model_id = resolved.canonical_model_id
-            artifact.summary_selection_mode = "auto"
+            artifact.summary_selection_mode = "explicit" if model_id is not None else "auto"
             artifact.summary_failover_used = failed
+            logger.info("Standard narration grounded: canonical=%s provider=%s model=%s beats=%d failover=%s",
+                        resolved.canonical_model_id, resolved.provider, resolved.provider_model_id, len(artifact.beats), failed)
             return artifact
+    if model_id is not None:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Canonical model {model_id!r} has no eligible route for Summary Standard text/JSON planning")
     # No raw provider text, credential values, prompt or transcript in the
     # browser-facing error. Failed attempts never persist a narration artifact.
     raise SummaryStandardTemporarilyUnavailableError(
-        "Summary Standard's eligible providers are temporarily unavailable. No narration was saved; try again after service recovery."
+        "Summary Standard's eligible providers are temporarily unavailable or returned unusable narration. "
+        "No narration was saved; check provider access/model availability and retry."
     )
 
 
@@ -387,11 +411,10 @@ def build_grounded_narration_plan(
             return mock_grounded_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, status=status, provider_override=llm_provider_override)
         from app.production.narration_mock import mock_grounded_plan
         return mock_grounded_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, status=status, provider_override=llm_provider_override)
-    if (mode == "standard" and llm_provider_override is None
-            and canonical_model_id is None and summary_understanding_model_id is None
-            and (summary_understanding_mode or "auto").strip().lower() == "auto"):
-        return _build_standard_auto(production_id, unit_id, source_asset, source_transcript,
-            duration=duration, status=status, root=root)
+    if mode == "standard" and llm_provider_override is None:
+        explicit = canonical_model_id is not None or summary_understanding_model_id is not None
+        return _build_standard_routed(production_id, unit_id, source_asset, source_transcript,
+            duration=duration, status=status, root=root, model_id=summary_model_id if explicit else None)
     # Real provider path: hierarchical multimodal for Pro, text-only for Standard
     if mode == "pro":
         resolve_narration_model(summary_model_id)

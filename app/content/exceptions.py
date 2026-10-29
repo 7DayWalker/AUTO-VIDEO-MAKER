@@ -90,6 +90,22 @@ class LLMResponseError(LLMProviderError):
         super().__init__(f"Invalid LLM response: {reason}")
 
 
+class LLMOutputTruncatedError(LLMResponseError):
+    """A provider exhausted its output budget; partial JSON is not a plan."""
+
+    def __init__(self):
+        super().__init__("Response exceeded the output token budget; incomplete output was discarded")
+
+
+class LLMModelUnavailableError(LLMResponseError):
+    """The exact wire model/operation is unavailable, not an invalid AVM brief."""
+
+    category = "capability"
+
+    def __init__(self):
+        super().__init__("The provider does not support the requested model or operation")
+
+
 class LLMConnectionError(LLMProviderError):
     """Raised when connection to LLM provider fails."""
     
