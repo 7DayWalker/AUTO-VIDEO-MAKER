@@ -970,7 +970,7 @@ def test_standard_real_http_auto_recovers_from_partial_json_and_regeneration_ret
     try:
         _standard_real_source(tmp_path)
         route = f"/api/productions/{PID}/units/{UID}/narration"
-        body = {"summary_mode": "standard", "mock_mode": False}
+        body = {"summary_mode": "standard", "mock_mode": False, "target_duration_seconds": 30}
         status, payload, _ = _post(base, route, body)
         assert status == 201, payload
         assert payload["summary_understanding_model_id"] == candidates[1].id
@@ -987,5 +987,49 @@ def test_standard_real_http_auto_recovers_from_partial_json_and_regeneration_ret
         assert status == 503, payload
         assert "private-source" not in json.dumps(payload)
         assert load_narration_artifact(PID, UID, root=tmp_path / "productions").model_dump() == snapshot
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("preset,count,words,target", [(None, 18, (320, 500), 180), ("auto", 18, (320, 500), 180),
+    ("short", 8, (150, 210), 75), ("story", 18, (350, 520), 195), ("deep", 30, (650, 1000), 390)])
+def test_real_narration_http_duration_presets_persist_story_budget(monkeypatch, tmp_path, preset, count, words, target):
+    from tests.track9_narration_fakes import story_evidence, story_response, install_standard_provider
+    from app.production.storage import save_revision, transcript_path_for, load_narration_artifact
+    from app.production.narration import validate_narration_artifact
+    from app.production.recap_budget import validate_recap_depth
+    asset, transcript = story_evidence(count=100)
+    provider, _, _ = install_standard_provider(monkeypatch, data=story_response(count=count, segment_count=100))
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        prod = _make_prod(tmp_path)
+        save_revision(prod.model_copy(update={"source_assets": [asset], "plan_version": 2,
+            "revised_at": "2026-10-30T09:00:00"}), root=tmp_path / "productions")
+        path = transcript_path_for(PID, AID, root=tmp_path / "productions")
+        path.parent.mkdir(parents=True, exist_ok=True); path.write_text(transcript.model_dump_json(), encoding="utf-8")
+        body = {"mock_mode": False, "summary_mode": "standard"}
+        if preset is not None: body["target_length_preset"] = preset
+        status, payload, _ = _post(base, f"/api/productions/{PID}/units/{UID}/narration", body)
+        assert status == 201, payload
+        assert payload["target_length_preset"] == (preset or "auto") and payload["target_duration_seconds"] == target
+        assert len(payload["beats"]) == count and words[0] <= len(payload["narration_text"].split()) <= words[1]
+        artifact = load_narration_artifact(PID, UID, root=tmp_path / "productions")
+        validate_narration_artifact(artifact, source_asset=asset, source_transcript=transcript)
+        validate_recap_depth(artifact, artifact.narration_budget, transcript, asset.duration)
+        assert len(provider.calls) == 1
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("body", [{"target_length_preset": "long"}, {"target_length_preset": None},
+    {"target_length_preset": []}, {"target_length_preset": False}, {"target_duration_seconds": "NaN"},
+    {"target_duration_seconds": "Infinity"}, {"target_duration_seconds": True}])
+def test_invalid_recap_preset_and_nonfinite_duration_fail_before_provider(monkeypatch, tmp_path, body):
+    monkeypatch.setattr("app.production.narration.build_grounded_narration_plan", lambda *a, **k: pytest.fail("invalid request must not generate"))
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        status, payload, _ = _post(base, f"/api/productions/{PID}/units/{UID}/narration", body)
+        assert status == 400 and payload["error"] == "INVALID_REQUEST", payload
     finally:
         httpd.shutdown(); httpd.server_close()

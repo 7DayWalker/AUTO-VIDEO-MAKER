@@ -689,3 +689,164 @@ def test_edge_tts_transport_diagnostics_never_expose_request_tokens(monkeypatch,
     assert "403" in str(error.value) and "Invalid response status" in str(error.value)
     assert "private-token" not in str(error.value) and "private-key" not in str(error.value)
     assert "wss://" not in str(error.value)
+
+
+@pytest.mark.parametrize("seconds,beats,words,target", [
+    (120, (4, 6), (100, 150), 60), (179.9, (4, 6), (100, 150), 60),
+    (180, (8, 12), (180, 270), 100), (599.9, (8, 12), (180, 270), 100),
+    (600, (14, 22), (320, 500), 180), (1805, (14, 22), (320, 500), 180),
+    (2700, (14, 22), (320, 500), 180), (2700.1, (22, 32), (500, 800), 270),
+])
+def test_auto_duration_bands_match_story_scale(seconds, beats, words, target):
+    from app.production.recap_budget import resolve_recap_budget
+    budget = resolve_recap_budget(seconds)
+    assert (budget.min_beats, budget.max_beats) == beats
+    assert (budget.min_narration_words, budget.max_narration_words) == words
+    assert budget.target_duration_seconds == target
+
+
+@pytest.mark.parametrize("preset,beats,words,target", [
+    ("short", (8, 10), (150, 210), 75), ("story", (15, 22), (350, 520), 195),
+    ("deep", (25, 36), (650, 1000), 390),
+])
+def test_length_presets_have_explicit_minimums_and_override_auto(preset, beats, words, target):
+    from app.production.recap_budget import resolve_recap_budget
+    budget = resolve_recap_budget(1800, target_length_preset=preset)
+    assert budget.preset == preset and budget.target_duration_seconds == target
+    assert (budget.min_beats, budget.max_beats) == beats
+    assert (budget.min_narration_words, budget.max_narration_words) == words
+    custom = resolve_recap_budget(1800, target_length_preset=preset, target_duration_seconds=150)
+    assert custom.preset == "custom" and custom.target_duration_seconds == 150
+    assert custom.min_narration_words > 300
+
+
+@pytest.mark.parametrize("preset", ["auto", "short", "story", "deep"])
+def test_tiny_sources_and_explicit_sandbox_do_not_expand_into_invented_story(preset):
+    from app.production.recap_budget import resolve_recap_budget
+    short = resolve_recap_budget(12, target_length_preset=preset)
+    sandbox = resolve_recap_budget(1800, target_length_preset=preset, mock_mode=True)
+    assert short.target_duration_seconds == pytest.approx(7.2) and not short.enforce_depth
+    assert sandbox.target_duration_seconds == 30 and not sandbox.enforce_depth
+
+
+def test_real_auto_story_budget_persists_and_covers_whole_movie(tmp_path):
+    from app.production.recap_budget import validate_recap_depth, timeline_sections
+    from tests.track9_narration_fakes import story_evidence, story_response
+    asset, transcript = story_evidence(count=100)
+    provider = StubNarrationProvider(data=story_response(segment_count=100))
+    artifact = build_grounded_narration_plan(PID, UID, asset, transcript, summary_mode="standard",
+                                            mock_mode=False, llm_provider_override=provider)
+    assert artifact.target_duration_seconds == 180 and artifact.target_length_preset == "auto"
+    assert len(artifact.beats) == 18 and 320 <= len(artifact.narration_text.split()) <= 500
+    validate_recap_depth(artifact, artifact.narration_budget, transcript, asset.duration)
+    assert len(timeline_sections(transcript, asset.duration)) == 5
+    assert artifact.source_refs[0].start_seconds == 0
+    assert artifact.source_refs[-1].end_seconds == asset.duration
+    save_narration_artifact(artifact, production_id=PID, unit_id=UID, root=tmp_path,
+                            source_asset=asset, source_transcript=transcript)
+    assert load_narration_artifact(PID, UID, root=tmp_path).narration_budget == artifact.narration_budget
+    prompt = provider.calls[0]["prompt"]
+    assert '"min_beats":14' in prompt and '"min_narration_words":320' in prompt
+    assert "2-3 engaging narrative sentences" in provider.calls[0]["system_prompt"]
+
+
+@pytest.mark.parametrize("bad", ["blurb", "too_few_words", "short_beats", "one_sentence", "clustered", "reversed", "no_ending"])
+def test_story_depth_and_timeline_failures_receive_one_bounded_expansion(bad):
+    from tests.track9_narration_fakes import story_evidence, story_response
+    asset, transcript = story_evidence(count=100)
+    good = story_response(segment_count=100)
+    data = json.loads(json.dumps(good))
+    if bad == "blurb": data["beats"] = data["beats"][:4]
+    if bad == "too_few_words":
+        for beat in data["beats"]: beat["narration_text"] = "A traveler protects their friend. The difficult choice changes the story."
+    if bad == "short_beats": data["beats"][5]["narration_text"] = "A choice. A consequence."
+    if bad == "one_sentence":
+        for beat in data["beats"]: beat["narration_text"] = beat["narration_text"].replace(". Their", " and their")
+    if bad == "clustered":
+        for index, beat in enumerate(data["beats"]): beat["source_refs"][0]["transcript_segment_ids"] = [index]
+    if bad == "reversed":
+        data["beats"][5]["source_refs"], data["beats"][6]["source_refs"] = data["beats"][6]["source_refs"], data["beats"][5]["source_refs"]
+    if bad == "no_ending":
+        for beat in data["beats"]:
+            beat["source_refs"][0]["transcript_segment_ids"] = [min(85, beat["source_refs"][0]["transcript_segment_ids"][0])]
+    class RepairProvider(StubNarrationProvider):
+        def generate(self, *args, **kwargs):
+            self.raw = json.dumps(good if self.calls else data)
+            return super().generate(*args, **kwargs)
+    provider = RepairProvider()
+    artifact = build_grounded_narration_plan(PID, UID, asset, transcript, llm_provider_override=provider)
+    assert len(provider.calls) == 2 and len(artifact.beats) == 18
+    assert "Expand or repair" in provider.calls[1]["prompt"]
+
+
+def test_underlength_story_is_never_saved_or_returned_when_repair_fails(tmp_path):
+    from tests.track9_narration_fakes import story_evidence, story_response
+    asset, transcript = story_evidence(count=100)
+    provider = StubNarrationProvider(data=story_response(count=4, segment_count=100))
+    with pytest.raises(ValueError, match="14-22 beats"):
+        build_grounded_narration_plan(PID, UID, asset, transcript, llm_provider_override=provider, root=tmp_path)
+    assert len(provider.calls) == 2 and not list(tmp_path.rglob("narration.json"))
+
+
+def test_long_movie_window_merge_keeps_global_ids_and_enforces_final_depth():
+    from tests.track9_narration_fakes import story_evidence, story_response
+    from app.production.recap_budget import validate_recap_depth
+    asset, transcript = story_evidence(count=365)
+    class StoryWindowProvider(StubNarrationProvider):
+        def generate(self, prompt, system_prompt=None, **kwargs):
+            evidence = json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+            if "transcript_segments" in evidence:
+                ids = [row["id"] for row in evidence["transcript_segments"]]
+            else:
+                ids = sorted({tid for plan in evidence["candidate_plans"] for beat in plan["beats"]
+                              for ref in beat["source_refs"] for tid in ref["transcript_segment_ids"]})
+            count = evidence["preferred_beat_count"]
+            count = min(count, evidence["max_beats"])
+            data = story_response(count=count, segment_count=len(ids))
+            if evidence["is_final_recap"]:
+                selected = []
+                sections = evidence["timeline_sections"]
+                for position, section in enumerate(sections):
+                    section_ids = section["transcript_segment_ids"]
+                    take = count // len(sections) + (position < count % len(sections))
+                    selected.extend(section_ids[round(i * (len(section_ids) - 1) / max(1, take - 1))] for i in range(take))
+            else:
+                selected = [ids[beat["source_refs"][0]["transcript_segment_ids"][0]] for beat in data["beats"]]
+            for beat, tid in zip(data["beats"], selected):
+                ref = beat["source_refs"][0]
+                ref["transcript_segment_ids"] = [tid]
+            self.raw = json.dumps(data)
+            return super().generate(prompt, system_prompt, **kwargs)
+    provider = StoryWindowProvider()
+    artifact = build_grounded_narration_plan(PID, UID, asset, transcript, llm_provider_override=provider)
+    assert len(provider.calls) > 1 and len(artifact.beats) >= 14
+    assert artifact.narration_budget.min_narration_words == 320
+    validate_recap_depth(artifact, artifact.narration_budget, transcript, asset.duration)
+
+
+def test_pro_recap_uses_same_depth_budget_after_real_visual_boundary(monkeypatch, tmp_path):
+    import importlib
+    import app.production.narration_pro as pro
+    from app.production.recap_budget import resolve_recap_budget
+    from app.content.providers.base import LLMResponse
+    from tests.track9_narration_fakes import story_evidence, story_response
+    # Load the original function without undoing the autouse no-mock assertions.
+    original = importlib.util.spec_from_file_location("recap_pro_under_test", pro.__file__)
+    module = importlib.util.module_from_spec(original); original.loader.exec_module(module)
+    asset, transcript = story_evidence(count=60)
+    class VisualProvider(StubNarrationProvider):
+        def __init__(self):
+            super().__init__(data=story_response(segment_count=60)); self.visual_calls = 0
+        def supports_native_video(self): return False
+        def supports_multimodal(self): return True
+        def generate_multimodal(self, *args, **kwargs):
+            self.visual_calls += 1
+            assert kwargs["images"] and kwargs["video"] is None
+            return LLMResponse(content='{"visual_summary":"A character protects a companion."}', provider=self.name, model=self.model)
+    provider = VisualProvider()
+    monkeypatch.setattr(module, "_extract_window_frames", lambda *args: [(args[1], tmp_path / "fixture-frame-not-read.jpg")])
+    artifact = module.build_pro_multimodal_plan(PID, UID, asset, transcript, target_duration_seconds=180,
+        summary_model_id="gemini-3.6-flash", prov=provider, root=tmp_path, recap_budget=resolve_recap_budget(asset.duration))
+    assert provider.visual_calls == 15 and len(artifact.beats) == 18
+    assert '"visual_windows"' in provider.calls[0]["prompt"]
+    assert artifact.narration_budget.min_narration_words == 320

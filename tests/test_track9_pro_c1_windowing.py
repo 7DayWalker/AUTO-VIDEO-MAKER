@@ -37,10 +37,26 @@ def _make_long_source(tmp_root, duration_per_seg=60.0, n_segs=6):
     if not merged.is_file():
         runner.run(["-y","-f","concat","-safe","0","-i",str(concat),"-c","copy","-movflags","+faststart",str(merged)], "concat long source")
     return merged
+def _story_window_plan(transcript):
+    """A 60-second plan now obeys the shared depth/coverage contract too."""
+    from tests.track9_narration_fakes import story_response
+    data = story_response(count=6, segment_count=len(transcript.segments))
+    for beat in data["beats"]:
+        ref = beat["source_refs"][0]
+        segment = transcript.segments[ref["transcript_segment_ids"][0]]
+        ref.update(start_seconds=segment.start + 1, end_seconds=segment.end - 1)
+    return json.dumps(data)
+
+
+def _story_window_text(index):
+    return (f"Source event {index} reveals a challenge that changes the companion's plans. "
+            "They choose a difficult path and confront the consequences while protecting the people who depend on them.")
+
+
 def test_each_window_receives_only_its_bounded_visual_evidence(tmp_path):
     merged=_make_long_source(tmp_path, duration_per_seg=60.0, n_segs=6)
     asset=_reg(tmp_path, merged)
-    tr=SourceTranscript(asset_id="src-001", language="en", segments=[TranscriptSegment(text=f"seg {i}", start=i*60.0, end=(i+1)*60.0) for i in range(6)], provider="mock", provider_version="1.0", created_at="2026-10-07T00:00:00+00:00", transcript_path="source/src-001.transcript.json")
+    tr=SourceTranscript(asset_id="src-001", language="en", segments=[TranscriptSegment(text=_story_window_text(i), start=i*60.0, end=(i+1)*60.0) for i in range(6)], provider="mock", provider_version="1.0", created_at="2026-10-07T00:00:00+00:00", transcript_path="source/src-001.transcript.json")
     (production_dir(PID, root=tmp_path)/"source/src-001.transcript.json").write_text(json.dumps(tr.model_dump()), encoding="utf-8")
     from app.content.providers.base import LLMResponse
     seen=[]
@@ -49,7 +65,7 @@ def test_each_window_receives_only_its_bounded_visual_evidence(tmp_path):
         def is_available(self): return True
         def supports_multimodal(self): return True
         def generate(self, prompt, system_prompt=None, **kw):
-            return LLMResponse(content=json.dumps({"summary":"s","beats":[{"beat_id":"b1","title":"t","narration_text":"narr","source_refs":[{"asset_id":"src-001","start_s":0,"end_s":5,"transcript_segment_ids":[0]}]}]}), provider="rec", model="rec-vl")
+            return LLMResponse(content=_story_window_plan(tr), provider="rec", model="rec-vl")
         def generate_multimodal(self, prompt, system_prompt=None, *, video=None, images=None, video_bytes=None, **kw):
             import pathlib as _pl
             seen.append({"video":video})
@@ -77,7 +93,7 @@ def test_each_window_receives_only_its_bounded_visual_evidence(tmp_path):
 def test_full_source_not_repeated(tmp_path):
     merged=_make_long_source(tmp_path, duration_per_seg=120.0, n_segs=6)
     asset=_reg(tmp_path, merged)
-    tr=SourceTranscript(asset_id="src-001", language="en", segments=[TranscriptSegment(text=f"seg {i}", start=i*60.0, end=(i+1)*60.0) for i in range(12)], provider="mock", provider_version="1.0", created_at="2026-10-07T00:00:00+00:00", transcript_path="source/src-001.transcript.json")
+    tr=SourceTranscript(asset_id="src-001", language="en", segments=[TranscriptSegment(text=_story_window_text(i), start=i*60.0, end=(i+1)*60.0) for i in range(12)], provider="mock", provider_version="1.0", created_at="2026-10-07T00:00:00+00:00", transcript_path="source/src-001.transcript.json")
     (production_dir(PID, root=tmp_path)/"source/src-001.transcript.json").write_text(json.dumps(tr.model_dump()), encoding="utf-8")
     from app.content.providers.base import LLMResponse
     seen=[]
@@ -86,7 +102,7 @@ def test_full_source_not_repeated(tmp_path):
         def is_available(self): return True
         def supports_multimodal(self): return True
         def generate(self, prompt, system_prompt=None, **kw):
-            return LLMResponse(content=json.dumps({"summary":"s","beats":[{"beat_id":"b1","title":"t","narration_text":"narr","source_refs":[{"asset_id":"src-001","start_s":0,"end_s":5,"transcript_segment_ids":[0]}]}]}), provider="rec2", model="rec2-vl")
+            return LLMResponse(content=_story_window_plan(tr), provider="rec2", model="rec2-vl")
         def generate_multimodal(self, prompt, system_prompt=None, *, video=None, images=None, video_bytes=None, **kw):
             import pathlib as _pl
             seen.append({"video":video})

@@ -32,6 +32,7 @@ from app.production.storage import (
     save_narration_artifact,
     save_narration_audio,
 )
+from app.production.recap_budget import resolve_recap_budget
 from app.voice.config import (
     TTS_OUTPUT_FORMAT,
     TTS_PITCH,
@@ -230,7 +231,7 @@ def _standard_source_segments(production_id, source_asset, root):
     return [SourceSegment.model_validate(item) for item in segment_payload["segments"]]
 
 
-def _build_standard_routed(production_id, unit_id, source_asset, transcript, *, duration, status, root, model_id=None):
+def _build_standard_routed(production_id, unit_id, source_asset, transcript, *, duration, status, root, model_id=None, recap_budget=None):
     from app.content.capability_router import assess_model_for_job
     from app.content.model_resolver import AllExactModelProvidersFailedError
     from app.production.narration_real import (
@@ -272,7 +273,8 @@ def _build_standard_routed(production_id, unit_id, source_asset, transcript, *, 
                 artifact = ai_grounded_plan(production_id, unit_id, source_asset, transcript,
                     target_duration_seconds=duration, prov=resolved.provider_instance,
                     status=status, source_segments=segments,
-                    context_tokens=get_model(candidate_id).capabilities.context_tokens, output_attempts=2)
+                    context_tokens=get_model(candidate_id).capabilities.context_tokens, output_attempts=2,
+                    recap_budget=recap_budget)
             except Exception as exc:
                 category = standard_transient_failure_category(exc)
                 if category is None:
@@ -306,7 +308,8 @@ def build_grounded_narration_plan(
     source_asset: SourceAsset,
     source_transcript: SourceTranscript,
     *,
-    target_duration_seconds: float,
+    target_duration_seconds: Optional[float] = None,
+    target_length_preset: str = "auto",
     # None means "not supplied" (capability-driven AUTO for Standard and Pro).
     # An explicit value is ALWAYS treated as explicit model selection.
     canonical_model_id: Optional[str] = None,
@@ -371,11 +374,9 @@ def build_grounded_narration_plan(
             summary_understanding_model_id=summary_understanding_model_id,
         )
 
-    duration = float(target_duration_seconds)
-    if not math.isfinite(duration) or duration <= 0:
-        raise ValueError("target_duration_seconds must be positive")
-    if duration > source_asset.duration * 2.5:
-        raise ValueError("target_duration_seconds is implausible for the source asset duration")
+    budget = resolve_recap_budget(source_asset.duration, target_length_preset=target_length_preset,
+                                  target_duration_seconds=target_duration_seconds, mock_mode=mock_mode)
+    duration = budget.target_duration_seconds
 
     # Pro's historical mock override seam is retained; Standard overrides are
     # real planner adapters unless mock_mode was explicitly requested.
@@ -414,7 +415,7 @@ def build_grounded_narration_plan(
     if mode == "standard" and llm_provider_override is None:
         explicit = canonical_model_id is not None or summary_understanding_model_id is not None
         return _build_standard_routed(production_id, unit_id, source_asset, source_transcript,
-            duration=duration, status=status, root=root, model_id=summary_model_id if explicit else None)
+            duration=duration, status=status, root=root, model_id=summary_model_id if explicit else None, recap_budget=budget)
     # Real provider path: hierarchical multimodal for Pro, text-only for Standard
     if mode == "pro":
         resolve_narration_model(summary_model_id)
@@ -438,12 +439,17 @@ def build_grounded_narration_plan(
             raise RuntimeError(f"Pro requires multimodal provider; {resolved.provider!r} does not support multimodal (no silent downgrade)")
         # Long-form hierarchical multimodal understanding (bounded windows)
         from app.production.narration_pro import build_pro_multimodal_plan
-        return build_pro_multimodal_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, summary_model_id=summary_model_id, prov=prov_real, root=root)
+        artifact = build_pro_multimodal_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, summary_model_id=summary_model_id, prov=prov_real, root=root, recap_budget=budget)
+        artifact.target_length_preset = budget.preset
+        artifact.narration_budget = budget
+        artifact.summary_selection_mode = "explicit" if canonical_model_id is not None or summary_understanding_model_id is not None else "auto"
+        return artifact
     from app.production.narration_real import ai_grounded_plan
     source_segments = _standard_source_segments(production_id, source_asset, root)
     artifact = ai_grounded_plan(
         production_id, unit_id, source_asset, source_transcript,
         target_duration_seconds=duration, prov=prov_real, status=status, source_segments=source_segments,
+        recap_budget=budget, output_attempts=2 if budget.enforce_depth else 1,
     )
     artifact.summary_understanding_model_id = summary_model_id
     artifact.summary_selection_mode = "explicit" if canonical_model_id is not None or summary_understanding_model_id is not None else "auto"

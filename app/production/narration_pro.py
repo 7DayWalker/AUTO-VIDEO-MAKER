@@ -121,7 +121,7 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
     return frames
 
 
-def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None) -> NarrationArtifact:
+def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None, recap_budget=None) -> NarrationArtifact:
     dur = float(source_asset.duration)
     n = max(1, min(math.ceil(dur/120.0), 64))
     step = dur / n
@@ -203,6 +203,19 @@ def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: So
                 summary_entry["frame_timestamps"] = [ts for ts, _ in window_frames]
                 summary_entry["frame_count"] = len(window_frames)
             window_summaries.append(summary_entry)
+
+        if recap_budget is not None and recap_budget.enforce_depth:
+            from app.production.narration_real import ai_grounded_plan
+            from app.content.model_registry import get_model
+            artifact = ai_grounded_plan(production_id, unit_id, source_asset, source_transcript,
+                target_duration_seconds=target_duration_seconds, prov=prov, recap_budget=recap_budget,
+                output_attempts=2, visual_evidence=window_summaries,
+                context_tokens=get_model(summary_model_id).capabilities.context_tokens)
+            artifact.summary_understanding_model_id = summary_model_id
+            object.__setattr__(artifact, "_pro_window_summaries", window_summaries)
+            object.__setattr__(artifact, "_pro_multimodal_calls", multimodal_calls)
+            object.__setattr__(artifact, "_pro_visual_method", visual_method)
+            return artifact
 
         full_text="\n".join(s.text for s in source_transcript.segments)
         visual_combined="\n".join(visual_all)

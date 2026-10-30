@@ -53,6 +53,26 @@ def standard_response(duration: float = 120.0):
     }
 
 
+def story_evidence(duration=1800, count=365):
+    """Long real-mode evidence fixture, with enough dialogue for a real recap."""
+    asset, transcript = standard_evidence(duration)
+    transcript.segments = [TranscriptSegment(
+        text=f"Source event {index} changes a character's plans as new dangers approach the group.",
+        start=duration * index / count, end=duration * (index + 1) / count,
+    ) for index in range(count)]
+    return asset, transcript
+
+
+def story_response(count=18, segment_count=365):
+    sentence = ("A determined traveler protects a vulnerable companion while enemies approach. "
+                "Their difficult choice reveals new danger and changes the course of the journey.")
+    return {"summary": "A companion's rescue unfolds through the full source story.", "beats": [
+        {"order": index + 1, "title": f"Story event {index + 1}", "narration_text": sentence,
+         "source_refs": [{"transcript_segment_ids": [round(index * (segment_count - 1) / (count - 1))]}]}
+        for index in range(count)
+    ]}
+
+
 class StubNarrationProvider(BaseLLMProvider):
     """Exercises the real text/JSON adapter contract; never a mock-plan builder."""
 

@@ -507,3 +507,52 @@ def test_grounded_visual_ranges_are_bounded_to_voice_without_mutating_citations(
 def test_real_summary_duration_tracks_synthesized_voice_not_full_evidence(rendered):
     narration = load_narration_artifact(PID, UID, root=rendered.productions)
     assert abs(rendered.summary["output_duration_seconds"] - narration.audio_duration_seconds) < 1.5
+
+
+@pytest.mark.parametrize("voice_seconds", [30, 180, 400])
+def test_multi_minute_visual_pacing_covers_each_beat_without_freezing_or_exceeding_citations(voice_seconds):
+    from app.production.narration_real import ai_grounded_plan
+    from app.production.summary_video import _paced_visual_shots
+    from tests.track9_narration_fakes import standard_evidence, StubNarrationProvider
+    asset, transcript = standard_evidence()
+    artifact = ai_grounded_plan(PID, UID, asset, transcript, target_duration_seconds=30, prov=StubNarrationProvider())
+    snapshot = artifact.model_dump()
+    shots = _paced_visual_shots(artifact, voice_seconds)
+    assert sum(ref.end_seconds - ref.start_seconds for _, ref in shots) == pytest.approx(voice_seconds)
+    assert max(ref.end_seconds - ref.start_seconds for _, ref in shots) <= 6.001
+    assert {order for order, _ in shots} == {beat.order for beat in artifact.beats}
+    for order, ref in shots:
+        beat = artifact.beats[order - 1]
+        assert any(source.start_seconds <= ref.start_seconds < ref.end_seconds <= source.end_seconds
+                   for source in beat.source_refs)
+    assert artifact.model_dump() == snapshot
+
+
+def test_real_assembly_reuses_moving_clips_when_narration_exceeds_available_footage(rendered, monkeypatch):
+    from app.production import summary_video
+    from app.production.storage import load_narration_audio, production_dir
+    audio = load_narration_audio(PID, UID, root=rendered.productions)
+    audio_path = production_dir(PID, root=rendered.productions) / audio.audio_path
+    run_ffmpeg(["-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=8", "-c:a", "libmp3lame", str(audio_path)], "longer voice fixture")
+    original = summary_video.run_ffmpeg
+    def checked(args, *rest, **kwargs):
+        assert not any("tpad" in str(arg) for arg in args), "No frozen frame padding"
+        return original(args, *rest, **kwargs)
+    monkeypatch.setattr(summary_video, "run_ffmpeg", checked)
+    summary = summary_video.assemble_narrated_summary(PID, UID, root=rendered.productions)
+    assert summary.output_duration_seconds >= 8
+    assert summary.output_duration_seconds < 9.5
+    assert summary.validation["freeze_padding"] is False
+
+
+def test_pacing_keeps_short_citations_when_another_range_dominates():
+    from app.production.models import NarrationSourceRef
+    from app.production.summary_video import _paced_visual_shots
+    from types import SimpleNamespace
+    short = NarrationSourceRef(asset_id="src-001", start_seconds=200, end_seconds=202, transcript_segment_ids=[20])
+    long = NarrationSourceRef(asset_id="src-001", start_seconds=0, end_seconds=100, transcript_segment_ids=[0])
+    narration = SimpleNamespace(beats=[SimpleNamespace(order=1, narration_text="A grounded story beat.", source_refs=[long, short])])
+    shots = _paced_visual_shots(narration, 15)
+    assert any(ref.start_seconds >= 200 for _, ref in shots)
+    assert sum(ref.end_seconds - ref.start_seconds for _, ref in shots) == pytest.approx(15)
+    assert all(0 < ref.end_seconds - ref.start_seconds <= 6 for _, ref in shots)

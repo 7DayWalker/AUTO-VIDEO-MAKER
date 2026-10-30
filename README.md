@@ -270,6 +270,14 @@ explicit manual YouTube/TikTok publishing and durable reconciliation evidence.
   Edge TTS requires the pinned 7.3.1 client for the current speech protocol;
   summary visuals are bounded to measured narration duration. See the
   [real Dragon Queen verification](diagnostics/track9_standard_dragon_verification.md).
+  Narration now defaults to duration-scaled `target_length_preset: "auto"`;
+  `short`, `story`, and `deep` select progressively deeper recaps. Explicit
+  `target_duration_seconds` takes precedence. A 10–45 minute source gets 14–22
+  grounded beats and 320–500 words, with opening-to-ending timeline checks and
+  one bounded expansion pass. Very short sources and sandbox runs stay bounded.
+  K3 exposes **Recap length** beside the understanding-model selector. Assembly
+  budgets moving cuts per beat (up to six seconds each), not frozen EOF padding.
+  See [duration-aware story recap verification](diagnostics/track9_story_recap_verification.md).
 - Standalone summary sidecars are inspectable/downloadable through
   `/api/productions/{id}/units/{unitId}/summary-video` and `/summary-video/media`.
   **Phase 11C-PLUS — V1.x handoff implemented and verified:** explicitly call

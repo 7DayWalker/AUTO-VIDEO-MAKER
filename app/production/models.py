@@ -36,6 +36,7 @@ from pydantic import (
 )
 
 from app.production.routes import KNOWN_ROUTES, PRIVATE_ONLY_ROUTES, PRODUCTION_ROUTES
+from app.production.recap_budget import RecapBudget
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -606,6 +607,8 @@ class NarrationArtifact(BaseModel):
     unit_id: str = Field(min_length=1)
     source_asset_id: str = Field(pattern=r"^src-\d{3}$")
     target_duration_seconds: float = Field(gt=0.0)
+    target_length_preset: Optional[Literal["auto", "short", "story", "deep", "custom"]] = None
+    narration_budget: Optional[RecapBudget] = None
     status: str = Field(default="draft")
     narration_text: str = Field(min_length=1)
     summary: Optional[str] = Field(default=None, min_length=1)

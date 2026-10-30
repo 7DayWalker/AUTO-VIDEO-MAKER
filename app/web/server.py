@@ -4340,6 +4340,11 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
     summary_mode = str(body.get("summary_mode") or "standard").strip().lower()
     if summary_mode not in ("standard", "pro"):
         return 400, {"error": "INVALID_REQUEST", "message": "summary_mode must be standard or pro"}
+    from app.production.recap_budget import normalize_length_preset
+    try:
+        length_preset = normalize_length_preset(body.get("target_length_preset", "auto"))
+    except ValueError as exc:
+        return 400, {"error": "INVALID_REQUEST", "message": str(exc)}
     sel = body.get("selection_mode")
     if sel is not None:
         if not isinstance(sel, str) or not sel.strip():
@@ -4368,8 +4373,9 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
             tds = float(raw_dur)
         except Exception:
             return 400, {"error": "INVALID_REQUEST", "message": "target_duration_seconds must be a number"}
-        if not tds > 0:
-            return 400, {"error": "INVALID_REQUEST", "message": "target_duration_seconds must be positive"}
+        import math
+        if not math.isfinite(tds) or not tds > 0:
+            return 400, {"error": "INVALID_REQUEST", "message": "target_duration_seconds must be finite and positive"}
     aid = body.get("asset_id")
     if aid is not None:
         if not isinstance(aid, str) or not aid.strip():
@@ -4384,9 +4390,6 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         return 500, {"error": "LOAD_FAILED", "message": _browser_safe_diagnostic(exc)}
     if sa is None:
         return 404, {"error": "SOURCE_NOT_FOUND", "production_id": production_id, "message": "No source asset ingested; register a source first."}
-    if tds is None:
-        # Default must not be implausible for the actual source duration
-        tds = min(30.0, float(sa.duration) * 0.6) if float(sa.duration) > 0 else 30.0
     try:
         from app.transcription.transcribe import load_transcript as _lt
         tr = _lt(production_id, sa.asset_id, root=PRODUCTIONS_DIR, mock_mode=mock_mode)
@@ -4406,7 +4409,9 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         from app.production.narration import build_grounded_narration_plan
         from app.production.storage import narration_artifact_path
         replacing = narration_artifact_path(production_id, unit_id, root=PRODUCTIONS_DIR).is_file()
-        art = build_grounded_narration_plan(production_id, unit_id, sa, tr, target_duration_seconds=float(tds), canonical_model_id=explicit, summary_understanding_model_id=explicit, summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR)
+        art = build_grounded_narration_plan(production_id, unit_id, sa, tr, target_duration_seconds=tds,
+            target_length_preset=length_preset, canonical_model_id=explicit, summary_understanding_model_id=explicit,
+            summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR)
         art.source_transcript_path = tr.transcript_path
         art.source_media_path = sa.stored_path
         from app.production.storage import save_narration_artifact
