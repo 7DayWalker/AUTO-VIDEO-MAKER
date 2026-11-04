@@ -694,8 +694,10 @@ def test_edge_tts_transport_diagnostics_never_expose_request_tokens(monkeypatch,
 @pytest.mark.parametrize("seconds,beats,words,target", [
     (120, (4, 6), (100, 150), 60), (179.9, (4, 6), (100, 150), 60),
     (180, (8, 12), (180, 270), 100), (599.9, (8, 12), (180, 270), 100),
-    (600, (14, 22), (320, 500), 180), (1805, (14, 22), (320, 500), 180),
-    (2700, (14, 22), (320, 500), 180), (2700.1, (22, 32), (500, 800), 270),
+    (600, (14, 22), (320, 500), 180), (899, (14, 22), (320, 500), 180),
+    (900, (28, 40), (750, 1150), 390), (1499, (28, 40), (750, 1150), 390),
+    (1500, (40, 54), (1150, 1500), 540), (1805, (40, 54), (1150, 1500), 540),
+    (2700, (40, 54), (1150, 1500), 540), (2700.1, (40, 54), (1150, 1500), 540),
 ])
 def test_auto_duration_bands_match_story_scale(seconds, beats, words, target):
     from app.production.recap_budget import resolve_recap_budget
@@ -707,7 +709,7 @@ def test_auto_duration_bands_match_story_scale(seconds, beats, words, target):
 
 @pytest.mark.parametrize("preset,beats,words,target", [
     ("short", (8, 10), (150, 210), 75), ("story", (15, 22), (350, 520), 195),
-    ("deep", (25, 36), (650, 1000), 390),
+    ("deep", (28, 40), (750, 1150), 390), ("extended", (40, 54), (1150, 1500), 540),
 ])
 def test_length_presets_have_explicit_minimums_and_override_auto(preset, beats, words, target):
     from app.production.recap_budget import resolve_recap_budget
@@ -720,7 +722,7 @@ def test_length_presets_have_explicit_minimums_and_override_auto(preset, beats, 
     assert custom.min_narration_words > 300
 
 
-@pytest.mark.parametrize("preset", ["auto", "short", "story", "deep"])
+@pytest.mark.parametrize("preset", ["auto", "short", "story", "deep", "extended"])
 def test_tiny_sources_and_explicit_sandbox_do_not_expand_into_invented_story(preset):
     from app.production.recap_budget import resolve_recap_budget
     short = resolve_recap_budget(12, target_length_preset=preset)
@@ -732,7 +734,7 @@ def test_tiny_sources_and_explicit_sandbox_do_not_expand_into_invented_story(pre
 def test_real_auto_story_budget_persists_and_covers_whole_movie(tmp_path):
     from app.production.recap_budget import validate_recap_depth, timeline_sections
     from tests.track9_narration_fakes import story_evidence, story_response
-    asset, transcript = story_evidence(count=100)
+    asset, transcript = story_evidence(duration=840, count=100)
     provider = StubNarrationProvider(data=story_response(segment_count=100))
     artifact = build_grounded_narration_plan(PID, UID, asset, transcript, summary_mode="standard",
                                             mock_mode=False, llm_provider_override=provider)
@@ -753,7 +755,7 @@ def test_real_auto_story_budget_persists_and_covers_whole_movie(tmp_path):
 @pytest.mark.parametrize("bad", ["blurb", "too_few_words", "short_beats", "one_sentence", "clustered", "reversed", "no_ending"])
 def test_story_depth_and_timeline_failures_receive_one_bounded_expansion(bad):
     from tests.track9_narration_fakes import story_evidence, story_response
-    asset, transcript = story_evidence(count=100)
+    asset, transcript = story_evidence(duration=840, count=100)
     good = story_response(segment_count=100)
     data = json.loads(json.dumps(good))
     if bad == "blurb": data["beats"] = data["beats"][:4]
@@ -781,7 +783,7 @@ def test_story_depth_and_timeline_failures_receive_one_bounded_expansion(bad):
 
 def test_underlength_story_is_never_saved_or_returned_when_repair_fails(tmp_path):
     from tests.track9_narration_fakes import story_evidence, story_response
-    asset, transcript = story_evidence(count=100)
+    asset, transcript = story_evidence(duration=840, count=100)
     provider = StubNarrationProvider(data=story_response(count=4, segment_count=100))
     with pytest.raises(ValueError, match="14-22 beats"):
         build_grounded_narration_plan(PID, UID, asset, transcript, llm_provider_override=provider, root=tmp_path)
@@ -791,7 +793,7 @@ def test_underlength_story_is_never_saved_or_returned_when_repair_fails(tmp_path
 def test_long_movie_window_merge_keeps_global_ids_and_enforces_final_depth():
     from tests.track9_narration_fakes import story_evidence, story_response
     from app.production.recap_budget import validate_recap_depth
-    asset, transcript = story_evidence(count=365)
+    asset, transcript = story_evidence(duration=840, count=365)
     class StoryWindowProvider(StubNarrationProvider):
         def generate(self, prompt, system_prompt=None, **kwargs):
             evidence = json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
@@ -846,7 +848,7 @@ def test_pro_recap_uses_same_depth_budget_after_real_visual_boundary(monkeypatch
     provider = VisualProvider()
     monkeypatch.setattr(module, "_extract_window_frames", lambda *args: [(args[1], tmp_path / "fixture-frame-not-read.jpg")])
     artifact = module.build_pro_multimodal_plan(PID, UID, asset, transcript, target_duration_seconds=180,
-        summary_model_id="gemini-3.6-flash", prov=provider, root=tmp_path, recap_budget=resolve_recap_budget(asset.duration))
+        summary_model_id="gemini-3.6-flash", prov=provider, root=tmp_path, recap_budget=resolve_recap_budget(840))
     assert provider.visual_calls == 15 and len(artifact.beats) == 18
     assert '"visual_windows"' in provider.calls[0]["prompt"]
     assert artifact.narration_budget.min_narration_words == 320

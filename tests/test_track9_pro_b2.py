@@ -46,7 +46,7 @@ def test_pro_visual_augments_with_hierarchical_mock(tmp_path):
         return ResolvedModelProvider(canonical_model_id=cid, provider="hmm", provider_model_id="hmm-vl", provider_instance=prov, attempted=())
     narr.resolve_model=_fake_resolve
     try:
-        art=narr.build_grounded_narration_plan(PID, UID, a, tr, target_duration_seconds=180.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", root=tmp_path)
+        art=narr.build_grounded_narration_plan(PID, UID, a, tr, target_duration_seconds=30.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", llm_provider_override=prov, root=tmp_path)
     finally:
         narr.resolve_model=orig_resolve
     assert len(art.beats)>=1

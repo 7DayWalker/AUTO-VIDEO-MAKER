@@ -719,6 +719,23 @@ def _build_registry() -> Dict[str, CanonicalModel]:
             default_binding="gemini",
         ),
         CanonicalModel(
+            id="gemini-3.5-flash-lite", display_name="Gemini 3.5 Flash-Lite", family="gemini",
+            capabilities=ModelCapabilities(
+                text=True, json_=True, vision=True, video=True, multimodal=True,
+                long_context=True, tool_use=True, context_tokens=1_048_576,
+            ),
+            bindings=(ProviderBinding(
+                provider="gemini", provider_model_id="gemini-3.5-flash-lite",
+                config_keys=("GEMINI_API_KEY",),
+                supported_input_modalities=(InputModality.TEXT, InputModality.IMAGE,
+                                            InputModality.NATIVE_VIDEO, InputModality.FRAME_SEQUENCE),
+                supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
+                identity_evidence=("Google GET /v1beta/models and official /docs/models/gemini-3.5-flash-lite; "
+                                   "timestamped-image generateContent JSON verified live 2026-11-04."),
+            ),),
+            default_binding="gemini",
+        ),
+        CanonicalModel(
             id="qwen-vl-max",
             display_name="Qwen VL Max",
             family="qwen",

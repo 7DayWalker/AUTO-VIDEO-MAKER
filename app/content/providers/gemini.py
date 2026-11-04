@@ -228,6 +228,11 @@ class GeminiProvider(BaseLLMProvider):
     def supports_multimodal(self) -> bool:
         return True
 
+    def supports_native_video(self) -> bool:
+        # This adapter's bounded Summary Pro contract is timestamped images.
+        # Large local-video upload/processing is not implemented here.
+        return False
+
     def generate_multimodal(
         self,
         prompt: str,
@@ -262,14 +267,14 @@ class GeminiProvider(BaseLLMProvider):
                     parts.append({"inline_data": {"mime_type": "video/mp4", "data": b64}})
             except Exception:
                 pass
-        if images:
-            for p in images:
-                try:
-                    ib = pathlib.Path(p).read_bytes()
-                    b64 = base64.b64encode(ib).decode("ascii")
-                    parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
-                except Exception:
-                    continue
+        if images is not None:
+            from app.content.providers.vision import encoded_frames
+            for timestamp, mime, data in encoded_frames(images):
+                if timestamp is not None:
+                    parts.append({"text": f"Source frame at {timestamp:.3f}s"})
+                parts.append({"inline_data": {"mime_type": mime, "data": data}})
+        if (video is not None or video_bytes is not None) and len(parts) == 1:
+            raise ValueError("No readable visual evidence attached to the Gemini request")
         # Build Gemini multimodal request (contents with single user parts)
         import json as _json
         system_instruction = None
@@ -283,6 +288,16 @@ class GeminiProvider(BaseLLMProvider):
             payload["systemInstruction"] = system_instruction
         if response_schema is not None:
             payload["generationConfig"]["responseMimeType"] = "application/json"
+        if self._model.startswith("gemini-3"):
+            payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "minimal" if self._model in {
+                "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.6-flash",
+            } else "low"}
+            if images:
+                # Story actions, not OCR: bounded media tokens keep 30+ frame
+                # chapters responsive without dropping any supplied evidence.
+                payload["generationConfig"]["mediaResolution"] = "MEDIA_RESOLUTION_LOW"
+        elif self._model.startswith("gemini-2.5-flash"):
+            payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
         url = f"{self._base_url}/models/{self._model}:generateContent"
         import requests
         from app.content.exceptions import LLMAuthenticationError, LLMQuotaError, LLMRateLimitError, LLMResponseError, LLMConnectionError
@@ -294,26 +309,46 @@ class GeminiProvider(BaseLLMProvider):
                 raise LLMRateLimitError(self.name)
             if resp.status_code >= 500:
                 raise LLMConnectionError(self.name, f"Server error: {resp.status_code}")
+            if resp.status_code in (400, 404):
+                raise LLMModelUnavailableError()
             if resp.status_code != 200:
-                raise LLMResponseError(f"HTTP {resp.status_code}", resp.text[:500])
+                raise LLMResponseError(f"HTTP {resp.status_code}")
             data = resp.json()
+            if (data.get("promptFeedback") or {}).get("blockReason"):
+                error = LLMResponseError("Prompt blocked by provider content policy")
+                error.category = "content_moderation"
+                raise error
             if "candidates" not in data or not data["candidates"]:
-                raise LLMResponseError("No candidates", str(data)[:500])
+                raise LLMResponseError("No multimodal candidates")
             cand = data["candidates"][0]
+            finish_reason = cand.get("finishReason", "")
+            if finish_reason == "MAX_TOKENS":
+                raise LLMOutputTruncatedError()
+            if finish_reason == "SAFETY":
+                error = LLMResponseError("Response blocked by provider content policy")
+                error.category = "content_moderation"
+                raise error
             content_parts = cand.get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in content_parts if isinstance(p, dict))
+            text = "".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and not p.get("thought"))
             if not text:
                 raise LLMResponseError("Empty multimodal content")
             usage = None
             if "usageMetadata" in data:
                 ud = data["usageMetadata"]
                 usage = {"prompt_tokens": ud.get("promptTokenCount", 0), "completion_tokens": ud.get("candidatesTokenCount", 0), "total_tokens": ud.get("totalTokenCount", 0)}
-            return LLMResponse(content=text, provider=self.name, model=self._model, usage=usage, raw_response=data)
+            return LLMResponse(content=text, provider=self.name, model=self._model, usage=usage,
+                               raw_response=data, metadata={"finish_reason": finish_reason,
+                               "visual_analysis_method": "frame_based_visual_analysis" if images else "native_video_ingestion",
+                               "frame_count": len(images or [])})
+        except requests.exceptions.Timeout:
+            raise LLMConnectionError(self.name, "Multimodal request timed out") from None
+        except requests.exceptions.ConnectionError:
+            raise LLMConnectionError(self.name, "Multimodal transport connection failed") from None
         except (LLMAuthenticationError, LLMQuotaError, LLMRateLimitError, LLMResponseError, LLMConnectionError):
             raise
-        except Exception as e:
+        except Exception:
             from app.content.exceptions import LLMResponseError as _RE
-            raise _RE(f"Multimodal error: {e}")
+            raise _RE("Malformed multimodal response") from None
 
     def is_available(self) -> bool:
         """Check if Gemini is configured with an API key."""

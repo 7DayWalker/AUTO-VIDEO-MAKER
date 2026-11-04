@@ -4428,8 +4428,8 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
     except KeyError as exc:
         return 404, {"error": "MODEL_NOT_FOUND", "message": _browser_safe_diagnostic(exc)}
     except RuntimeError as exc:
-        from app.production.narration_real import SummaryStandardTemporarilyUnavailableError
-        if isinstance(exc, SummaryStandardTemporarilyUnavailableError):
+        from app.production.narration_real import SummaryStandardTemporarilyUnavailableError, SummaryProTemporarilyUnavailableError
+        if isinstance(exc, (SummaryStandardTemporarilyUnavailableError, SummaryProTemporarilyUnavailableError)):
             return 503, {"error": "NARRATION_PROVIDER_TEMPORARILY_UNAVAILABLE", "message": _browser_safe_diagnostic(exc)}
         return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": _browser_safe_diagnostic(exc)}
     except Exception as exc:

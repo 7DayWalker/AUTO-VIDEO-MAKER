@@ -85,7 +85,7 @@ def _provider_uses_native_video(prov) -> bool:
     return True
 
 
-def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, window_idx: int):
+def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, window_idx: int, *, frame_count=None):
     """Extract TIMESTAMPED frames spanning the bounded window [ws, we].
 
     Returns ``[(timestamp_seconds, path), ...]``. Timestamps are real source
@@ -94,7 +94,7 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
     if not src.is_file():
         return []
     span = max(0.0, float(we) - float(ws))
-    count = max(1, int(PRO_FRAMES_PER_WINDOW))
+    count = max(1, int(frame_count or PRO_FRAMES_PER_WINDOW))
     if span <= 0:
         stamps = [float(ws)]
     else:
@@ -105,8 +105,8 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
 
     from app.assembly.ffmpeg import get_ffmpeg_runner
     runner = get_ffmpeg_runner()
-    frames = []
-    for k, ts in enumerate(stamps):
+    def extract(item):
+        k, ts = item
         out = out_dir / f"window_{window_idx:03d}_frame_{k:02d}_{ts:.1f}.jpg"
         try:
             runner.run(
@@ -115,13 +115,39 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
                 f"Pro window {window_idx} frame {k} @ {ts:.1f}s",
             )
         except Exception:
-            continue
+            return None
         if out.is_file() and out.stat().st_size > 1024:
-            frames.append((round(ts, 2), str(out)))
-    return frames
+            return (round(ts, 3), str(out))
+        return None
+    # FFmpeg seeks are independent; bounded concurrency keeps chapter latency low.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return [frame for frame in pool.map(extract, enumerate(stamps)) if frame is not None]
 
 
-def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None, recap_budget=None) -> NarrationArtifact:
+def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None, recap_budget=None, deadline=None) -> NarrationArtifact:
+    from app.production.recap_budget import requires_chapter_planning
+    if recap_budget is not None and requires_chapter_planning(source_asset.duration, recap_budget):
+        from app.production.narration_chapters import build_chapter_plan
+        from app.content.model_registry import get_model
+        from app.production.storage import unit_plan_dir
+        src = _src_arg(source_asset, production_id, root=root)
+        if not src.is_file():
+            raise FileNotFoundError("Summary Pro requires the registered source video")
+        with tempfile.TemporaryDirectory(prefix="pro_chapters_") as scratch:
+            def load_frames(start, end, index):
+                expected = max(8, min(32, math.ceil((end - start) / 12)))
+                frames = _extract_window_frames(src, start, end, Path(scratch), index, frame_count=expected)
+                if len(frames) != expected:
+                    raise ValueError("Summary Pro could not extract every chapter frame; no partial visual plan was saved")
+                return frames
+            artifact = build_chapter_plan(production_id, unit_id, source_asset, source_transcript,
+                budget=recap_budget, prov=prov, context_tokens=get_model(summary_model_id).capabilities.context_tokens,
+                frame_loader=load_frames,
+                checkpoint_path=unit_plan_dir(production_id, unit_id, root=root) / "narration_chapters.partial.json",
+                deadline=deadline)
+            artifact.summary_understanding_model_id = summary_model_id
+            return artifact
     dur = float(source_asset.duration)
     n = max(1, min(math.ceil(dur/120.0), 64))
     step = dur / n

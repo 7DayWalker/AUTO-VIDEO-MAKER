@@ -37,7 +37,13 @@ def test_pro_multimodal_provider_receives_video(tmp_path):
             from app.content.providers.base import LLMResponse
             return LLMResponse(content='probe', provider='mm', model='mm-vl')
         def generate(self, prompt, system_prompt=None, **kw):
-            calls.append({"video": None, "has_video": False}); return None
+            from app.content.providers.base import LLMResponse
+            calls.append({"video": None, "has_video": False})
+            return LLMResponse(content=json.dumps({"summary": "Observed source action.", "beats": [{
+                "title": "Opening", "narration_text": "The scene establishes the character's immediate goal.",
+                "source_refs": [{"asset_id": "src-001", "start_s": 0, "end_s": 3, "transcript_segment_ids": [0]}],
+            }]}), provider="mm", model="mm-vl")
     art=build_grounded_narration_plan(PID, UID, a, tr, target_duration_seconds=10.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", llm_provider_override=_MM(), root=tmp_path)
     assert any(c.get("has_video") for c in calls)
-    assert any(c.get("video") and "src-001.mp4" in str(c["video"]) for c in calls)
+    assert any(c.get("video") and "window_" in str(c["video"]) for c in calls)
+    assert art.narration_text == "The scene establishes the character's immediate goal."

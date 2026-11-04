@@ -347,7 +347,7 @@ def test_7d_frame_extraction_preserves_bounded_window_and_timestamps(tmp_path):
     # Strictly inside the bounded window, in chronological order.
     assert all(100.0 < ts < 120.0 for ts in stamps), stamps
     assert stamps == sorted(stamps)
-    assert calls == stamps
+    assert sorted(calls) == stamps  # Independent FFmpeg jobs may finish out of order.
 
 
 # =========================================================================

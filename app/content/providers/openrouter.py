@@ -408,6 +408,9 @@ class OpenRouterProvider(BaseLLMProvider):
     def supports_multimodal(self) -> bool:
         return True
 
+    def supports_native_video(self) -> bool:
+        return False
+
     def generate_multimodal(self, prompt: str, system_prompt=None, *, video=None, images=None, video_bytes=None, response_schema=None, temperature: float = 0.7, max_tokens: int = 4096):
         if not self._api_key:
             raise LLMAuthenticationError(self.name)
@@ -415,8 +418,7 @@ class OpenRouterProvider(BaseLLMProvider):
         content_parts = [{"type": "text", "text": prompt}]
         src = None
         if video_bytes is not None:
-            b64 = base64.b64encode(video_bytes).decode("ascii")
-            content_parts.append({"type": "image_url", "image_url": {"url": f"data:video/mp4;base64,{b64}"}})
+            raise LLMModelUnavailableError()
         elif video is not None and _os.path.isfile(video):
             src = video
             try:
@@ -443,13 +445,11 @@ class OpenRouterProvider(BaseLLMProvider):
                     try: _sh.rmtree(tmpd, ignore_errors=True)
                     except: pass
             except: pass
-        if images:
-            for pp in images:
-                try:
-                    ib = _pl.Path(pp).read_bytes()
-                    b64 = base64.b64encode(ib).decode("ascii")
-                    content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-                except: continue
+        if images is not None:
+            from app.content.providers.vision import openai_image_parts
+            content_parts.extend(openai_image_parts(images))
+        if video is not None and len(content_parts) == 1:
+            raise ValueError("No readable visual evidence attached to the OpenRouter request")
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -467,15 +467,26 @@ class OpenRouterProvider(BaseLLMProvider):
             raise LLMQuotaError(self.name)
         if resp.status_code >= 500:
             raise LLMConnectionError(self.name, f"Server error: {resp.status_code}")
+        if resp.status_code in (400, 404):
+            raise LLMModelUnavailableError()
         if resp.status_code != 200:
-            raise LLMResponseError(f"HTTP {resp.status_code}", resp.text[:500])
+            raise LLMResponseError(f"HTTP {resp.status_code}")
         data = resp.json()
         if "choices" not in data or not data["choices"]:
-            raise LLMResponseError("No choices", str(data)[:500])
+            raise LLMResponseError("No multimodal choices")
+        finish_reason = data["choices"][0].get("finish_reason", "")
+        if finish_reason in {"length", "max_tokens"}:
+            raise LLMOutputTruncatedError()
+        if finish_reason == "content_filter":
+            error = LLMResponseError("Response blocked by provider content policy")
+            error.category = "content_moderation"
+            raise error
         content = data["choices"][0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "".join(p.get("text","") for p in content if isinstance(p, dict))
         if not content:
             raise LLMResponseError("Empty multimodal content")
         usage = _normalize_usage(data.get("usage"))
-        return LLMResponse(content=content, provider=self.name, model=self._model, usage=usage, raw_response=data)
+        return LLMResponse(content=content, provider=self.name, model=self._model, usage=usage, raw_response=data,
+                           metadata={"finish_reason": finish_reason, "frame_count": len(images or []),
+                                     "visual_analysis_method": "frame_based_visual_analysis"})

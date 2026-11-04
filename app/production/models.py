@@ -535,6 +535,7 @@ class NarrationSourceRef(BaseModel):
     transcript_segment_ids: List[int] = Field(default_factory=list)
     source_segment_id: Optional[str] = Field(default=None, pattern=r"^seg-\d{3}$")
     excerpt: Optional[str] = Field(default=None, min_length=1)
+    visual_frame_timestamps: List[float] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_ref(self) -> "NarrationSourceRef":
@@ -542,6 +543,9 @@ class NarrationSourceRef(BaseModel):
             raise ValueError("source reference timestamps must be finite")
         if self.end_seconds <= self.start_seconds:
             raise ValueError("source reference end_seconds must be greater than start_seconds")
+        if any(not math.isfinite(ts) or not self.start_seconds <= ts <= self.end_seconds
+               for ts in self.visual_frame_timestamps):
+            raise ValueError("visual frame timestamps must be finite and inside their source reference")
         return self
 
 
@@ -587,6 +591,8 @@ class NarrationAudioArtifact(BaseModel):
     codec: Optional[str] = None
     status: str = Field(default="completed")
     generated_at: str = Field(min_length=1)
+    original_duration_seconds: Optional[float] = Field(default=None, gt=0)
+    tempo_factor: float = Field(default=1.0, gt=0)
 
     @model_validator(mode="after")
     def _validate_audio_path(self) -> "NarrationAudioArtifact":
@@ -594,6 +600,31 @@ class NarrationAudioArtifact(BaseModel):
             raise ValueError("audio_path must be relative to the production root")
         if self.status not in {"pending", "completed", "failed"}:
             raise ValueError("audio status must be one of: pending, completed, failed")
+        return self
+
+
+class NarrationChapter(BaseModel):
+    """Persisted evidence and coverage for one independently planned chapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_index: int = Field(ge=1)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    beat_start_order: int = Field(ge=1)
+    beat_end_order: int = Field(ge=1)
+    word_count: int = Field(ge=1)
+    transcript_segment_ids: List[int] = Field(default_factory=list)
+    frame_timestamps: List[float] = Field(default_factory=list)
+    summary: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_chapter(self):
+        if (not math.isfinite(self.start_seconds) or not math.isfinite(self.end_seconds)
+                or self.end_seconds <= self.start_seconds or self.beat_end_order < self.beat_start_order):
+            raise ValueError("Chapter source and beat ranges must be finite and ordered")
+        if any(not math.isfinite(ts) or not self.start_seconds <= ts <= self.end_seconds for ts in self.frame_timestamps):
+            raise ValueError("Inspected chapter frames must be inside the chapter window")
         return self
 
 
@@ -607,8 +638,15 @@ class NarrationArtifact(BaseModel):
     unit_id: str = Field(min_length=1)
     source_asset_id: str = Field(pattern=r"^src-\d{3}$")
     target_duration_seconds: float = Field(gt=0.0)
-    target_length_preset: Optional[Literal["auto", "short", "story", "deep", "custom"]] = None
+    target_length_preset: Optional[Literal["auto", "short", "story", "deep", "extended", "custom"]] = None
     narration_budget: Optional[RecapBudget] = None
+    summary_mode: Optional[Literal["standard", "pro"]] = None
+    understanding_method: Optional[Literal["transcript_audio", "frame_sequence", "native_video"]] = None
+    planning_strategy: Optional[Literal["windowed", "multi_chapter"]] = None
+    chapter_count: int = Field(default=1, ge=1)
+    chapters: List[NarrationChapter] = Field(default_factory=list)
+    visual_frame_count: int = Field(default=0, ge=0)
+    multimodal_calls: int = Field(default=0, ge=0)
     status: str = Field(default="draft")
     narration_text: str = Field(min_length=1)
     summary: Optional[str] = Field(default=None, min_length=1)
@@ -634,6 +672,11 @@ class NarrationArtifact(BaseModel):
 
     @model_validator(mode="after")
     def _validate_artifact(self) -> "NarrationArtifact":
+        if self.planning_strategy == "multi_chapter":
+            if len(self.chapters) != self.chapter_count:
+                raise ValueError("Chapter count must match persisted chapter evidence")
+            if self.visual_frame_count != sum(len(chapter.frame_timestamps) for chapter in self.chapters):
+                raise ValueError("Frame count must match inspected chapter evidence")
         if self.source_media_path is not None and not _is_relative_path(self.source_media_path):
             raise ValueError("source_media_path must be relative to the production root")
         if self.source_transcript_path is not None and self.source_transcript_path not in {

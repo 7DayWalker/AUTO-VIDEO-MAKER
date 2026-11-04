@@ -278,7 +278,7 @@ def test_12_bounded_window_remains_intact(tmp_path):
     orig = narr.resolve_model
     narr.resolve_model = lambda cid, mode="exact", try_next_on_failure=True: ResolvedModelProvider(canonical_model_id=cid, provider="r", provider_model_id="r-vl", provider_instance=prov, attempted=())
     try:
-        art = narr.build_grounded_narration_plan(pid, uid, asset, tr, target_duration_seconds=30.0, summary_mode="pro", summary_understanding_mode="auto", root=tmp_path)
+        art = narr.build_grounded_narration_plan(pid, uid, asset, tr, target_duration_seconds=30.0, summary_mode="pro", summary_understanding_mode="auto", llm_provider_override=prov, root=tmp_path)
     finally:
         narr.resolve_model = orig
     ws = getattr(art, "_pro_window_summaries", [])

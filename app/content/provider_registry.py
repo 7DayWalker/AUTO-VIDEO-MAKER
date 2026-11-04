@@ -138,7 +138,9 @@ def _create_alibaba(provider_model_id: Optional[str] = None) -> BaseLLMProvider:
     from app.content.providers.alibaba import AlibabaProvider
 
     if provider_model_id:
-        return AlibabaProvider(model=provider_model_id)
+        # Exact-model resolution also owns the multimodal operation. Never let
+        # ALIBABA_VISION_MODEL silently substitute a different canonical model.
+        return AlibabaProvider(model=provider_model_id, vision_model=provider_model_id)
     return AlibabaProvider()
 
 

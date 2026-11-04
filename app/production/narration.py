@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.content.model_registry import (
     JOB_REQUIREMENTS,
     JOB_SOURCE_TRANSCRIPT_RECAP,
+    JOB_SOURCE_VIDEO_RECAP,
     get_model,
     model_meets_job,
 )
@@ -90,6 +92,15 @@ def standard_auto_model_ids() -> tuple[str, ...]:
     return tuple(model.id for model in pool if assess_model_for_job(model.id, JOB_SOURCE_TRANSCRIPT_RECAP).eligible)
 
 
+def pro_auto_model_ids() -> tuple[str, ...]:
+    from app.content.model_registry import list_models_for_pro
+    from app.content.capability_router import assess_model_for_job, capability_rank
+
+    pool = sorted(list_models_for_pro(), key=capability_rank, reverse=True)
+    return tuple(model.id for model in pool if model.capabilities.image_input
+                 and assess_model_for_job(model.id, JOB_SOURCE_VIDEO_RECAP).eligible)
+
+
 def resolve_summary_model(
     mode: str,
     preferred_model_id: str | None = None,
@@ -133,7 +144,7 @@ def resolve_summary_model(
             sel = "explicit"
         else:
             sel = "auto"
-    if mode == "standard" and explicit_id is not None:
+    if explicit_id is not None:
         # A supplied canonical identity is always a lock, even if an older
         # caller also supplied selection_mode='auto'. Never silently ignore it.
         sel = "explicit"
@@ -231,16 +242,21 @@ def _standard_source_segments(production_id, source_asset, root):
     return [SourceSegment.model_validate(item) for item in segment_payload["segments"]]
 
 
-def _build_standard_routed(production_id, unit_id, source_asset, transcript, *, duration, status, root, model_id=None, recap_budget=None):
+def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, duration, status, root, model_id=None, recap_budget=None, summary_mode="standard"):
     from app.content.capability_router import assess_model_for_job
     from app.content.model_resolver import AllExactModelProvidersFailedError
     from app.production.narration_real import (
         ai_grounded_plan, standard_transient_failure_category, SummaryStandardTemporarilyUnavailableError,
+        SummaryProTemporarilyUnavailableError,
     )
-    candidates = (model_id,) if model_id is not None else standard_auto_model_ids()
+    is_pro = summary_mode == "pro"
+    deadline = time.monotonic() + 270 if is_pro else None
+    job_id = JOB_SOURCE_VIDEO_RECAP if is_pro else JOB_SOURCE_TRANSCRIPT_RECAP
+    label = "Pro" if is_pro else "Standard"
+    candidates = (model_id,) if model_id is not None else (pro_auto_model_ids() if is_pro else standard_auto_model_ids())
     if not candidates:
-        raise RuntimeError("Summary Standard has no eligible route: configure an available text/JSON provider.")
-    segments = _standard_source_segments(production_id, source_asset, root)
+        raise RuntimeError(f"Summary {label} has no eligible route: configure an available {'vision' if is_pro else 'text/JSON'} provider.")
+    segments = [] if is_pro else _standard_source_segments(production_id, source_asset, root)
     failed = False
     last_error = None
     attempted = set()
@@ -249,12 +265,14 @@ def _build_standard_routed(production_id, unit_id, source_asset, transcript, *, 
         # Each route is visited once, with bounded per-window output repair.
         # Explicit selection can change routes, never canonical model identity.
         while True:
-            routes = assess_model_for_job(candidate_id, JOB_SOURCE_TRANSCRIPT_RECAP).eligible_routes()
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            routes = assess_model_for_job(candidate_id, job_id).eligible_routes()
             if not any((route.provider, route.provider_model_id) not in attempted for route in routes):
                 break
             try:
                 resolved = resolve_model(candidate_id, mode="exact", try_next_on_failure=True,
-                    job_id=JOB_SOURCE_TRANSCRIPT_RECAP, excluded_bindings=tuple(attempted))
+                    job_id=job_id, excluded_bindings=tuple(attempted))
             except AllExactModelProvidersFailedError as exc:
                 if exc.last_error is not None and standard_transient_failure_category(exc.last_error) is None:
                     raise
@@ -270,34 +288,53 @@ def _build_standard_routed(production_id, unit_id, source_asset, transcript, *, 
             route_id = (resolved.provider, resolved.provider_model_id)
             attempted.add(route_id)
             try:
-                artifact = ai_grounded_plan(production_id, unit_id, source_asset, transcript,
-                    target_duration_seconds=duration, prov=resolved.provider_instance,
-                    status=status, source_segments=segments,
-                    context_tokens=get_model(candidate_id).capabilities.context_tokens, output_attempts=2,
-                    recap_budget=recap_budget)
+                if is_pro:
+                    if not resolved.provider_instance.supports_multimodal():
+                        from app.content.exceptions import LLMModelUnavailableError
+                        raise LLMModelUnavailableError()
+                    # A single overloaded model must not consume the entire
+                    # five-minute command budget before Auto can try another.
+                    if hasattr(resolved.provider_instance, "_timeout"):
+                        resolved.provider_instance._timeout = min(resolved.provider_instance._timeout, 45)
+                    from app.production.narration_pro import build_pro_multimodal_plan
+                    artifact = build_pro_multimodal_plan(production_id, unit_id, source_asset, transcript,
+                        target_duration_seconds=duration, summary_model_id=resolved.canonical_model_id,
+                        prov=resolved.provider_instance, root=root, recap_budget=recap_budget, deadline=deadline)
+                else:
+                    artifact = ai_grounded_plan(production_id, unit_id, source_asset, transcript,
+                        target_duration_seconds=duration, prov=resolved.provider_instance,
+                        status=status, source_segments=segments,
+                        context_tokens=get_model(candidate_id).capabilities.context_tokens, output_attempts=2,
+                        recap_budget=recap_budget)
             except Exception as exc:
                 category = standard_transient_failure_category(exc)
                 if category is None:
                     raise
-                logger.warning("Standard narration route failed: canonical=%s provider=%s model=%s category=%s",
-                               resolved.canonical_model_id, resolved.provider, resolved.provider_model_id, category)
+                logger.warning("%s narration route failed: canonical=%s provider=%s model=%s category=%s",
+                               label, resolved.canonical_model_id, resolved.provider, resolved.provider_model_id, category)
                 last_error = exc
                 failed = True
                 continue
             artifact.summary_understanding_model_id = resolved.canonical_model_id
             artifact.summary_selection_mode = "explicit" if model_id is not None else "auto"
             artifact.summary_failover_used = failed
-            logger.info("Standard narration grounded: canonical=%s provider=%s model=%s beats=%d failover=%s",
-                        resolved.canonical_model_id, resolved.provider, resolved.provider_model_id, len(artifact.beats), failed)
+            artifact.summary_mode = summary_mode
+            artifact.target_length_preset, artifact.narration_budget = recap_budget.preset, recap_budget
+            if artifact.understanding_method is None:
+                artifact.understanding_method = ("frame_sequence" if getattr(artifact, "_pro_visual_method", "") == "frame_based_visual_analysis"
+                    else "native_video") if is_pro else "transcript_audio"
+            logger.info("%s narration grounded: canonical=%s provider=%s model=%s beats=%d failover=%s",
+                        label, resolved.canonical_model_id, resolved.provider, resolved.provider_model_id, len(artifact.beats), failed)
             return artifact
     if model_id is not None:
         if last_error is not None:
             raise last_error
-        raise RuntimeError(f"Canonical model {model_id!r} has no eligible route for Summary Standard text/JSON planning")
+        raise RuntimeError(f"Canonical model {model_id!r} has no eligible route for Summary {label} planning")
     # No raw provider text, credential values, prompt or transcript in the
     # browser-facing error. Failed attempts never persist a narration artifact.
-    raise SummaryStandardTemporarilyUnavailableError(
-        "Summary Standard's eligible providers are temporarily unavailable or returned unusable narration. "
+    error_type = SummaryProTemporarilyUnavailableError if is_pro else SummaryStandardTemporarilyUnavailableError
+    raise error_type(
+        f"Summary {label}'s eligible providers are temporarily unavailable or returned unusable narration. "
         "No narration was saved; check provider access/model availability and retry."
     )
 
@@ -339,21 +376,8 @@ def build_grounded_narration_plan(
         # Determine explicit vs auto for Pro
         # Precedence: summary_understanding_model_id > canonical_model_id (when non-default)
         # summary_understanding_mode: auto | manual | explicit (manual is alias for explicit)
-        effective_explicit: Optional[str] = None
-        sel_mode: Optional[str] = None
-        if summary_understanding_model_id is not None:
-            effective_explicit = summary_understanding_model_id
-            sel_mode = summary_understanding_mode
-        elif summary_understanding_mode is not None:
-            # Mode given without id: if manual/explicit but no id -> will be rejected as missing explicit
-            sel_mode = summary_understanding_mode
-            if sel_mode.strip().lower() in ("manual", "explicit") and canonical_model_id is not None:
-                effective_explicit = canonical_model_id
-        elif canonical_model_id is not None:
-            # Back-compat: legacy caller passed explicit canonical model via canonical_model_id.
-            # Deprecated aliases are normalized inside resolve_summary_model.
-            effective_explicit = canonical_model_id
-            # sel_mode inferred as explicit inside resolver
+        effective_explicit = summary_understanding_model_id if summary_understanding_model_id is not None else canonical_model_id
+        sel_mode = summary_understanding_mode
         # Delegate to resolver which enforces AUTO vs EXPLICIT contract (no cross-model fallback, no downgrade)
         if effective_explicit is not None or sel_mode is not None:
             summary_model_id = resolve_summary_model(
@@ -378,9 +402,8 @@ def build_grounded_narration_plan(
                                   target_duration_seconds=target_duration_seconds, mock_mode=mock_mode)
     duration = budget.target_duration_seconds
 
-    # Pro's historical mock override seam is retained; Standard overrides are
-    # real planner adapters unless mock_mode was explicitly requested.
-    if mock_mode or (mode == "pro" and llm_provider_override is not None):
+    # An injected adapter still exercises real planning unless mock is explicit.
+    if mock_mode:
         if mode == "pro":
             from app.content.model_registry import get_model as _get_model
             try:
@@ -412,31 +435,18 @@ def build_grounded_narration_plan(
             return mock_grounded_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, status=status, provider_override=llm_provider_override)
         from app.production.narration_mock import mock_grounded_plan
         return mock_grounded_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, status=status, provider_override=llm_provider_override)
-    if mode == "standard" and llm_provider_override is None:
+    if llm_provider_override is None:
         explicit = canonical_model_id is not None or summary_understanding_model_id is not None
-        return _build_standard_routed(production_id, unit_id, source_asset, source_transcript,
-            duration=duration, status=status, root=root, model_id=summary_model_id if explicit else None, recap_budget=budget)
+        return _build_summary_routed(production_id, unit_id, source_asset, source_transcript,
+            duration=duration, status=status, root=root, model_id=summary_model_id if explicit else None,
+            recap_budget=budget, summary_mode=mode)
     # Real provider path: hierarchical multimodal for Pro, text-only for Standard
-    if mode == "pro":
-        resolve_narration_model(summary_model_id)
-    if llm_provider_override is not None:
-        prov_real = llm_provider_override
-    else:
-        if mode == "standard":
-            from app.content.capability_router import assess_model_for_job
-            eligibility = assess_model_for_job(summary_model_id, JOB_SOURCE_TRANSCRIPT_RECAP)
-            if not eligibility.eligible:
-                raise RuntimeError(
-                    f"Canonical model {summary_model_id!r} has no eligible route for Summary Standard text/JSON planning"
-                )
-        resolve_kwargs = {"job_id": JOB_SOURCE_TRANSCRIPT_RECAP} if mode == "standard" else {}
-        resolved = resolve_model(summary_model_id, mode="exact", try_next_on_failure=True, **resolve_kwargs)
-        prov_real = resolved.provider_instance
+    prov_real = llm_provider_override
     if not prov_real.is_available():
         raise RuntimeError(f"Canonical model {summary_model_id!r} is not available for narration planning")
     if mode == "pro":
         if not getattr(prov_real, "supports_multimodal", lambda: False)():
-            raise RuntimeError(f"Pro requires multimodal provider; {resolved.provider!r} does not support multimodal (no silent downgrade)")
+            raise RuntimeError("Pro requires a multimodal provider (no silent downgrade)")
         # Long-form hierarchical multimodal understanding (bounded windows)
         from app.production.narration_pro import build_pro_multimodal_plan
         artifact = build_pro_multimodal_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, summary_model_id=summary_model_id, prov=prov_real, root=root, recap_budget=budget)
@@ -452,6 +462,8 @@ def build_grounded_narration_plan(
         recap_budget=budget, output_attempts=2 if budget.enforce_depth else 1,
     )
     artifact.summary_understanding_model_id = summary_model_id
+    artifact.summary_mode = "standard"
+    artifact.understanding_method = "transcript_audio"
     artifact.summary_selection_mode = "explicit" if canonical_model_id is not None or summary_understanding_model_id is not None else "auto"
     return artifact
 
@@ -488,7 +500,7 @@ def validate_narration_artifact(
             raise ValueError(f"beat order must be positive: {beat.order}")
         if not beat.source_refs:
             raise ValueError(f"beat '{beat.title}' has no grounded source refs")
-        if not beat.transcript_refs:
+        if not beat.transcript_refs and not any(ref.visual_frame_timestamps for ref in beat.source_refs):
             raise ValueError(f"beat '{beat.title}' has no transcript references")
         for ref in beat.source_refs:
             if source_asset is not None and ref.asset_id != source_asset.asset_id:
@@ -499,6 +511,12 @@ def validate_narration_artifact(
                 raise ValueError(f"beat '{beat.title}' has invalid source timestamps")
             if source_asset is not None and ref.end_seconds > source_asset.duration:
                 raise ValueError(f"beat '{beat.title}' extends beyond source duration")
+            if ref.visual_frame_timestamps:
+                if artifact.summary_mode != "pro":
+                    raise ValueError("Only Summary Pro may use frame-grounded evidence")
+                supplied = {ts for chapter in artifact.chapters for ts in chapter.frame_timestamps}
+                if any(ts not in supplied for ts in ref.visual_frame_timestamps):
+                    raise ValueError("Narration cites a visual frame not inspected in its chapter evidence")
 
         if source_transcript is not None:
             transcript_count = len(source_transcript.segments)
@@ -536,6 +554,36 @@ def _resolve_narration_provider(provider_name: Optional[str] = None):
             "to generate test-only synthetic audio.",
         )
     return provider
+
+
+def _pace_long_narration(output_path, artifact, validation):
+    """Pitch-preserving speech pacing, never silence padding or clipped words.
+
+    Word targets alone cannot guarantee runtime across TTS voices. Only a real
+    multi-chapter preset with measured duration bounds opts into this correction.
+    """
+    budget = artifact.narration_budget
+    original = float(validation.duration or 0)
+    if (artifact.planning_strategy != "multi_chapter" or budget is None
+            or budget.min_duration_seconds is None or not validation.valid):
+        return validation, original, 1.0
+    if budget.min_duration_seconds <= original <= budget.max_duration_seconds:
+        return validation, original, 1.0
+    factor = original / budget.target_duration_seconds
+    if not .70 <= factor <= 1.35:
+        raise ValueError("Narration cannot meet the requested runtime at a natural speaking pace; rebuild with a suitable word budget or voice")
+    from app.assembly.ffmpeg import run_ffmpeg
+    paced = output_path.with_name(output_path.stem + ".paced" + output_path.suffix)
+    try:
+        run_ffmpeg(["-y", "-i", str(output_path), "-vn", "-af", f"atempo={factor:.8f}", str(paced)],
+                   "pacing long recap narration without silence padding")
+        measured = validate_audio_file(paced)
+        if not measured.valid or not budget.min_duration_seconds <= float(measured.duration or 0) <= budget.max_duration_seconds:
+            raise ValueError("Paced narration did not meet the requested measured duration range")
+        paced.replace(output_path)
+        return measured, original, factor
+    finally:
+        paced.unlink(missing_ok=True)
 
 
 def synthesize_narration_audio(
@@ -593,6 +641,9 @@ def synthesize_narration_audio(
         validation = validate_audio_file(output_path)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors) or "audio validation failed")
+        original_duration, tempo_factor = float(validation.duration or 0), 1.0
+        if provider_id != "mock":
+            validation, original_duration, tempo_factor = _pace_long_narration(output_path, artifact, validation)
 
         metadata = NarrationAudioArtifact(
             narration_id=artifact.narration_id,
@@ -609,6 +660,8 @@ def synthesize_narration_audio(
             codec=validation.codec,
             status="completed",
             generated_at=datetime.now().isoformat(),
+            original_duration_seconds=original_duration,
+            tempo_factor=tempo_factor,
         )
         save_narration_audio(metadata, production_id=production_id, unit_id=unit_id, root=root)
 

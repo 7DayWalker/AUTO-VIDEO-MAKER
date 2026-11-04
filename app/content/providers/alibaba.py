@@ -459,6 +459,9 @@ class AlibabaProvider(BaseLLMProvider):
     def supports_multimodal(self) -> bool:
         return True
 
+    def supports_native_video(self) -> bool:
+        return False
+
     def generate_multimodal(
         self,
         prompt: str,
@@ -483,8 +486,8 @@ class AlibabaProvider(BaseLLMProvider):
         content_parts: list[dict] = [{"type": "text", "text": prompt}]
         # Prefer video_bytes, then video file, then images
         if video_bytes is not None:
-            b64 = base64.b64encode(video_bytes).decode("ascii")
-            content_parts.append({"type": "image_url", "image_url": {"url": f"data:video/mp4;base64,{b64}"}})
+            from app.content.exceptions import LLMModelUnavailableError
+            raise LLMModelUnavailableError()
         elif video is not None and os.path.isfile(video):
             # Provider-specific conversion: extract frames deterministically (no fixed-count in contract)
             # Use FFmpeg to sample frames; keep small and deterministic
@@ -520,15 +523,11 @@ class AlibabaProvider(BaseLLMProvider):
                         pass
             except Exception:
                 pass
-        if images:
-            for p in images:
-                try:
-                    ib = pathlib.Path(p).read_bytes()
-                    b64 = base64.b64encode(ib).decode("ascii")
-                    content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-                except Exception:
-                    continue
-        # If no visual evidence was attached, still call vision model with text only (still multimodal capable)
+        if images is not None:
+            from app.content.providers.vision import openai_image_parts
+            content_parts.extend(openai_image_parts(images))
+        if video is not None and len(content_parts) == 1:
+            raise ValueError("No readable visual evidence attached to the Alibaba request")
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -547,15 +546,23 @@ class AlibabaProvider(BaseLLMProvider):
         self.last_latency_ms = int((time.monotonic() - started) * 1000)
         choices = data.get("choices") or []
         if not choices:
-            raise AlibabaResponseError("multimodal response no choices", str(data)[:500])
+            raise AlibabaResponseError("multimodal response no choices")
+        finish_reason = choices[0].get("finish_reason", "")
+        if finish_reason in {"length", "max_tokens"}:
+            from app.content.exceptions import LLMOutputTruncatedError
+            raise LLMOutputTruncatedError()
+        if finish_reason == "content_filter":
+            raise AlibabaContentModerationError("Multimodal response blocked by provider content policy")
         content = (choices[0].get("message") or {}).get("content")
         if isinstance(content, list):
             # OpenAI list content: join text parts
             content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
         if not isinstance(content, str) or not content.strip():
-            raise AlibabaResponseError("multimodal empty content", str(data)[:500])
+            raise AlibabaResponseError("multimodal empty content")
         usage = _normalize_usage(data.get("usage"))
-        return LLMResponse(content=content, provider=self.name, model=self._vision_model, usage=usage)
+        return LLMResponse(content=content, provider=self.name, model=self._vision_model, usage=usage,
+                           metadata={"finish_reason": finish_reason, "frame_count": len(images or []),
+                                     "visual_analysis_method": "frame_based_visual_analysis"})
 
     def generate_json(
         self,

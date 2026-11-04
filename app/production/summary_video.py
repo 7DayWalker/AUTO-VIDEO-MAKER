@@ -54,6 +54,11 @@ class NarratedSummaryArtifact(BaseModel):
     file_size: int = Field(ge=1)
     generated_at: str = Field(min_length=1)
     validation: Dict = Field(default_factory=dict)
+    beat_count: Optional[int] = Field(default=None, ge=1)
+    word_count: Optional[int] = Field(default=None, ge=1)
+    chapter_count: Optional[int] = Field(default=None, ge=1)
+    summary_mode: Optional[str] = None
+    canonical_model: Optional[str] = None
     # Assembly-time fingerprints tie promotion to the bytes/script actually
     # assembled. Optional for existing, already signed-off Track 9 sidecars.
     file_fingerprint: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -96,6 +101,14 @@ def narration_content_hash(artifact: NarrationArtifact) -> str:
     if artifact.source_media_path is not None:
         fields.add("source_media_path")
     content = artifact.model_dump(mode="json", include=fields)
+    # Empty additive visual fields must not change accepted legacy fingerprints.
+    for ref in content.get("source_refs", []):
+        if not ref.get("visual_frame_timestamps"):
+            ref.pop("visual_frame_timestamps", None)
+    for beat in content.get("beats", []):
+        for ref in beat.get("source_refs", []):
+            if not ref.get("visual_frame_timestamps"):
+                ref.pop("visual_frame_timestamps", None)
     return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -165,7 +178,7 @@ def _extract_clip_range(source_path: Path, start: float, duration: float, output
         raise RuntimeError("ffmpeg unavailable: cannot extract source clip")
     args=["-y","-ss",f"{start:.3f}","-i",str(source_path),"-t",f"{duration:.3f}",
         "-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-movflags","+faststart",
-        "-c:a","aac","-ac","2","-ar","44100","-b:a","128k", str(output_path)]
+        "-an", "-threads", "2", str(output_path)]
     run_ffmpeg(args, f"extracting source clip [{start:.3f}, {start+duration:.3f})")
 
 def _visual_clip_durations(ordered_refs, narration_duration=None):
@@ -189,10 +202,12 @@ def _paced_visual_shots(narration, narration_duration):
     long citation consuming the entire recap. Repeated moving footage is honest
     reuse of evidence, never a frozen last frame or an invented source moment.
     """
+    if getattr(narration, "planning_strategy", None) == "multi_chapter":
+        return _chapter_visual_shots(narration, narration_duration)
     weights = [max(1, len(beat.narration_text.split())) for beat in narration.beats]
     total_weight = sum(weights)
     shots = []
-    max_shot = 6.0
+    max_shot = 5.5
     for beat, weight in zip(narration.beats, weights):
         target = narration_duration * weight / total_weight
         ranges = sorted(beat.source_refs, key=lambda ref: ref.start_seconds)
@@ -211,10 +226,61 @@ def _paced_visual_shots(narration, narration_duration):
     return shots
 
 
+def _chapter_visual_shots(narration, duration):
+    """A global cut grid avoids rounding every 11-second beat up to three cuts.
+
+    About 90-110 cuts in an 8-10 minute recap, with <=5.5s per moving shot.
+    Beat boundaries are quantized to one cut; no long beat or source citation
+    can leave an extended static-looking shot or an overlong silent tail.
+    """
+    beats = narration.beats
+    weights = [max(1, len(beat.narration_text.split())) for beat in beats]
+    count = max(len(beats), 90 if duration >= 480 else 1, math.ceil(duration / 5.5))
+    per_shot = duration / count
+    allocations, cumulative, assigned = [], 0, 0
+    for index, weight in enumerate(weights):
+        cumulative += weight
+        boundary = min(count - (len(beats) - index - 1), max(assigned + 1, round(count * cumulative / sum(weights))))
+        allocations.append(boundary - assigned)
+        assigned = boundary
+    shots = []
+    for beat_index, (beat, take) in enumerate(zip(beats, allocations)):
+        next_start = min(ref.start_seconds for ref in beats[beat_index + 1].source_refs) if beat_index + 1 < len(beats) else float('inf')
+        ranges = sorted((ref.model_copy(update={"end_seconds": min(ref.end_seconds, next_start)})
+                        for ref in beat.source_refs if ref.start_seconds < min(ref.end_seconds, next_start)),
+                        key=lambda ref: ref.start_seconds)
+        if not ranges:
+            raise ValueError("Chronological moving shots require distinct source windows for each beat")
+        # A short dialogue citation is evidence, not an obligation to make a
+        # one-second cut. Prefer the inspected visual moments that can support
+        # a full moving shot; otherwise use the longest admitted source ranges.
+        full = [ref for ref in ranges if ref.end_seconds - ref.start_seconds >= per_shot - 1e-6]
+        visual = [ref for ref in full if ref.visual_frame_timestamps]
+        if full:
+            ranges = visual or full
+        else:
+            ranges = [max(ranges, key=lambda ref: ref.end_seconds - ref.start_seconds)]
+        for index in range(take):
+            range_index = min(len(ranges) - 1, index * len(ranges) // take)
+            ref = ranges[range_index]
+            siblings = [i for i in range(take) if min(len(ranges) - 1, i * len(ranges) // take) == range_index]
+            rank = siblings.index(index)
+            length = ref.end_seconds - ref.start_seconds
+            # Short citations get more short moving cuts, never fabricated range expansion.
+            parts = max(1, math.ceil(per_shot / min(5.5, length)))
+            shot_duration = per_shot / parts
+            for part in range(parts):
+                fraction = (rank * parts + part) / max(1, len(siblings) * parts - 1)
+                start = ref.start_seconds + max(0, length - shot_duration) * fraction
+                shots.append((beat.order, ref.model_copy(update={"start_seconds": start,
+                              "end_seconds": min(ref.end_seconds, start + shot_duration)})))
+    return shots
+
+
 def _build_intermediate_clips(ordered_refs: List[Tuple[int, object]], source_asset: SourceAsset, source_path: Path, temp_dir: Path, *, narration_duration=None) -> List[Path]:
-    clips: List[Path]=[]
     durations = _visual_clip_durations(ordered_refs, narration_duration)
-    for idx,((order, ref), dur) in enumerate(zip(ordered_refs, durations)):
+    def extract(item):
+        idx, ((order, ref), dur) = item
         start=float(ref.start_seconds)
         if dur <= 0:
             raise ValueError(f"ref order {order} has non-positive duration")
@@ -223,8 +289,10 @@ def _build_intermediate_clips(ordered_refs: List[Tuple[int, object]], source_ass
         info=probe_media(clip)
         if not info.has_video or info.duration is None or info.duration <= 0.05:
             raise RuntimeError(f"extracted clip {clip.name} has no valid video stream")
-        clips.append(clip)
-    return clips
+        return clip
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4 if len(ordered_refs) >= 40 else 1) as pool:
+        return list(pool.map(extract, enumerate(zip(ordered_refs, durations))))
 
 def _measure_narration_audio_duration(narration_audio: NarrationAudioArtifact, artifact: NarrationArtifact, production_id: str, unit_id: str, root: Optional[Path]) -> Tuple[float, Path]:
     candidate_rel=narration_audio.audio_path or artifact.audio_artifact_path  # type: ignore[attr-defined]
@@ -371,14 +439,27 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
         from app.assembly.audio_contract import AudioPolicy
         from app.assembly.pipeline import assemble_project
         project=AssemblyProject(project_id=f'{production_id}__{unit_id}__narrated_summary', title=f'Narrated summary {production_id}/{unit_id}', aspect_ratio=aspect, resolution=VideoResolution(width=int(target_w), height=int(target_h)), scenes=[Scene(id=f'beat_{i:03d}', video=str(p)) for i,p in enumerate(clips,1)], voiceover=str(narration_audio_file), audio_policy=AudioPolicy.NARRATION_ONLY, native_audio_volume=0.0)
-        result=assemble_project(project, base_dir=pathlib.Path.cwd())
-        if not result.success: raise RuntimeError(f'assembly failed: {result.errors}')
-        assembled_file=pathlib.Path(result.output_path) if result.output_path else None
+        if narration_artifact.planning_strategy == "multi_chapter":
+            # All cuts came from the same registered source with identical encode
+            # settings. Avoid re-normalizing/re-encoding 100+ clips a second time.
+            concat = temp_base / 'chapter_cuts.txt'
+            concat.write_text("".join("file '" + clip.as_posix().replace("'", "'\\''") + "'\n" for clip in clips), encoding='utf-8')
+            assembled_file = temp_base / 'chapter_summary.mp4'
+            run_ffmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', str(concat), '-i', str(narration_audio_file),
+                        '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac',
+                        '-t', f'{narration_duration:.6f}', '-shortest', '-movflags', '+faststart', str(assembled_file)],
+                       'muxing chronological recap cuts to the exact narration duration')
+        else:
+            result=assemble_project(project, base_dir=pathlib.Path.cwd())
+            if not result.success: raise RuntimeError(f'assembly failed: {result.errors}')
+            assembled_file=pathlib.Path(result.output_path) if result.output_path else None
         if not assembled_file or not assembled_file.is_file(): raise RuntimeError(f'assembled output not present: {assembled_file}')
         final_info=probe_media(assembled_file)
         if not final_info.has_video: raise ValueError(f'assembled file has no video stream: {assembled_file}')
         if not final_info.has_audio: raise ValueError(f'assembled file has no audio stream (narration missing): {assembled_file}')
         if not final_info.duration or final_info.duration <= 0.3: raise ValueError(f'assembled file has no measurable duration: {assembled_file}')
+        if narration_artifact.planning_strategy == "multi_chapter" and abs(final_info.duration - narration_duration) > .25:
+            raise ValueError('Summary video does not closely match the measured narration duration')
         final_dest=summary_video_output_path(production_id, unit_id, root=root_p)
         final_dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(assembled_file, final_dest)
@@ -392,6 +473,12 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
         except Exception: rel_narration=narration_audio.audio_path
         artifact=NarratedSummaryArtifact(production_id=production_id, unit_id=unit_id, source_asset_id=source_asset.asset_id, narration_id=narration_artifact.narration_id, narration_audio_path=rel_narration, source_refs_count=len(source_refs), output_path=rel_output, output_duration_seconds=float(dest_info.duration or final_info.duration), video_width=dest_info.width, video_height=dest_info.height, video_codec=dest_info.video_codec, audio_codec=dest_info.audio_codec, source_duration_seconds=float(source_asset.duration), target_duration_seconds=float(narration_artifact.target_duration_seconds), narration_duration_seconds=float(narration_duration), file_size=int(final_dest.stat().st_size), generated_at=datetime.now().isoformat(), validation={'has_video': dest_info.has_video, 'has_audio': dest_info.has_audio, 'valid': True, 'visual_shots': len(ordered_refs), 'max_shot_seconds': max(ref.end_seconds - ref.start_seconds for _, ref in ordered_refs), 'freeze_padding': False})
         artifact.file_fingerprint = compute_content_hash(final_dest)
+        artifact.beat_count = len(narration_artifact.beats)
+        artifact.word_count = len(narration_artifact.narration_text.split())
+        artifact.chapter_count = narration_artifact.chapter_count
+        artifact.summary_mode = narration_artifact.summary_mode
+        artifact.canonical_model = narration_artifact.summary_understanding_model_id
+        artifact.validation['audio_video_delta_seconds'] = round(artifact.output_duration_seconds - narration_duration, 6)
         artifact.narration_content_hash = narration_content_hash(narration_artifact)
         _atomic_write_json(summary_video_metadata_path(production_id, unit_id, root=root_p), artifact.model_dump())
         return artifact

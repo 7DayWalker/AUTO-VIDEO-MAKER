@@ -122,3 +122,54 @@ def install_standard_provider(monkeypatch, model_id="qwen-3.8-flash", **kwargs):
 
     monkeypatch.setitem(provider_registry._REGISTRY, binding.provider, factory)
     return provider, factory_calls, binding
+
+
+class ChapterNarrationProvider(StubNarrationProvider):
+    """Deterministic per-chapter responses, no implementation or network mocking."""
+
+    def __init__(self, *, fault=None, always_fail=False, **kwargs):
+        super().__init__(**kwargs)
+        self.fault = fault
+        self.always_fail = always_fail
+        self.chapters = []
+        self.visual_calls = []
+
+    def supports_multimodal(self):
+        return True
+
+    def supports_native_video(self):
+        return False
+
+    def generate(self, prompt, system_prompt=None, **kwargs):
+        evidence = json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+        self.chapters.append(evidence)
+        count = evidence["preferred_beat_count"]
+        rows, frames = evidence["transcript_segments"], evidence["frames"]
+        data = {"summary": f"Chapter {evidence['chapter_index']} ends with the companions escaping danger.", "beats": []}
+        text = ("A determined traveler protects a vulnerable companion while enemies approach the shelter. "
+                "Their difficult choice reveals new danger and changes the course of the journey ahead.")
+        # Fit local targets with real sentences of the requested word count.
+        target = evidence["preferred_word_count"]
+        for index in range(count):
+            fraction = index / max(1, count - 1)
+            if frames:
+                frame = frames[round(fraction * (len(frames) - 1))]
+                ts = frame["timestamp_seconds"]
+                cited = [row["id"] for row in rows if row["start_seconds"] <= ts < row["end_seconds"]][:1]
+                ref = {"transcript_segment_ids": cited, "frame_ids": [frame["id"]]}
+            else:
+                ref = {"transcript_segment_ids": [rows[round(fraction * (len(rows) - 1))]["id"]]}
+            words = target * (index + 1) // count - target * index // count
+            sentence = text.split()
+            narration = " ".join(sentence[:words]).rstrip(".") + "."
+            data["beats"].append({"title": f"Chapter {evidence['chapter_index']} event {index + 1}",
+                                  "narration_text": narration, "source_refs": [ref]})
+        if self.fault and (not self.calls or self.always_fail):
+            self.fault(data)
+        self.raw = json.dumps(data)
+        return super().generate(prompt, system_prompt, **kwargs)
+
+    def generate_multimodal(self, prompt, system_prompt=None, *, images=None, video=None, response_schema=None, **kwargs):
+        assert images and video is None
+        self.visual_calls.append(list(images))
+        return self.generate(prompt, system_prompt, **kwargs)

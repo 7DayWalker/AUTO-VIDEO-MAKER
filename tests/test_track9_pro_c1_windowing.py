@@ -81,7 +81,7 @@ def test_each_window_receives_only_its_bounded_visual_evidence(tmp_path):
     orig=narr.resolve_model
     narr.resolve_model=lambda cid, mode="exact", try_next_on_failure=True: ResolvedModelProvider(canonical_model_id=cid, provider="rec", provider_model_id="rec-vl", provider_instance=prov, attempted=())
     try:
-        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=60.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", root=tmp_path)
+        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=60.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", llm_provider_override=prov, root=tmp_path)
     finally:
         narr.resolve_model=orig
     assert 3 <= len(seen) <= 4
@@ -117,7 +117,7 @@ def test_full_source_not_repeated(tmp_path):
     orig=narr.resolve_model
     narr.resolve_model=lambda cid, mode="exact", try_next_on_failure=True: ResolvedModelProvider(canonical_model_id=cid, provider="rec2", provider_model_id="rec2-vl", provider_instance=prov, attempted=())
     try:
-        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=60.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", root=tmp_path)
+        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=60.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", llm_provider_override=prov, root=tmp_path)
     finally:
         narr.resolve_model=orig
     assert 6 <= len(seen) <= 7
@@ -195,7 +195,7 @@ def test_visual_evidence_can_contribute(tmp_path):
     orig=narr.resolve_model
     narr.resolve_model=lambda cid, mode="exact", try_next_on_failure=True: ResolvedModelProvider(canonical_model_id=cid, provider="vis", provider_model_id="vis-vl", provider_instance=prov, attempted=())
     try:
-        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=30.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", root=tmp_path)
+        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=30.0, canonical_model_id="summary-pro-gemini-2.0-flash", summary_mode="pro", llm_provider_override=prov, root=tmp_path)
     finally:
         narr.resolve_model=orig
     assert any("silent" in b.narration_text.lower() or "discover" in b.narration_text.lower() for b in art.beats)
@@ -220,7 +220,7 @@ def test_long_form_windows_cover_entire_duration(tmp_path):
     orig=narr.resolve_model
     narr.resolve_model=lambda cid, mode="exact", try_next_on_failure=True: ResolvedModelProvider(canonical_model_id=cid, provider="r", provider_model_id="r-vl", provider_instance=prov, attempted=())
     try:
-        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=30.0, summary_mode="pro", root=tmp_path)
+        art=narr.build_grounded_narration_plan(PID, UID, asset, tr, target_duration_seconds=30.0, summary_mode="pro", llm_provider_override=prov, root=tmp_path)
     finally:
         narr.resolve_model=orig
     ws=getattr(art, "_pro_window_summaries", [])

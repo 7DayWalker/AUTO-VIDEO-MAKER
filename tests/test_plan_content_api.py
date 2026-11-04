@@ -751,7 +751,7 @@ def test_existing_unit_detail_response_is_unchanged(monkeypatch, tmp_path):
     assert set(payload) == {
         "production_id", "production_title", "plan_version", "unit_intent",
         "execution", "run", "blocking_units", "plan_evidence", "bound_project",
-        "scene_checkpoint_rows", "failure_details", "sample",
+        "scene_checkpoint_rows", "failure_details", "sample", "summary_video",
     }
     # Unit detail stays metadata-only: no plan body was smuggled into it.
     assert "plan" not in payload

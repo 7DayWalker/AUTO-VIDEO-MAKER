@@ -29,6 +29,10 @@ class SummaryStandardTemporarilyUnavailableError(RuntimeError):
     """Every admitted Auto route failed to produce a valid grounded plan."""
 
 
+class SummaryProTemporarilyUnavailableError(RuntimeError):
+    """Every admitted Pro route failed; never downgrade to transcript-only."""
+
+
 class NarrationModelOutputError(ValueError):
     """Invalid model output, distinct from invalid local source/request data."""
 
@@ -89,7 +93,7 @@ class _AISum(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(min_length=1, max_length=600)
-    beats: List[_AIBeat2] = Field(min_length=1, max_length=36)
+    beats: List[_AIBeat2] = Field(min_length=1, max_length=54)
 
 
 def _extract_json(raw):
@@ -380,6 +384,12 @@ def ai_grounded_plan(
         raise ValueError("Narration source duration must be finite and positive")
     if not source_transcript.segments:
         raise ValueError("Narration requires transcript evidence")
+    from app.production.recap_budget import requires_chapter_planning
+    budget = recap_budget or resolve_recap_budget(source_asset.duration, target_duration_seconds=duration)
+    if requires_chapter_planning(source_asset.duration, budget):
+        from app.production.narration_chapters import build_chapter_plan
+        return build_chapter_plan(production_id, unit_id, source_asset, source_transcript,
+               budget=budget, prov=prov, context_tokens=context_tokens, status=status)
     segments_by_id = {segment.segment_id: segment for segment in source_segments}
     if any(segment.asset_id != source_asset.asset_id for segment in source_segments):
         raise ValueError("Source segments must belong to the canonical source asset")
