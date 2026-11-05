@@ -165,6 +165,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
     all_beats, chapters, continuity = [], [], []
     calls = 0
     text_calls = 0
+    cache_hits, hydrated_chapters, live_vision_calls = 0, 0, 0
     deadline = min(deadline or float("inf"), time.monotonic() + (840 if composite else 240))
     identity = hashlib.sha256(json.dumps({"version": 3, "prompt_version": STORYTELLER_PROMPT_VERSION, "source": asset.model_dump(),
         "transcript": transcript.model_dump(), "budget": budget.model_dump(), "visual": visual,
@@ -223,8 +224,12 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
             raise ValueError("No real visual frames were extracted for a Pro chapter")
         action_notes = None
         observation_calls = 0
+        observation_source = None
         if composite:
             from app.production.visual_observation import observe_chapter_frames, validate_visual_action_notes
+            from app.production.narration_real import cached_visual_observations, observe_with_vision_failover
+            from app.production.visual_cache import CACHE_FILENAME, save_frame_observations
+            plan_dir = Path(checkpoint_path).parent if checkpoint_path is not None else None
             if index < len(cached) and isinstance(cached[index], dict):
                 candidate = cached[index].get("visual_action_notes")
                 if candidate is not None:
@@ -232,6 +237,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                         validate_visual_action_notes(candidate, frames)
                         action_notes = candidate
                         observation_calls = int(cached[index].get("multimodal_calls", 0))
+                        observation_source = "checkpoint"
                     except (ValueError, TypeError):
                         cached = cached[:index]
             if (action_notes is None and isinstance(pending_visual, dict)
@@ -242,8 +248,19 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                     validate_visual_action_notes(pending_visual.get("visual_action_notes"), frames)
                     action_notes = pending_visual["visual_action_notes"]
                     observation_calls = max(1, int(pending_visual.get("multimodal_calls", 1)))
+                    observation_source = "checkpoint"
                 except (ValueError, TypeError):
                     pending_visual = None
+            if action_notes is not None and plan_dir is not None:
+                save_frame_observations(plan_dir / CACHE_FILENAME, asset, transcript, frames, action_notes,
+                                        start=start, end=end, provenance={"kind": "validated_chapter_checkpoint"})
+            if action_notes is None and plan_dir is not None:
+                action_notes, observation_source = cached_visual_observations(plan_dir, asset, transcript, frames,
+                    start=start, end=end, production_id=production_id, unit_id=unit_id)
+            if action_notes is not None:
+                cache_hits += 1
+                if any(note.get("evidence_kind") == "prior_pro_scene" for note in action_notes):
+                    hydrated_chapters += 1
             batch_cache = {}
             if (isinstance(pending_visual, dict) and pending_visual.get("chapter_index") == index
                     and pending_visual.get("frame_timestamps") == [ts for ts, _ in frames]
@@ -252,12 +269,17 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                 observation_calls = max(0, int(pending_visual.get("multimodal_calls", 0)))
             observation_lock = threading.Lock()
             def requested():
-                nonlocal observation_calls
+                nonlocal observation_calls, live_vision_calls
                 with observation_lock:
                     observation_calls += 1
+                    live_vision_calls += 1
             def save_batch(offset, notes):
                 with observation_lock:
                     batch_cache[str(offset)] = notes
+                    if plan_dir is not None:
+                        global_notes = [{**note, "frame_id": note["frame_id"] + offset} for note in notes]
+                        save_frame_observations(plan_dir / CACHE_FILENAME, asset, transcript, frames, global_notes,
+                            start=start, end=end, provenance={"kind": "live_frame_observation"})
                     if checkpoint_path is not None:
                         Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
                         _write_checkpoint(checkpoint_path, {"identity": identity, "chapters": completed,
@@ -271,20 +293,31 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                         visual_observer._timeout = min(visual_observer._timeout, max(1, deadline - time.monotonic()))
                     started = time.monotonic()
                     try:
-                        action_notes = observe_chapter_frames(visual_observer, frames, rows, start=start, end=end, continuity=continuity,
+                        action_notes = observe_with_vision_failover(visual_observer, frames, rows, start=start, end=end, continuity=continuity,
                                                               cached_batches=batch_cache, on_batch=save_batch, on_request=requested,
                                                               deadline=deadline)
+                        observation_source = "live_vision"
                         break
                     except Exception as exc:
                         from app.providers.fallback_policy import FailureCategory
                         category = standard_transient_failure_category(exc)
                         logger.warning("Chapter observation failed: chapter=%d attempt=%d type=%s category=%s",
                                        index + 1, observation_attempt + 1, type(exc).__name__, category)
+                        if plan_dir is not None and category is not None:
+                            action_notes, observation_source = cached_visual_observations(plan_dir, asset, transcript, frames,
+                                start=start, end=end, production_id=production_id, unit_id=unit_id)
+                            if action_notes is not None:
+                                cache_hits += 1
+                                hydrated_chapters += int(any(note.get("evidence_kind") == "prior_pro_scene" for note in action_notes))
+                                break
                         if (observation_attempt or time.monotonic() - started >= 35 or category not in {
                             FailureCategory.NETWORK, FailureCategory.PROVIDER_5XX, FailureCategory.RESPONSE_MALFORMED,
                         }):
                             raise
                         time.sleep(2)
+            if plan_dir is not None and action_notes is not None:
+                save_frame_observations(plan_dir / CACHE_FILENAME, asset, transcript, frames, action_notes,
+                                        start=start, end=end, provenance={"kind": observation_source or "cache"})
             if checkpoint_path is not None and index >= len(cached):
                 Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
                 _write_checkpoint(checkpoint_path, {"identity": identity, "chapters": completed,
@@ -450,7 +483,10 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
         chapters.append(NarrationChapter(chapter_index=index + 1, start_seconds=start, end_seconds=end,
                         beat_start_order=beats[0].order, beat_end_order=beats[-1].order,
                         word_count=len(partial.narration_text.split()), transcript_segment_ids=[row["id"] for row in rows],
-                        frame_timestamps=[ts for ts, _ in frames], summary=plan.summary))
+                        frame_timestamps=[ts for ts, _ in frames], summary=plan.summary,
+                        visual_observation_source=observation_source,
+                        citable_frame_count=sum(note.get("citable", True) for note in action_notes or []),
+                        unavailable_frame_count=sum(not note.get("citable", True) for note in action_notes or [])))
         completed.append({"plan": plan.model_dump(), "frame_timestamps": [ts for ts, _ in frames],
                           "multimodal_calls": chapter_calls, "text_storyteller_calls": chapter_text_calls,
                           **({"visual_action_notes": action_notes} if composite else {})})
@@ -471,6 +507,9 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
     artifact.planning_strategy, artifact.chapter_count, artifact.chapters = "multi_chapter", len(chapters), chapters
     artifact.visual_frame_count = sum(len(chapter.frame_timestamps) for chapter in chapters)
     artifact.multimodal_calls = calls
+    artifact.stage1_cache_hits = cache_hits
+    artifact.stage1_prior_pro_hydrated_chapters = hydrated_chapters
+    artifact.live_vision_calls = live_vision_calls
     if visual:
         artifact.visual_understanding_strategy = "visual_notes_then_text_storyteller" if composite else "direct_multimodal"
     if composite:

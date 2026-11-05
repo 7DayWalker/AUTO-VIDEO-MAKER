@@ -41,7 +41,7 @@ def test_proxy_bridge_executes_with_json_budgets_and_never_forwards_synthetic_me
     if not shutil.which("node"):
         pytest.skip("Node is required to execute the synthetic proxy bridge")
     code = hardened_proxy_text(SOURCE) + """
-const accepted = adapt(JSON.stringify({model:'gpt-6.1-sol', messages:[{role:'user', content:'Discuss image_url and input_image field names in code; no image attached.'}],
+const accepted = adapt(JSON.stringify({model:'gpt-6.1-sol', messages:[{role:'user', content:'Discuss data:image/jpeg;base64,AAAA, image_url and input_image in code; no image attached.'}],
   max_tokens:8192, response_format:{type:'json_object'}, reasoning_effort:'low', stream:false}));
 let rejected = false;
 const res = {writeHead:(status)=>{rejected=status===400;}, end:()=>{}};
@@ -58,3 +58,13 @@ def test_disabled_stale_guard_is_reenabled_without_rejecting_plain_code_text():
     hardened = hardened_proxy_text(SOURCE)
     disabled = hardened.replace("if (containsMedia(data.messages) || containsMedia(data.input))", "if (false)")
     assert hardened_proxy_text(disabled) == hardened
+
+
+def test_proxy_never_treats_a_plain_string_as_an_attachment():
+    code = hardened_proxy_text(SOURCE) + """
+const res = {writeHead:()=>{throw new Error('text was blocked');},end:()=>{}};
+const values = ['data:image/png;base64,' + 'A'.repeat(2048), 'image_url input_image', 'A'.repeat(4096)];
+console.log(JSON.stringify(values.map(content => adapt(JSON.stringify({messages:[{role:'user',content}]})).input[0].content === content)));
+"""
+    result = subprocess.run(["node", "-"], input=code, capture_output=True, text=True, check=True, timeout=10)
+    assert json.loads(result.stdout) == [True, True, True]

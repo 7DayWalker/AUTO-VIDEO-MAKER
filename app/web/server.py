@@ -4368,7 +4368,7 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         if sel not in ("auto", "explicit", "manual"):
             return 400, {"error": "INVALID_REQUEST", "message": "selection_mode must be auto or explicit/manual"}
     explicit = None
-    for k in ("summary_understanding_model_id", "understanding_model_id", "preferred_model_id"):
+    for k in ("summary_understanding_model_id", "understanding_model_id", "model_id", "preferred_model_id"):
         v = body.get(k)
         if isinstance(v, str) and v.strip():
             explicit = v.strip()

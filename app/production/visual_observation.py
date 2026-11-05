@@ -8,7 +8,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from typing import Literal
 
 from app.content.providers.agentrouter import require_text_only
 from app.production.narration_real import NarrationModelOutputError
@@ -23,6 +24,18 @@ class _ActionNote(BaseModel):
     frame_id: StrictInt = Field(ge=0)
     timestamp_seconds: float = Field(ge=0, allow_inf_nan=False)
     action: str = Field(min_length=1, max_length=1800)
+    evidence_kind: Literal["live_frame", "prior_pro_scene", "unavailable"] = "live_frame"
+    citable: bool = True
+    observer_provider: str | None = None
+    observer_model: str | None = None
+    source_beat_orders: list[StrictInt] = Field(default_factory=list)
+    evidence_frame_timestamps: list[float] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def truthful_availability(self):
+        if self.citable == (self.evidence_kind == "unavailable"):
+            raise ValueError("Unavailable visual notes cannot be citable")
+        return self
 
 
 class _VisualActionNotes(BaseModel):
@@ -33,8 +46,8 @@ class _VisualActionNotes(BaseModel):
 def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached_batches=None, on_batch=None,
                            on_request=None, deadline=None):
     """Only the observer receives images; returned notes contain no paths/bytes."""
-    if getattr(prov, "name", None) != "gemini" or not prov.supports_multimodal():
-        raise ValueError("Visual observation requires the configured Gemini vision adapter")
+    if getattr(prov, "name", None) not in {"gemini", "alibaba", "openrouter"} or not prov.supports_multimodal():
+        raise ValueError("Visual observation requires an admitted image-capable provider")
     try:
         batch_size = int(os.getenv("AVM_RECAP_VISION_BATCH_SIZE", str(VISUAL_OBSERVATION_BATCH_SIZE)))
     except ValueError:
@@ -114,8 +127,11 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
         notes = _VisualActionNotes.model_validate(json.loads(raw))
     except ValueError:
         raise NarrationModelOutputError("Gemini visual observations do not match the action-note schema") from None
-    validate_visual_action_notes(notes.model_dump()["observations"], frames)
-    return notes.model_dump()["observations"]
+    result = [note.model_copy(update={"evidence_kind": "live_frame", "citable": True,
+              "observer_provider": prov.name, "observer_model": prov.model,
+              "source_beat_orders": [], "evidence_frame_timestamps": []}).model_dump() for note in notes.observations]
+    validate_visual_action_notes(result, frames)
+    return result
 
 
 def validate_visual_action_notes(notes, frames):

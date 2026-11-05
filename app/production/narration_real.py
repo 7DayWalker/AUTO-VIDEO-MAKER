@@ -65,6 +65,71 @@ def validate_storyteller_language(artifact):
             )
 
 
+def cached_visual_observations(plan_dir, asset, transcript, frames, *, start, end, production_id, unit_id):
+    """Stage 1 cache precedes network; prior Pro evidence retains its granularity."""
+    from pathlib import Path
+    from app.production.visual_cache import CACHE_FILENAME, load_frame_observations, hydrate_prior_pro
+    directory = Path(plan_dir)
+    path = directory / CACHE_FILENAME
+    notes = load_frame_observations(path, asset, transcript, frames, start=start, end=end)
+    if notes is not None:
+        return notes, "cache"
+    # This unit's accepted Pro artifact is the authority. An explicit local
+    # snapshot remains usable after the narration is replaced by a text model.
+    candidates = [directory / "visual_evidence_prior_pro.json", directory / "narration.json"]
+    for candidate in candidates:
+        if hydrate_prior_pro(path, candidate, asset, transcript, frames, start=start, end=end,
+                             production_id=production_id, unit_id=unit_id):
+            notes = load_frame_observations(path, asset, transcript, frames, start=start, end=end)
+            if notes is not None:
+                return notes, "prior_pro_artifact"
+    return None, None
+
+
+def observe_with_vision_failover(primary, frames, rows, *, start, end, continuity, deadline,
+                                cached_batches=None, on_batch=None, on_request=None):
+    """Stage 1 only: admitted alternate image routes never receive the storyteller job."""
+    from app.production.visual_observation import observe_chapter_frames
+    from app.content.model_registry import list_models
+    from app.content.capability_router import assess_provider_route
+    from app.content.provider_registry import create_provider
+    from urllib.parse import urlsplit
+    candidates = [primary]
+    attempted = {(getattr(primary, "name", ""), getattr(primary, "model", ""))}
+    for model in list_models():
+        if not model.capabilities.image_input:
+            continue
+        for binding in model.bindings:
+            key = (binding.provider, binding.provider_model_id)
+            if binding.provider not in {"alibaba", "openrouter"} or key in attempted:
+                continue
+            attempted.add(key)
+            if not assess_provider_route(model.id, binding, required_modality="image").eligible:
+                continue
+            provider = create_provider(*key)
+            # AgentRouter and its local proxy are text-only even if another
+            # configured adapter accidentally points its base URL at that port.
+            if urlsplit(getattr(provider, "_base_url", "")).port == 8318:
+                continue
+            if provider.is_available() and provider.supports_multimodal():
+                candidates.append(provider)
+    last_error = None
+    for provider in candidates:
+        try:
+            return observe_chapter_frames(provider, frames, rows, start=start, end=end, continuity=continuity,
+                cached_batches=cached_batches, on_batch=on_batch, on_request=on_request, deadline=deadline)
+        except Exception as exc:
+            category = standard_transient_failure_category(exc)
+            if category is None:
+                raise
+            logger.warning("Visual observer route failed: provider=%s model=%s category=%s",
+                           provider.name, provider.model, category)
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No configured image observer can supply missing visual evidence")
+
+
 class SummaryStandardTemporarilyUnavailableError(RuntimeError):
     """Every admitted Auto route failed to produce a valid grounded plan."""
 

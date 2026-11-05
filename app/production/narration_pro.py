@@ -85,6 +85,11 @@ def _provider_uses_native_video(prov) -> bool:
     return True
 
 
+def _window_frame_timestamps(ws, we, count):
+    span = max(0.0, float(we) - float(ws))
+    return [round(float(ws) + span * (index + 1) / (count + 1), 3) for index in range(count)]
+
+
 def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, window_idx: int, *, frame_count=None):
     """Extract TIMESTAMPED frames spanning the bounded window [ws, we].
 
@@ -153,6 +158,15 @@ def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: So
         with tempfile.TemporaryDirectory(prefix="pro_chapters_") as scratch:
             def load_frames(start, end, index):
                 expected = max(8, min(32, math.ceil((end - start) / 12)))
+                if composite:
+                    from app.production.narration_real import cached_visual_observations
+                    stamps = _window_frame_timestamps(start, end, expected)
+                    cached_frames = [(ts, "retained-observation-no-image-io") for ts in stamps]
+                    notes, _ = cached_visual_observations(unit_plan_dir(production_id, unit_id, root=root),
+                        source_asset, source_transcript, cached_frames, start=start, end=end,
+                        production_id=production_id, unit_id=unit_id)
+                    if notes is not None:
+                        return cached_frames
                 frames = _extract_window_frames(src, start, end, Path(scratch), index, frame_count=expected)
                 if len(frames) != expected:
                     raise ValueError("Summary Pro could not extract every chapter frame; no partial visual plan was saved")

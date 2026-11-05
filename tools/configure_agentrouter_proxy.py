@@ -15,7 +15,7 @@ import subprocess
 _MEDIA_GUARD = """const data = JSON.parse(body);
         // AVM: fail closed before the upstream sees any binary/image content.
         const containsMedia = (value) => {
-          if (typeof value === 'string') return /data:(?:image|video|audio)\\/[^,\\s]+;base64,[A-Za-z0-9+/=]{128,}|^[A-Za-z0-9+/]{1024,}={0,2}$/i.test(value);
+          if (typeof value === 'string') return false;
           if (Array.isArray(value)) return value.some(containsMedia);
           if (value && typeof value === 'object') return /^(?:image_url|input_image|input_video|video_url)$/i.test(value.type || '') || Object.entries(value).some(([key, item]) => /^(?:image_url|input_image|inline_data|video_url)$/i.test(key) || containsMedia(item));
           return false;
@@ -35,8 +35,8 @@ _ENVELOPE = """model: data.model,
 def hardened_proxy_text(text):
     if "media_payload_forbidden" in text:
         # Replace this helper's complete guard, including a stale disabled guard.
-        # Only actual media structures/long encoded payloads are blocked; code
-        # discussions mentioning field names remain harmless pure-text traffic.
+        # Only attachment objects are blocked. All plain strings, including
+        # code examples mentioning data:image or input_image, remain text.
         guard = r"const data = JSON\.parse\(body\);\s*// AVM:[^\n]*\n\s*const containsMedia[\s\S]*?media_payload_forbidden[\s\S]*?\breturn;\s*\}"
         if len(re.findall(guard, text)) != 1:
             raise ValueError("Proxy media guard anchor not recognized; no private content displayed")

@@ -124,6 +124,16 @@ recap remains appropriate before publishing.
 
 ## Repeatable checks
 
+### Completed Sol follow-up
+
+On 2026-11-05, the same production/unit/source completed with `gpt-6.1-sol` using
+the reusable visual-observation cache: **5 chapters, 53 beats, 1,478 words,
+521.637958 seconds (8:42), 170.003 WPM, 95 moving cuts**. Andrew Multilingual was
+synthesized at `+15%`; real movie audio was mixed at `0.10` beneath narrator `1.0`.
+All five chapters reused visual evidence and made zero new vision calls.
+Full MP4 decode passed with no errors; the script/media fingerprint matched.
+The earlier Gemini metrics above remain explicitly the historical baseline.
+
 Baseline verification on 2026-11-04: **Core 2,153 passed, 1 skipped**, zero
 external network attempts under `run_hermetic_pytest.py`; **K3 171 passed**;
 Vite production build passed. Existing Pydantic deprecation warnings and

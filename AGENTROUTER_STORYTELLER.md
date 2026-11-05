@@ -90,7 +90,7 @@ a timeout, inspect artifacts/checkpoints before manually retrying. Use
 `--stage synthesize`, `--stage video`, or `--stage measure` to resume without
 regenerating the script. No promotion or social upload is performed.
 
-## Live verification status — 2026-11-05
+## Initial verification — superseded by the completed cache-based run below
 
 Both AgentRouter models completed text/JSON readiness requests through the
 loopback proxy. Sol generated a validated first chapter from real Gemini notes
@@ -130,7 +130,7 @@ full recap and its metrics must not be presented as full-film verification.
 Preview file:
 `C:\Projects\AUTO-VIDEO-MAKER\temp\sol_chapter_preview\productions\prd_20261105_sol_chapter_preview_001\units\unit-001\plan\narrated_summary.mp4`
 
-## Final automated checks
+## Initial automated checks
 
 On 2026-11-05, the final Core hermetic suite completed with **2,207 passed,
 1 skipped**, two existing Pydantic deprecation warnings, and **zero external
@@ -145,3 +145,37 @@ live/partial-result evidence is at
 `C:\Projects\AUTO-VIDEO-MAKER\temp\agentrouter_completion_evidence.json`.
 Passing automated tests does not mean the provider-blocked full Sol render
 completed.
+
+## Completed full Sol render — 2026-11-05
+
+The cache-based follow-up **completed the full five-chapter render** for
+`prd_20261026_the_last_dragon_queen_part_i_ai_short_fi_719`, `unit-001`, `src-010`.
+See `C:\Projects\AUTO-VIDEO-MAKER\VISUAL_OBSERVATION_CACHE.md` for the reusable
+cache/hydration implementation and truthful scene-level evidence provenance.
+
+| Metric | Full-film recap |
+| --- | --- |
+| Canonical storyteller | `gpt-6.1-sol` |
+| Chapters / beats / words | 5 / 53 / 1,478 |
+| Audio / video duration | 521.637958 seconds / 521.637958 seconds (8:42) |
+| WPM | 170.003 |
+| Voice / synthesis rate | `en-US-AndrewMultilingualNeural` / `+15%` |
+| Moving shots | 95 |
+| Stage 1 cache hits / newly made vision calls | 5 / 0 |
+| Prior-Pro-hydrated chapters | 4 (Chapter 1 reused direct cached observations) |
+| Audio bed | Real cut source audio at `0.10` beneath narrator `1.0` |
+| Output | H.264 / AAC, 854×480, 135,098,560 bytes |
+
+The full MP4 decoded with FFmpeg, exit code 0, with no decode errors. Script and
+media provenance match. Edge TTS initially failed, but a synthesis-only retry
+completed using the requested Andrew voice; no narrator substitution was made.
+The old baseline was backed up before replacing it with the fully validated Sol
+recap. No promotion or social upload was performed.
+
+The full recap's signal-level mix verification passed (narrator gain 0.9996,
+source gain 0.0912); unlike the initial short preview, it meets the confidence
+threshold. The final follow-up hermetic run passed **309 tests**, with zero
+external attempts. Existing Pydantic deprecation warnings remain nonfatal.
+
+Final media:
+`C:\Projects\AUTO-VIDEO-MAKER\productions\prd_20261026_the_last_dragon_queen_part_i_ai_short_fi_719\units\unit-001\plan\narrated_summary.mp4`

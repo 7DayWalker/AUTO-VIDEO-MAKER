@@ -620,6 +620,9 @@ class NarrationChapter(BaseModel):
     transcript_segment_ids: List[int] = Field(default_factory=list)
     frame_timestamps: List[float] = Field(default_factory=list)
     summary: str = Field(min_length=1)
+    visual_observation_source: Optional[str] = None
+    citable_frame_count: int = Field(default=0, ge=0)
+    unavailable_frame_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _check_chapter(self):
@@ -655,6 +658,9 @@ class NarrationArtifact(BaseModel):
     storytelling_provider: Optional[str] = None
     visual_understanding_strategy: Optional[Literal["direct_multimodal", "visual_notes_then_text_storyteller"]] = None
     text_storyteller_calls: int = Field(default=0, ge=0)
+    stage1_cache_hits: int = Field(default=0, ge=0)
+    stage1_prior_pro_hydrated_chapters: int = Field(default=0, ge=0)
+    live_vision_calls: int = Field(default=0, ge=0)
     status: str = Field(default="draft")
     narration_text: str = Field(min_length=1)
     summary: Optional[str] = Field(default=None, min_length=1)

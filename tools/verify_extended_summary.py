@@ -46,7 +46,7 @@ def main():
     timings = {}
     commands = [("narration", "/narration", {"summary_mode": "pro", "target_length_preset": "extended",
                  "mock_mode": False, "selection_mode": "explicit" if args.model else "auto", "asset_id": args.asset_id,
-                 **({"summary_understanding_model_id": args.model} if args.model else {})}),
+                 **({"model_id": args.model} if args.model else {})}),
                  ("synthesize", "/narration/synthesize", {"mock_mode": False, "format": "mp3", "voice": args.voice, "rate": args.rate}),
                 ("video", "/summary-video", {"mock_mode": False})]
     for stage, suffix, body in commands:
@@ -104,6 +104,9 @@ def main():
                "visual_observer_model": artifact.visual_observer_model_id,
                "visual_understanding_strategy": artifact.visual_understanding_strategy,
                "text_storyteller_calls": artifact.text_storyteller_calls,
+               "stage1_cache_hits": artifact.stage1_cache_hits,
+               "stage1_prior_pro_hydrated_chapters": artifact.stage1_prior_pro_hydrated_chapters,
+               "live_vision_calls": artifact.live_vision_calls,
                "WPM": round(len(artifact.narration_text.split()) * 60 / audio.duration, 3),
                "voice": audio_meta.get("voice"), "synthesis_rate": audio_meta.get("synthesis_rate"),
                "silence_trimmed_seconds": audio_meta.get("silence_trimmed_seconds"),
