@@ -336,11 +336,25 @@ def assess_model_for_job(
         (m for m in req.requires_any_input_modality if model.capabilities.supports_input_modality(m)),
         None,
     )
+    observer_routes = None
+    if model.visual_observer_model_id and req.job_id == JOB_SOURCE_VIDEO_RECAP:
+        # FRAME_SEQUENCE describes the whole job, never the AgentRouter wire input.
+        required_modality = "text"
+        observer = configured_visual_observer(model)
+        observer_routes = tuple(assess_provider_route(observer.id, binding, required_modality="image")
+                                for binding in observer.bindings)
 
     routes = tuple(
         assess_provider_route(model.id, b, required_modality=required_modality)
         for b in model.bindings
     )
+    if observer_routes is not None:
+        observer_ready = any(route.eligible for route in observer_routes)
+        for route in routes:
+            route.evidence.notes += ("visual_notes_then_text_storyteller",)
+            if not observer_ready:
+                route.eligible = False
+                route.reasons += ("visual_observer_unavailable:" + observer.id,)
     return ModelEligibility(
         canonical_model_id=model.id,
         display_name=model.display_name,
@@ -350,6 +364,18 @@ def assess_model_for_job(
         routes=routes,
         video_understanding_method=method,
     )
+
+
+def configured_visual_observer(model):
+    """An explicit Gemini observer override never changes storyteller identity."""
+    observer_id = os.getenv("AVM_RECAP_VISION_MODEL") or model.visual_observer_model_id
+    try:
+        observer = get_model(observer_id)
+    except KeyError:
+        raise ValueError("The configured recap visual observer is not a registered canonical model") from None
+    if not observer.capabilities.image_input or not any(binding.provider == "gemini" for binding in observer.bindings):
+        raise ValueError("The configured recap visual observer must have a Gemini image route")
+    return observer
 
 
 # ---------------------------------------------------------------------------

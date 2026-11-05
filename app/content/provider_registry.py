@@ -176,12 +176,19 @@ def _create_codecraft(provider_model_id: Optional[str] = None) -> BaseLLMProvide
     return CodeCraftProvider()
 
 
+def _create_agentrouter(provider_model_id: Optional[str] = None) -> BaseLLMProvider:
+    from app.content.providers.agentrouter import AgentRouterProvider
+
+    return AgentRouterProvider(model=provider_model_id)
+
+
 # Deterministic initial population (insertion order is the list order).
 register_provider("alibaba", _create_alibaba)
 register_provider("openrouter", _create_openrouter)
 register_provider("gemini", _create_gemini)
 register_provider("mock", _create_mock)
 register_provider("codecraft", _create_codecraft)
+register_provider("agentrouter", _create_agentrouter)
 
 
 __all__ = [

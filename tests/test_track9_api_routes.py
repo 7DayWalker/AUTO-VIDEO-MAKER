@@ -34,11 +34,11 @@ def _get(base, path):
         try: j=json.loads(b)
         except Exception: j={"raw": b}
         return e.code, j, dict(e.headers)
-def _post(base, path, body=None):
+def _post(base, path, body=None, *, timeout=10):
     data=json.dumps(body or {}).encode()
     req=urllib.request.Request(base+path, data=data, method="POST", headers={"Content-Type":"application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode()), dict(r.headers)
     except urllib.error.HTTPError as e:
         raw=e.read().decode()
@@ -154,7 +154,9 @@ def test_e2e_narration_standard_pro_synthesize_summary_and_media(monkeypatch, tm
         assert "audio" in payload3
         assert payload3["audio"]["provider"]=="mock"
         assert payload3["audio"]["status"]=="completed"
-        s,payload4,_=_post(base, f"/api/productions/{PID}/units/{UID}/summary-video", {})
+        # Real multi-process FFmpeg assembly, not the bounded sandbox branch:
+        # allow process startup on loaded Windows hosts without retrying POST.
+        s,payload4,_=_post(base, f"/api/productions/{PID}/units/{UID}/summary-video", {}, timeout=30)
         assert s==201, payload4
         assert payload4["production_id"]==PID and payload4["unit_id"]==UID
         assert "output_path" in payload4 and "media_url" in payload4
@@ -453,7 +455,9 @@ def test_mock_transcription_does_not_wait_for_an_active_real_transcriber(monkeyp
         assert entered.wait(2)
         started = time.perf_counter()
         status, payload = transcribe_source(PID, AID, root=tmp_path / "productions", mock_mode=True)
-        assert time.perf_counter() - started < 0.2
+        # The event assertion below proves no wait on the real transcriber.
+        # Leave room for loaded Windows filesystem scheduling, not a 200ms benchmark.
+        assert time.perf_counter() - started < 1.0
         assert status == 201 and payload["provider"] == "mock"
         assert worker.is_alive() and not release.is_set()
         assert canonical.read_text(encoding="utf-8") == before
@@ -995,9 +999,9 @@ def test_standard_real_http_auto_recovers_from_partial_json_and_regeneration_ret
         httpd.shutdown(); httpd.server_close()
 
 
-@pytest.mark.parametrize("preset,count,words,target", [(None, 47, (1150, 1500), 540), ("auto", 47, (1150, 1500), 540),
+@pytest.mark.parametrize("preset,count,words,target", [(None, 49, (1400, 1680), 540), ("auto", 49, (1400, 1680), 540),
     ("short", 8, (150, 210), 75), ("story", 18, (350, 520), 195), ("deep", 32, (750, 1150), 390),
-    ("extended", 47, (1150, 1500), 540)])
+    ("extended", 49, (1400, 1680), 540)])
 def test_real_narration_http_duration_presets_persist_story_budget(monkeypatch, tmp_path, preset, count, words, target):
     from tests.track9_narration_fakes import story_evidence, story_response, install_standard_provider
     from app.production.storage import save_revision, transcript_path_for, load_narration_artifact

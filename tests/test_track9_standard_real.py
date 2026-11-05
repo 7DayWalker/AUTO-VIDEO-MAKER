@@ -696,8 +696,8 @@ def test_edge_tts_transport_diagnostics_never_expose_request_tokens(monkeypatch,
     (180, (8, 12), (180, 270), 100), (599.9, (8, 12), (180, 270), 100),
     (600, (14, 22), (320, 500), 180), (899, (14, 22), (320, 500), 180),
     (900, (28, 40), (750, 1150), 390), (1499, (28, 40), (750, 1150), 390),
-    (1500, (40, 54), (1150, 1500), 540), (1805, (40, 54), (1150, 1500), 540),
-    (2700, (40, 54), (1150, 1500), 540), (2700.1, (40, 54), (1150, 1500), 540),
+    (1500, (45, 54), (1400, 1680), 540), (1805, (45, 54), (1400, 1680), 540),
+    (2700, (45, 54), (1400, 1680), 540), (2700.1, (45, 54), (1400, 1680), 540),
 ])
 def test_auto_duration_bands_match_story_scale(seconds, beats, words, target):
     from app.production.recap_budget import resolve_recap_budget
@@ -709,7 +709,7 @@ def test_auto_duration_bands_match_story_scale(seconds, beats, words, target):
 
 @pytest.mark.parametrize("preset,beats,words,target", [
     ("short", (8, 10), (150, 210), 75), ("story", (15, 22), (350, 520), 195),
-    ("deep", (28, 40), (750, 1150), 390), ("extended", (40, 54), (1150, 1500), 540),
+    ("deep", (28, 40), (750, 1150), 390), ("extended", (45, 54), (1400, 1680), 540),
 ])
 def test_length_presets_have_explicit_minimums_and_override_auto(preset, beats, words, target):
     from app.production.recap_budget import resolve_recap_budget
@@ -749,7 +749,7 @@ def test_real_auto_story_budget_persists_and_covers_whole_movie(tmp_path):
     assert load_narration_artifact(PID, UID, root=tmp_path).narration_budget == artifact.narration_budget
     prompt = provider.calls[0]["prompt"]
     assert '"min_beats":14' in prompt and '"min_narration_words":320' in prompt
-    assert "2-3 engaging narrative sentences" in provider.calls[0]["system_prompt"]
+    assert "2-4 engaging narrative sentences" in provider.calls[0]["system_prompt"]
 
 
 @pytest.mark.parametrize("bad", ["blurb", "too_few_words", "short_beats", "one_sentence", "clustered", "reversed", "no_ending"])

@@ -313,6 +313,9 @@ class CanonicalModel(BaseModel):
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     bindings: Tuple[ProviderBinding, ...] = Field(default_factory=tuple)
     default_binding: Optional[str] = None
+    # Workflow dependency, NOT an image/native-video capability of this model.
+    # The observer inspects frames; this model receives validated TEXT notes only.
+    visual_observer_model_id: Optional[str] = None
 
     @field_validator("id")
     @classmethod
@@ -405,8 +408,9 @@ def deprecated_aliases_for(canonical_id: str) -> Tuple[str, ...]:
 
 
 def list_models_for_pro() -> Tuple[CanonicalModel, ...]:
-    """Capability-driven discovery for Summary Pro: multimodal video understanding."""
-    return tuple(m for m in MODEL_REGISTRY.values() if m.capabilities.is_pro_eligible())
+    """Direct multimodal routes and explicitly declared observer/text workflows."""
+    return tuple(m for m in MODEL_REGISTRY.values()
+                 if model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])[0])
 
 
 def list_pro_model_ids() -> Tuple[str, ...]:
@@ -477,6 +481,11 @@ def model_meets_job(model: CanonicalModel, requirement: JobRequirement) -> Tuple
         missing.append("tool_use")
     if requirement.requires_any_input_modality:
         supported = caps.supported_input_modalities()
+        if (requirement.job_id == JOB_SOURCE_VIDEO_RECAP and model.visual_observer_model_id
+                and caps.text and caps.json_):
+            observer = MODEL_REGISTRY.get(model.visual_observer_model_id)
+            if observer is not None and observer.capabilities.image_input:
+                supported += (InputModality.FRAME_SEQUENCE,)
         if not any(m in supported for m in requirement.requires_any_input_modality):
             missing.append(
                 "input_modality:" + "|".join(requirement.requires_any_input_modality)
@@ -508,6 +517,8 @@ def job_video_understanding_method(model: CanonicalModel) -> Optional[str]:
     ``native_video`` when the model ingests video itself, ``frame_sequence``
     when AVM must supply timestamped stills, ``None`` when it cannot do the job.
     """
+    if model.visual_observer_model_id and model_meets_job(model, JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])[0]:
+        return InputModality.FRAME_SEQUENCE
     return model.capabilities.can_understand_source_video()[1]
 
 
@@ -546,6 +557,7 @@ def model_drawer_projection(job_id: str = JOB_SOURCE_VIDEO_RECAP) -> Dict[str, o
             "id": m.id,
             "display_name": m.display_name,
             "family": m.family,
+            **({"visual_observer_model_id": m.visual_observer_model_id} if m.visual_observer_model_id else {}),
             "capabilities": {
                 "text": caps.text,
                 "json": caps.json_,
@@ -935,6 +947,24 @@ def _build_registry() -> Dict[str, CanonicalModel]:
             default_binding="codecraft",
         ),
     ]
+    for model_id, display_name in (("gpt-6.1-sol", "GPT-6.1 Sol"), ("gpt-6-astra", "GPT-6 Astra")):
+        models.append(CanonicalModel(
+            id=model_id, display_name=display_name, family="gpt",
+            capabilities=ModelCapabilities(text=True, json_=True, reasoning=True,
+                                           vision=False, video=False, multimodal=False),
+            bindings=(ProviderBinding(
+                provider="agentrouter", provider_model_id=model_id,
+                config_keys=("AGENTROUTER_API_KEY", "AGENTROUTER_BASE_URL"),
+                supported_input_modalities=(InputModality.TEXT,),
+                supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
+                identity_verification=IdentityVerification.DECLARED,
+                identity_evidence=(
+                    "AgentRouter local model catalogue and successful text-only requests declare this exact ID. "
+                    "Upstream weights are not independently attested. Image payloads are forbidden; "
+                    "Summary Pro uses a separate Gemini observer and a text-only storyteller."
+                ),
+            ),), default_binding="agentrouter", visual_observer_model_id="gemini-3.5-flash-lite",
+        ))
     registry: Dict[str, CanonicalModel] = {}
 
     for m in models:

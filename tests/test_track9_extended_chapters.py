@@ -23,7 +23,7 @@ def frame_loader(start, end, index):
     return [(round(start + (end - start) * (i + 1) / 31, 3), f"fixture-{index}-{i}.jpg") for i in range(30)]
 
 
-@pytest.mark.parametrize("preset,min_beats,words", [("extended", 40, 1150), ("deep", 28, 750), ("auto", 40, 1150)])
+@pytest.mark.parametrize("preset,min_beats,words", [("extended", 45, 1400), ("deep", 28, 750), ("auto", 45, 1400)])
 @pytest.mark.parametrize("visual", [False, True])
 def test_long_recap_uses_final_chapter_beats_full_transcript_and_rolling_context(tmp_path, preset, min_beats, words, visual):
     asset, transcript = story_evidence(count=365)
@@ -287,9 +287,9 @@ def test_pitch_preserving_audio_pacing_is_measured_and_has_no_silence_padding(tm
     run_ffmpeg(["-y", "-f", "lavfi", "-i", "sine=frequency=350:sample_rate=24000", "-t", "4.0", str(path)], "hermetic audio")
     budget = resolve_recap_budget(1800, target_length_preset="extended").model_copy(update={
         "target_duration_seconds": 5, "min_duration_seconds": 4.5, "max_duration_seconds": 5.5})
-    artifact = SimpleNamespace(planning_strategy="multi_chapter", narration_budget=budget)
+    artifact = SimpleNamespace(planning_strategy="multi_chapter", narration_budget=budget, narration_text=" ".join(["word"] * 14))
     result, original, factor = _pace_long_narration(path, artifact, validate_audio_file(path))
-    assert original == pytest.approx(4, abs=.05) and factor == pytest.approx(.8, abs=.01)
+    assert original == pytest.approx(4, abs=.05) and factor == pytest.approx(4 / (14 * 60 / 170), abs=.01)
     assert 4.5 <= result.duration <= 5.5 and result.valid
     assert not (tmp_path / "speech-fixture.paced.wav").exists()
 

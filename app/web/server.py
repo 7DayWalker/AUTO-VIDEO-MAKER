@@ -178,6 +178,7 @@ def _canonical_models_projection() -> dict:
         capabilities = getattr(canonical, "capabilities", None)
         entry = {
             "id": canonical.id,
+            **({"visual_observer_model_id": canonical.visual_observer_model_id} if canonical.visual_observer_model_id else {}),
             "display_name": canonical.display_name,
             "family": getattr(canonical, "family", None),
             # Generic, provider-agnostic capability flags only (Step 1
@@ -286,7 +287,8 @@ def _ai_summary_projection() -> dict:
             continue
         is_standard = bool(getattr(caps, "text", False) and getattr(caps, "json_", False))
         try:
-            is_pro = bool(caps.is_pro_eligible())
+            from app.content.model_registry import model_meets_job, JOB_REQUIREMENTS, JOB_SOURCE_VIDEO_RECAP
+            is_pro = model_meets_job(canonical, JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])[0]
         except Exception:
             try:
                 is_pro = bool(caps.is_multimodal_capable())
@@ -321,6 +323,15 @@ def _ai_summary_projection() -> dict:
                 logger.warning("ai_summary binding probe failed for '%s': %s", canonical.id, exc)
                 unknown += 1
         entry_configured = configured > 0
+        pro_configured = entry_configured
+        visual_observer_id = canonical.visual_observer_model_id
+        if canonical.visual_observer_model_id:
+            from app.content.capability_router import assess_model_for_job, configured_visual_observer
+            try:
+                visual_observer_id = configured_visual_observer(canonical).id
+                pro_configured = assess_model_for_job(canonical.id, JOB_SOURCE_VIDEO_RECAP).eligible
+            except ValueError:
+                pro_configured = False
         if entry_configured:
             entry_status = "ready"
         elif bindings and unknown == len(bindings):
@@ -331,6 +342,10 @@ def _ai_summary_projection() -> dict:
             "id": canonical.id,
             "display_name": canonical.display_name,
             "family": getattr(canonical, "family", None),
+            "visual_observer_model_id": visual_observer_id,
+            "visual_understanding_strategy": "visual_notes_then_text_storyteller" if canonical.visual_observer_model_id else "direct_multimodal" if is_pro else None,
+            "video_understanding_method": "frame_sequence" if canonical.visual_observer_model_id else "native_video" if caps.video else "frame_sequence" if caps.vision else None,
+            "pro_configured": pro_configured if is_pro else False,
             "capabilities": cap_proj,
             "eligible_modes": eligible_modes,
             "configured": entry_configured,
@@ -4399,9 +4414,9 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         return 500, {"error": "LOAD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
     if explicit is not None:
         try:
-            from app.content.model_registry import get_model as _gm
+            from app.content.model_registry import get_model as _gm, model_meets_job, JOB_REQUIREMENTS, JOB_SOURCE_VIDEO_RECAP
             m = _gm(explicit)
-            if summary_mode == "pro" and not m.capabilities.is_multimodal_capable():
+            if summary_mode == "pro" and not model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])[0]:
                 return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": f"Model {explicit!r} is not multimodal-capable"}
         except KeyError:
             return 404, {"error": "MODEL_NOT_FOUND", "message": f"Unknown canonical model {explicit!r}"}
@@ -4473,9 +4488,16 @@ def narration_synthesize_payload(production_id: str, unit_id: str, body: dict):
         fmt="mp3"
     if mock_mode:
         pn="mock"
+    rate=body.get("rate")
+    if rate is not None:
+        from app.production.synthesis import recap_rate
+        try:
+            recap_rate(rate)
+        except ValueError:
+            return 400, {"error": "INVALID_REQUEST", "message": "rate must be a signed recap speaking percentage"}
     try:
         from app.production.narration import synthesize_narration_audio
-        meta=synthesize_narration_audio(art, root=PRODUCTIONS_DIR, provider_name=pn, voice=voice, output_format=fmt, mock_mode=mock_mode)
+        meta=synthesize_narration_audio(art, root=PRODUCTIONS_DIR, provider_name=pn, voice=voice, rate=rate, output_format=fmt, mock_mode=mock_mode)
     except Exception as exc:
         from app.voice.exceptions import VoiceProviderError
         if isinstance(exc, VoiceProviderError):

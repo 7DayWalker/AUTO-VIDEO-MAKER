@@ -35,6 +35,8 @@ from app.content.model_registry import (
     job_video_understanding_method,
     list_models,
     model_drawer_projection,
+    model_meets_job,
+    JOB_REQUIREMENTS,
 )
 from app.content.model_resolver import (
     AllExactModelProvidersFailedError,
@@ -177,9 +179,13 @@ def test_4_discovery_is_capability_driven_not_name_driven():
     found = discover_models_for_job(JOB_SOURCE_VIDEO_RECAP)
     assert found, "at least one model must be capable of the job"
     for m in found:
-        capable, method = m.capabilities.can_understand_source_video()
+        capable, _ = model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])
+        method = job_video_understanding_method(m)
         assert capable is True
         assert method in (InputModality.NATIVE_VIDEO, InputModality.FRAME_SEQUENCE)
+        if m.visual_observer_model_id:
+            assert not m.capabilities.image_input and not m.capabilities.native_video_input
+            assert get_model(m.visual_observer_model_id).capabilities.image_input
     # No product/provider label is required to qualify.
     ids = [m.id for m in found]
     for banned in ("summary", "pro"):
@@ -248,7 +254,7 @@ def test_5_auto_selects_model_before_provider(monkeypatch):
     assert "provider" not in selection.as_dict()
     # Every considered candidate was capability-discovered first.
     for mid in selection.considered:
-        assert get_model(mid).capabilities.can_understand_source_video()[0] is True
+        assert model_meets_job(get_model(mid), JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])[0] is True
     # Provider resolution is a SEPARATE, later step.
     route = select_provider_for_model(selection.canonical_model_id, JOB_SOURCE_VIDEO_RECAP)
     assert route.canonical_model_id == selection.canonical_model_id

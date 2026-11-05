@@ -106,7 +106,10 @@ def test_2_eligible_models_discovered_by_capability():
     eligible = list_models_for_pro()
     assert eligible, "at least one multimodal-capable canonical model required"
     for m in eligible:
-        assert m.capabilities.is_multimodal_capable() is True
+        assert m.capabilities.is_multimodal_capable() or m.visual_observer_model_id
+        if m.visual_observer_model_id:
+            assert not m.capabilities.vision and not m.capabilities.video and not m.capabilities.multimodal
+            assert get_model(m.visual_observer_model_id).capabilities.image_input
     # Text-only models are excluded by capability, not by name
     assert "qwen-3.8-flash" not in list_pro_model_ids()
     # A brand-new multimodal model (no 'summary' in the name) is discovered
@@ -303,7 +306,11 @@ def test_10_gemini_not_structurally_privileged():
     others = [m for m in list_models_for_pro() if m.id != gem.id]
     assert others, "Pro must have non-Gemini eligible models"
     for m in others:
-        assert m.capabilities.is_multimodal_capable() == gem.capabilities.is_multimodal_capable()
+        if m.visual_observer_model_id:
+            assert m.capabilities.is_multimodal_capable() is False
+            assert get_model(m.visual_observer_model_id).capabilities.image_input
+        else:
+            assert m.capabilities.is_multimodal_capable() == gem.capabilities.is_multimodal_capable()
     providers_in_catalogue = {b.provider for m in list_models_for_pro() for b in m.bindings}
     assert "gemini" in providers_in_catalogue
     assert providers_in_catalogue - {"gemini"}, "non-Gemini providers must exist"
@@ -416,14 +423,17 @@ def test_model_drawer_contract_hides_provider_identity():
     for secret_key in ("api_key", "_api_key", "gemini_api_key", "config_keys"):
         assert secret_key not in serialized, f"'{secret_key}' leaked into drawer contract"
     for entry in payload["models"]:
-        assert set(entry) == {
+        expected = {
             "id", "display_name", "family", "capabilities", "context_tokens",
             "eligible_for_job", "video_understanding_method",
             "cost_estimate", "cost_basis",
         }
+        if entry.get("visual_observer_model_id"):
+            expected.add("visual_observer_model_id")
+        assert set(entry) == expected
         assert "provider" not in entry
         assert "bindings" not in entry
-        assert entry["capabilities"]["multimodal"] is True
+        assert entry["capabilities"]["multimodal"] is (not bool(entry.get("visual_observer_model_id")))
         # Image input and native video are reported DISTINCTLY.
         assert "image_input" in entry["capabilities"]
         assert "native_video_input" in entry["capabilities"]

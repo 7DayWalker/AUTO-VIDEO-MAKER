@@ -2,7 +2,7 @@
 
 ## Length policy
 
-Core owns the length budget. `extended` is **40–54 beats, 1,150–1,500
+Core owns the length budget. `extended` is **45–54 beats, 1,400–1,680
 spoken words, target 540 seconds, accepted audio range 480–600 seconds**.
 `deep` is **28–40 beats, 750–1,150 words, target 390 seconds, accepted
 audio range 300–480 seconds**. Auto selects deep for 15–25 minute sources
@@ -18,7 +18,7 @@ final beats, not intermediate notes for a movie-sized final rewrite.
 
 Chapter-local word counts may vary modestly. Remaining capacity is reserved
 so the final aggregate still strictly meets both word limits. Beat counts,
-two/three-sentence narration, opening/middle/ending coverage, source bounds,
+two-to-four naturally varied sentences, opening/middle/ending coverage, source bounds,
 and chronological ordering are validated. No copied transcript/mock fallback
 is admitted on real execution.
 
@@ -26,8 +26,11 @@ is admitted on real execution.
 
 Real long-form Pro extracts timestamped JPEGs with FFmpeg approximately every
 12 seconds, capped at 32 frames per chapter (155 frames for the verified film).
-Each chapter sends **frames and transcript together** to the resolved vision
-adapter. Every Pro beat cites inspected frame IDs; silent events can cite
+Direct vision routes send **frames and transcript together** to the resolved
+adapter. AgentRouter's Sol/Astra routes instead use a separate Gemini observer,
+then send **pure-text visual action notes and Whisper dialogue** to the selected
+storyteller. Neither Sol nor Astra is advertised as accepting images or native
+video. Every Pro beat cites inspected frame IDs; silent events can cite
 frames without inventing dialogue. Disjoint evidence moments remain disjoint
 source references, not a long clip spanning uncited material.
 
@@ -35,11 +38,14 @@ Frame bytes are loaded and encoded only inside Python provider adapters.
 Timestamp/path tuples are handled explicitly; unreadable/missing frames fail
 before HTTP. No image bytes, base64, credentials or request headers are logged.
 Gemini uses bounded media/thinking configuration; all adapters reject output
-truncation. Chapter JSON starts with 4K output tokens and retries truncation
-at 8K. Fast overloads use bounded backoff; full timeouts move to the next
+truncation. Chapter JSON starts with 4K output tokens and retries at 8K;
+the text-only storyteller divides chapters into bounded 2–3-beat requests,
+validates each batch, then validates the aggregate chapter without a lossy rewrite.
+Fast overloads use bounded backoff; full timeouts move to the next
 eligible Auto route. Explicit canonical selection never changes models.
 
-`narration_chapters.partial.json` checkpoints only validated chapters and is
+`narration_chapters.partial.json` checkpoints validated chapters and pending
+validated visual notes (before the separate storyteller request), and is
 not a playable/complete narration artifact. Reuse requires matching source,
 transcript, budget, model, chapter windows and frame timestamps, followed by
 revalidation. It is removed on successful completion. The old narration is
@@ -53,10 +59,16 @@ verification; Alibaba/OpenRouter routes reported model/quota failures.
 
 ## Audio and assembly
 
-Measured TTS audio is authoritative. If a long preset falls outside its
-duration range, bounded FFmpeg `atempo` adjusts speaking pace without changing
-pitch, adding silence, or clipping narration. Metadata records original
-duration and the tempo factor. Extreme correction is rejected.
+Measured TTS audio is authoritative. Recaps default to Andrew Multilingual at
+configurable `+15%`, with one continuous request and conservative silence
+tightening. Bounded FFmpeg `atempo` is admitted only when **both** the preset
+runtime and 155–180 WPM can be met. Sparse scripts are rejected rather than
+stretched into slow nine-minute speech. Metadata records original duration,
+removed silence, synthesis rate, measured WPM and tempo factor.
+
+Source cuts retain original audio at default `0.10` gain beneath the `1.0`
+narrator. `AVM_RECAP_BACKGROUND_VOLUME` accepts 0–0.30 (0 disables the bed).
+Missing audio falls back to narration-only, explicitly recorded in metadata.
 
 Word-proportional beat allocation on a global cut grid creates about 90–110
 moving shots for 8–10 minutes, each at most 5.5 seconds. The planner prefers
@@ -69,10 +81,10 @@ seconds is rejected for the multi-chapter path.
 K3 exposes Extended, a native inline player, measured duration/beat/word/chapter/
 cut badges, and a read-only **Load saved recap** action. Media stays behind the
 same-origin `/api` proxy; the fingerprint invalidates stale browser media.
-Generation, synthesis and assembly requests have 300,000ms deadlines and are
+Chapter narration requests allow 900,000ms; synthesis/assembly retain 300,000ms and are
 never automatically retried by the browser.
 
-## Verified live output — The Last Dragon Queen
+## Previous baseline — The Last Dragon Queen (before storyteller upgrade)
 
 Production: `prd_20261026_the_last_dragon_queen_part_i_ai_short_fi_719`
 
@@ -112,7 +124,7 @@ recap remains appropriate before publishing.
 
 ## Repeatable checks
 
-Final verification on 2026-11-04: **Core 2,153 passed, 1 skipped**, zero
+Baseline verification on 2026-11-04: **Core 2,153 passed, 1 skipped**, zero
 external network attempts under `run_hermetic_pytest.py`; **K3 171 passed**;
 Vite production build passed. Existing Pydantic deprecation warnings and
 Vite's >500kB bundle-size warning remain non-fatal. K3 commit:

@@ -126,11 +126,27 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
 
 
 def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None, recap_budget=None, deadline=None) -> NarrationArtifact:
-    from app.production.recap_budget import requires_chapter_planning
-    if recap_budget is not None and requires_chapter_planning(source_asset.duration, recap_budget):
+    from app.production.recap_budget import requires_chapter_planning, resolve_recap_budget
+    from app.content.model_registry import get_model
+    selected = get_model(summary_model_id)
+    composite = selected.visual_observer_model_id is not None
+    if composite or (recap_budget is not None and requires_chapter_planning(source_asset.duration, recap_budget)):
         from app.production.narration_chapters import build_chapter_plan
         from app.content.model_registry import get_model
         from app.production.storage import unit_plan_dir
+        observer = None
+        if composite:
+            from app.content.model_resolver import resolve_model
+            from app.content.capability_router import assess_provider_route, configured_visual_observer
+            observer_model = configured_visual_observer(selected)
+            if not any(assess_provider_route(observer_model.id, binding, required_modality="image").eligible
+                       for binding in observer_model.bindings):
+                raise ValueError("Summary Pro visual observer is not configured; no transcript-only downgrade")
+            observer = resolve_model(observer_model.id, mode="exact", try_next_on_failure=True).provider_instance
+            if observer.name != "gemini" or not observer.supports_multimodal():
+                raise ValueError("Summary Pro requires its declared Gemini visual observer")
+            if hasattr(observer, "_timeout"):
+                observer._timeout = min(observer._timeout, 45)
         src = _src_arg(source_asset, production_id, root=root)
         if not src.is_file():
             raise FileNotFoundError("Summary Pro requires the registered source video")
@@ -142,7 +158,8 @@ def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: So
                     raise ValueError("Summary Pro could not extract every chapter frame; no partial visual plan was saved")
                 return frames
             artifact = build_chapter_plan(production_id, unit_id, source_asset, source_transcript,
-                budget=recap_budget, prov=prov, context_tokens=get_model(summary_model_id).capabilities.context_tokens,
+                budget=recap_budget or resolve_recap_budget(source_asset.duration, target_duration_seconds=target_duration_seconds),
+                prov=prov, context_tokens=selected.capabilities.context_tokens, visual_observer=observer,
                 frame_loader=load_frames,
                 checkpoint_path=unit_plan_dir(production_id, unit_id, root=root) / "narration_chapters.partial.json",
                 deadline=deadline)

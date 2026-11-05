@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PREFIXES = (
-    "AVM_", "ALIBABA_", "DASHSCOPE_", "CODECRAFT_", "GEMINI_",
+    "AVM_", "ALIBABA_", "DASHSCOPE_", "CODECRAFT_", "GEMINI_", "AGENTROUTER_",
     "OPENROUTER_", "OPENAI_", "TIKTOK_", "YOUTUBE_", "GOOGLE_",
     "TTS_", "LLM_", "CDP_", "FLOW_", "CHROME_", "VOICE_",
     "VIDEO_", "MUSIC_", "CAPTION_", "DEFAULT_LLM_",

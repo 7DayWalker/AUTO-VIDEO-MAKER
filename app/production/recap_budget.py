@@ -107,7 +107,7 @@ def resolve_recap_budget(source_duration, *, target_length_preset="auto", target
         values = (390, 28, 40, 750, 1150)
         duration_bounds = (300, 480)
     elif preset == "extended":
-        values = (540, 40, 54, 1150, 1500)
+        values = (540, 45, 54, 1400, 1680)
         duration_bounds = (480, 600)
     elif source < 180:
         values = (min(60, source * 0.6), 4, 6, 100, 150)
@@ -119,7 +119,7 @@ def resolve_recap_budget(source_duration, *, target_length_preset="auto", target
         values = (390, 28, 40, 750, 1150)
         duration_bounds = (300, 480)
     else:
-        values = (540, 40, 54, 1150, 1500)
+        values = (540, 45, 54, 1400, 1680)
         duration_bounds = (480, 600)
     duration, min_beats, max_beats, min_words, max_words = values
     if duration > source * 0.6:
@@ -170,8 +170,8 @@ def validate_recap_depth(artifact, budget, transcript, source_duration, allowed_
     for beat in artifact.beats:
         sentences = [part for part in re.split(r"[.!?。！？]+(?:[\"'’”]*\s+|$)", beat.narration_text.strip()) if part.strip()]
         beat_words = len(beat.narration_text.split())
-        if beat_words < budget.min_words_per_beat or not 2 <= len(sentences) <= 3:
-            raise ValueError(f"Beat {beat.order} has {len(sentences)} sentences and {beat_words} words; each beat needs 2-3 sentences, normally 20-30 words, not one-line blurbs")
+        if beat_words < budget.min_words_per_beat or not 2 <= len(sentences) <= 4:
+            raise ValueError(f"Beat {beat.order} has {len(sentences)} sentences and {beat_words} words; each beat needs 2-4 varied sentences, normally 26-36 words for extended recaps, not one-line blurbs")
     if not budget.require_story_coverage:
         return
     beat_ids = [set(index for ref in beat.source_refs for index in ref.transcript_segment_ids) for beat in artifact.beats]

@@ -147,7 +147,8 @@ class ChapterNarrationProvider(StubNarrationProvider):
         rows, frames = evidence["transcript_segments"], evidence["frames"]
         data = {"summary": f"Chapter {evidence['chapter_index']} ends with the companions escaping danger.", "beats": []}
         text = ("A determined traveler protects a vulnerable companion while enemies approach the shelter. "
-                "Their difficult choice reveals new danger and changes the course of the journey ahead.")
+                "Their difficult choice reveals new danger and changes the course of the journey ahead "
+                "as the pursuers close in and force the companions to seek another escape route.")
         # Fit local targets with real sentences of the requested word count.
         target = evidence["preferred_word_count"]
         for index in range(count):

@@ -21,7 +21,7 @@ def test_registry_lists_registered_providers():
     providers = reg.list_providers()
     assert isinstance(providers, tuple)
     # Step 4: codecraft is now registered
-    assert providers == ("alibaba", "openrouter", "gemini", "mock", "codecraft")
+    assert providers == ("alibaba", "openrouter", "gemini", "mock", "codecraft", "agentrouter")
 
 
 def test_existing_real_providers_registered():
@@ -125,7 +125,7 @@ def test_import_does_not_make_network_calls_and_no_credentials_needed(monkeypatc
 
     _fresh_copy("app.content.model_registry", "avm_fresh_model_registry_for_preg")
     mod = _fresh_copy("app.content.provider_registry", "avm_fresh_provider_registry")
-    assert mod.list_providers() == ("alibaba", "openrouter", "gemini", "mock", "codecraft")
+    assert mod.list_providers() == ("alibaba", "openrouter", "gemini", "mock", "codecraft", "agentrouter")
     import pathlib
     text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
     assert "import requests" not in text

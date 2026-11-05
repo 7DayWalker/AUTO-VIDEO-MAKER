@@ -593,6 +593,9 @@ class NarrationAudioArtifact(BaseModel):
     generated_at: str = Field(min_length=1)
     original_duration_seconds: Optional[float] = Field(default=None, gt=0)
     tempo_factor: float = Field(default=1.0, gt=0)
+    synthesis_rate: Optional[str] = None
+    words_per_minute: Optional[float] = Field(default=None, gt=0)
+    silence_trimmed_seconds: float = Field(default=0.0, ge=0)
 
     @model_validator(mode="after")
     def _validate_audio_path(self) -> "NarrationAudioArtifact":
@@ -647,6 +650,11 @@ class NarrationArtifact(BaseModel):
     chapters: List[NarrationChapter] = Field(default_factory=list)
     visual_frame_count: int = Field(default=0, ge=0)
     multimodal_calls: int = Field(default=0, ge=0)
+    visual_observer_model_id: Optional[str] = None
+    visual_observer_provider: Optional[str] = None
+    storytelling_provider: Optional[str] = None
+    visual_understanding_strategy: Optional[Literal["direct_multimodal", "visual_notes_then_text_storyteller"]] = None
+    text_storyteller_calls: int = Field(default=0, ge=0)
     status: str = Field(default="draft")
     narration_text: str = Field(min_length=1)
     summary: Optional[str] = Field(default=None, min_length=1)

@@ -52,6 +52,9 @@ def get_default_provider() -> BaseLLMProvider:
         return GeminiProvider()
     elif provider_name == "alibaba":
         return _build_alibaba_provider()
+    elif provider_name == "agentrouter":
+        from app.content.providers.agentrouter import AgentRouterProvider
+        return AgentRouterProvider()
     else:
         raise ValueError(f"Unknown LLM provider: {provider_name}")
 

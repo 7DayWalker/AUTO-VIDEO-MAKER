@@ -97,7 +97,7 @@ def pro_auto_model_ids() -> tuple[str, ...]:
     from app.content.capability_router import assess_model_for_job, capability_rank
 
     pool = sorted(list_models_for_pro(), key=capability_rank, reverse=True)
-    return tuple(model.id for model in pool if model.capabilities.image_input
+    return tuple(model.id for model in pool if (model.capabilities.image_input or model.visual_observer_model_id)
                  and assess_model_for_job(model.id, JOB_SOURCE_VIDEO_RECAP).eligible)
 
 
@@ -160,7 +160,7 @@ def resolve_summary_model(
                 raise ValueError(
                     f"Model {m.id!r} cannot satisfy Summary Standard requirements: {', '.join(missing)}"
                 )
-        if mode == "pro" and not m.capabilities.is_multimodal_capable():
+        if mode == "pro" and not model_meets_job(m, JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])[0]:
             raise ValueError(
                 f"Model {explicit_id!r} is not multimodal-capable; cannot satisfy Summary Pro requirements"
             )
@@ -250,7 +250,10 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
         SummaryProTemporarilyUnavailableError,
     )
     is_pro = summary_mode == "pro"
-    deadline = time.monotonic() + 270 if is_pro else None
+    # Two-stage chapters include a separate vision request and reasoning-model
+    # text request. Keep a bounded operation without the old single-stage limit.
+    composite = bool(model_id and get_model(model_id).visual_observer_model_id)
+    deadline = time.monotonic() + (870 if composite else 270) if is_pro else None
     job_id = JOB_SOURCE_VIDEO_RECAP if is_pro else JOB_SOURCE_TRANSCRIPT_RECAP
     label = "Pro" if is_pro else "Standard"
     candidates = (model_id,) if model_id is not None else (pro_auto_model_ids() if is_pro else standard_auto_model_ids())
@@ -289,12 +292,13 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
             attempted.add(route_id)
             try:
                 if is_pro:
-                    if not resolved.provider_instance.supports_multimodal():
+                    composite = get_model(candidate_id).visual_observer_model_id is not None
+                    if not composite and not resolved.provider_instance.supports_multimodal():
                         from app.content.exceptions import LLMModelUnavailableError
                         raise LLMModelUnavailableError()
                     # A single overloaded model must not consume the entire
                     # five-minute command budget before Auto can try another.
-                    if hasattr(resolved.provider_instance, "_timeout"):
+                    if not composite and hasattr(resolved.provider_instance, "_timeout"):
                         resolved.provider_instance._timeout = min(resolved.provider_instance._timeout, 45)
                     from app.production.narration_pro import build_pro_multimodal_plan
                     artifact = build_pro_multimodal_plan(production_id, unit_id, source_asset, transcript,
@@ -406,14 +410,15 @@ def build_grounded_narration_plan(
     if mock_mode:
         if mode == "pro":
             from app.content.model_registry import get_model as _get_model
+            _m = None
             try:
                 _m = _get_model(summary_model_id)
-                if not _m.capabilities.is_multimodal_capable():
+                if not model_meets_job(_m, JOB_REQUIREMENTS[JOB_SOURCE_VIDEO_RECAP])[0]:
                     raise ValueError(f"Pro requires multimodal model; {summary_model_id!r} is not multimodal")
             except KeyError:
                 pass
             prov_mm = llm_provider_override
-            if prov_mm is not None and hasattr(prov_mm, "supports_multimodal"):
+            if prov_mm is not None and not getattr(_m, "visual_observer_model_id", None) and hasattr(prov_mm, "supports_multimodal"):
                 try:
                     if not prov_mm.supports_multimodal():
                         raise RuntimeError(f"Provider {getattr(prov_mm,'name','?')} does not support multimodal Pro (no silent downgrade)")
@@ -424,7 +429,7 @@ def build_grounded_narration_plan(
             if not _src_path.is_file():
                 pass
             # Pro mock exercises multimodal seam: count as multimodal call
-            if prov_mm is not None and hasattr(prov_mm, "generate_multimodal"):
+            if prov_mm is not None and not getattr(_m, "visual_observer_model_id", None) and hasattr(prov_mm, "generate_multimodal"):
                 try:
                     src_arg = str(_src_path) if _src_path.is_file() else source_asset.stored_path
                     prov_mm.generate_multimodal(prompt="Pro multimodal probe: source video + transcript", system_prompt="multimodal", video=src_arg, images=None)
@@ -445,7 +450,7 @@ def build_grounded_narration_plan(
     if not prov_real.is_available():
         raise RuntimeError(f"Canonical model {summary_model_id!r} is not available for narration planning")
     if mode == "pro":
-        if not getattr(prov_real, "supports_multimodal", lambda: False)():
+        if not get_model(summary_model_id).visual_observer_model_id and not getattr(prov_real, "supports_multimodal", lambda: False)():
             raise RuntimeError("Pro requires a multimodal provider (no silent downgrade)")
         # Long-form hierarchical multimodal understanding (bounded windows)
         from app.production.narration_pro import build_pro_multimodal_plan
@@ -567,10 +572,19 @@ def _pace_long_narration(output_path, artifact, validation):
     if (artifact.planning_strategy != "multi_chapter" or budget is None
             or budget.min_duration_seconds is None or not validation.valid):
         return validation, original, 1.0
-    if budget.min_duration_seconds <= original <= budget.max_duration_seconds:
+    words = len(artifact.narration_text.split())
+    # Intersect runtime with a natural spoken cadence. A sparse script must be
+    # rebuilt, not stretched to nine minutes at 130 WPM.
+    minimum = max(budget.min_duration_seconds, words * 60 / 180)
+    maximum = min(budget.max_duration_seconds, words * 60 / 155)
+    if minimum > maximum:
+        raise ValueError("Narration word density cannot meet both runtime and 155-180 WPM; rebuild the script")
+    if minimum <= original <= maximum:
         return validation, original, 1.0
-    factor = original / budget.target_duration_seconds
-    if not .70 <= factor <= 1.35:
+    preferred = words * 60 / 170
+    target = min(max(preferred, minimum + .03), maximum - .03) if maximum - minimum > .06 else (minimum + maximum) / 2
+    factor = original / target
+    if not .75 <= factor <= 1.35:
         raise ValueError("Narration cannot meet the requested runtime at a natural speaking pace; rebuild with a suitable word budget or voice")
     from app.assembly.ffmpeg import run_ffmpeg
     paced = output_path.with_name(output_path.stem + ".paced" + output_path.suffix)
@@ -578,7 +592,7 @@ def _pace_long_narration(output_path, artifact, validation):
         run_ffmpeg(["-y", "-i", str(output_path), "-vn", "-af", f"atempo={factor:.8f}", str(paced)],
                    "pacing long recap narration without silence padding")
         measured = validate_audio_file(paced)
-        if not measured.valid or not budget.min_duration_seconds <= float(measured.duration or 0) <= budget.max_duration_seconds:
+        if not measured.valid or not minimum <= float(measured.duration or 0) <= maximum:
             raise ValueError("Paced narration did not meet the requested measured duration range")
         paced.replace(output_path)
         return measured, original, factor
@@ -592,7 +606,7 @@ def synthesize_narration_audio(
     root: Optional[Path] = None,
     provider_name: Optional[str] = None,
     voice: Optional[str] = None,
-    rate: str = TTS_RATE,
+    rate: Optional[str] = None,
     pitch: str = TTS_PITCH,
     volume: str = TTS_VOLUME,
     output_format: str = TTS_OUTPUT_FORMAT,
@@ -615,7 +629,9 @@ def synthesize_narration_audio(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    chosen_voice = voice or TTS_VOICE
+    from app.production.synthesis import recap_voice, recap_rate, spoken_recap_text, tighten_narration_silence
+    chosen_voice = recap_voice(voice)
+    chosen_rate = recap_rate(rate)
     relative_root = production_dir(production_id, root=root)
     relative_path = output_path.relative_to(relative_root).as_posix()
 
@@ -629,10 +645,10 @@ def synthesize_narration_audio(
             provider = _resolve_narration_provider(provider_name)
             asyncio.run(
                 provider.generate(
-                    text=artifact.narration_text,
+                    text=spoken_recap_text(artifact.narration_text),
                     output_path=output_path,
                     voice=chosen_voice,
-                    rate=rate,
+                    rate=chosen_rate,
                     pitch=pitch,
                     volume=volume,
                 )
@@ -642,8 +658,10 @@ def synthesize_narration_audio(
         if not validation.valid:
             raise ValueError("; ".join(validation.errors) or "audio validation failed")
         original_duration, tempo_factor = float(validation.duration or 0), 1.0
+        silence_trimmed = 0.0
         if provider_id != "mock":
-            validation, original_duration, tempo_factor = _pace_long_narration(output_path, artifact, validation)
+            validation, silence_trimmed = tighten_narration_silence(output_path, validation)
+            validation, _, tempo_factor = _pace_long_narration(output_path, artifact, validation)
 
         metadata = NarrationAudioArtifact(
             narration_id=artifact.narration_id,
@@ -662,6 +680,9 @@ def synthesize_narration_audio(
             generated_at=datetime.now().isoformat(),
             original_duration_seconds=original_duration,
             tempo_factor=tempo_factor,
+            synthesis_rate=chosen_rate if provider_id != "mock" else None,
+            words_per_minute=(len(artifact.narration_text.split()) * 60 / float(validation.duration)) if provider_id != "mock" else None,
+            silence_trimmed_seconds=silence_trimmed,
         )
         save_narration_audio(metadata, production_id=production_id, unit_id=unit_id, root=root)
 
