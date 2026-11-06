@@ -29,6 +29,16 @@ PRESET_BUDGETS = {
 }
 STORY_SECTIONS = ("setup", "inciting_incident", "rising_conflict", "climax", "resolution")
 
+# This module is deliberately dependency-light. Import its public contract at
+# module load, not halfway through a live movie build after a code deployment.
+__all__ = [
+    "RECAP_PRESETS", "RecapLengthPreset", "MAX_RECAP_SECONDS", "MAX_RECAP_BEATS",
+    "SOURCE_RATIO_CEILING", "PRESET_BUDGETS", "STORY_SECTIONS", "RecapBudget",
+    "normalize_length_preset", "normalize_duration_override", "resolve_recap_budget",
+    "requires_chapter_planning", "chapter_planning_timeout_seconds",
+    "timeline_sections", "validate_recap_depth",
+]
+
 
 class RecapBudget(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -206,7 +216,7 @@ def requires_chapter_planning(source_duration, budget):
              or budget.min_narration_words >= 700))
 
 
-def chapter_planning_timeout_seconds(budget, *, composite=False):
+def chapter_planning_timeout_seconds(budget: RecapBudget | None, *, composite: bool = False) -> int:
     """Bound the whole operation, not each provider call, below K3's deadline."""
     long_form = budget is not None and budget.target_duration_seconds >= 720
     return (1740 if composite else 1140) if long_form else (840 if composite else 240)

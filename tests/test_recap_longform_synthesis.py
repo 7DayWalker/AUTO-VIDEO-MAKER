@@ -50,6 +50,13 @@ def test_small_scripts_stay_one_request_and_long_unstructured_text_is_bounded():
         recap_tts_chunks(artifact)
 
 
+def test_long_form_tts_deadlines_allow_real_time_chapters_below_ui_operation_budget():
+    from app.production.synthesis import TTS_REQUEST_TIMEOUT_SECONDS, TTS_SYNTHESIS_TIMEOUT_SECONDS
+    # A 450-word chapter at 150WPM needs 180s even without startup overhead.
+    assert TTS_REQUEST_TIMEOUT_SECONDS >= TTS_CHUNK_MAX_WORDS * 60 / 150 + 30
+    assert TTS_REQUEST_TIMEOUT_SECONDS < TTS_SYNTHESIS_TIMEOUT_SECONDS < 1800
+
+
 def test_bounded_batches_prefer_complete_beats_instead_of_mid_sentence_cuts():
     artifact = script_fixture(4200, 60)
     artifact.chapters = []

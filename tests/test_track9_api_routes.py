@@ -56,6 +56,93 @@ def _make_prod(tmp_path):
     prod=Production(production_id=PID, title="Track9 API e2e", command=ProductionCommand(text="track9 api e2e", workload_shape="single_video", explicit_constraints={}, creation_context={"source":"test"}, issued_at="2026-08-31T09:00:00+00:00"), units=[ProductionUnit(unit_id=UID, ordinal=1, unit_type="standalone_video", title="u1", premise="p", content_intent={"tone":"calm"})], created_at="2026-08-31T09:00:00+00:00")
     save_new_production(prod, root=tmp_path/"productions")
     return prod
+
+
+def test_summary_runtime_proves_imports_inside_serving_process(monkeypatch, tmp_path):
+    import os
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        status, health, _ = _get(base, "/api/health")
+        assert status == 200 and health == {"ok": True, "service": "avm-web"}
+        status, payload, _ = _get(base, "/api/summary/runtime")
+        assert status == 200 and payload["ok"] is True
+        assert payload["process_id"] == os.getpid()
+        assert payload["imports"] and all(payload["imports"].values())
+        assert payload["chapter_planning_timeout_seconds"] == {
+            "feature_standard": 1140, "feature_pro_composite": 1740,
+        }
+        assert set(payload) == {"ok", "service", "process_id", "contract", "imports", "chapter_planning_timeout_seconds"}
+    finally:
+        httpd.shutdown()
+
+
+def test_summary_progress_is_read_only_and_reports_checkpoint_counts_not_story_text(monkeypatch, tmp_path):
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        path = tmp_path / "productions" / PID / "units" / UID / "plan" / "narration_chapters.partial.json"
+        content = {"identity": "test", "chapters": [{"plan": {"summary": "private dialogue", "beats": []}}, None],
+                   "pending_story": {"text": "must not be exposed"}}
+        path.write_text(json.dumps(content), encoding="utf-8")
+        status, progress, _ = _get(base, f"/api/productions/{PID}/units/{UID}/summary-progress")
+        assert status == 200 and progress["chapters_completed"] == 1
+        assert progress["checkpoint_available"] is True and progress["running"] is False
+        assert "private dialogue" not in json.dumps(progress) and "must not be exposed" not in json.dumps(progress)
+        status, _, _ = _post(base, f"/api/productions/{PID}/units/{UID}/summary-progress")
+        assert status == 405
+        assert json.loads(path.read_text(encoding="utf-8")) == content
+        assert _post(base, "/api/summary/runtime")[0] == 405
+    finally:
+        httpd.shutdown()
+
+
+def test_recap_unit_single_flight_survives_refusal_exception_and_cross_step_requests(monkeypatch, tmp_path):
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    responses = []
+
+    @web._summary_single_flight("narrating")
+    def slow(pid, uid, body):
+        entered.set()
+        assert release.wait(5)
+        return 503, {"error": "fixture provider refusal"}
+
+    try:
+        _make_prod(tmp_path)
+        monkeypatch.setattr(web, "narration_build_payload", slow)
+        worker = threading.Thread(target=lambda: responses.append(_post(base, f"/api/productions/{PID}/units/{UID}/narration")))
+        worker.start()
+        assert entered.wait(2)
+        for suffix in ("narration", "narration/synthesize", "summary-video"):
+            status, response, _ = _post(base, f"/api/productions/{PID}/units/{UID}/{suffix}")
+            assert status == 409 and response["error"] == "SUMMARY_ALREADY_RUNNING"
+        status, progress, _ = _get(base, f"/api/productions/{PID}/units/{UID}/summary-progress")
+        assert status == 200 and progress["running"] is True and progress["active_action"] == "narrating"
+        release.set(); worker.join(5)
+        assert responses[0][0] == 503
+        assert _get(base, f"/api/productions/{PID}/units/{UID}/summary-progress")[1]["running"] is False
+        @web._summary_single_flight("narrating")
+        def fail(*args):
+            raise RuntimeError("fixture exception")
+        with pytest.raises(RuntimeError, match="fixture exception"):
+            fail(PID, UID, {})
+        assert _get(base, f"/api/productions/{PID}/units/{UID}/summary-progress")[1]["running"] is False
+    finally:
+        release.set()
+        httpd.shutdown()
+
+
+def test_production_detail_exposes_exact_registered_source_without_loading_transcript(monkeypatch, tmp_path):
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        _make_prod(tmp_path)
+        asset = _ingest(tmp_path, duration=1.0)
+        monkeypatch.setattr("app.transcription.transcribe.load_transcript", lambda *a, **k: pytest.fail("Detail must not load transcript text"))
+        status, payload, _ = _get(base, f"/api/productions/{PID}")
+        assert status == 200
+        assert payload["source_assets"] == [asset]
+    finally:
+        httpd.shutdown()
 def _ingest(tmp_path, duration=40.0):
     tmp_vid=tmp_path/"_src_tmp.mp4"
     create_test_video(tmp_vid, duration=duration, width=640, height=360, fps=24, color="blue")

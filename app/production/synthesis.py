@@ -31,8 +31,12 @@ BROADCAST_CHAIN_VERSION = "recap-broadcast-v1"
 TTS_CHUNK_TRIGGER_WORDS = 1800
 TTS_CHUNK_MAX_WORDS = 450
 TTS_CHUNK_MAX_BYTES = 6000
-TTS_REQUEST_TIMEOUT_SECONDS = 90
-TTS_SYNTHESIS_TIMEOUT_SECONDS = 480
+# Edge can stream a 280-450-word chapter close to real time. The previous
+# 90-second cap cancelled valid feature-film speech at ~113s on the live movie.
+# Bound every request and the whole operation below K3's 30-minute deadline;
+# exceptionally long/slow runs still retain all validated chunks for resume.
+TTS_REQUEST_TIMEOUT_SECONDS = 240
+TTS_SYNTHESIS_TIMEOUT_SECONDS = 1740
 
 
 def recap_voice(override=None):

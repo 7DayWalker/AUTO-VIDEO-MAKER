@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 from app.production.models import NarrativeBeat, NarrationArtifact, NarrationSourceRef, SourceAsset, SourceTranscript
+from app.production.recap_budget import requires_chapter_planning, resolve_recap_budget
 
 def _src_arg(source_asset: SourceAsset, production_id: str, root: Optional[Path]=None) -> Path:
     from app.production.storage import production_dir
@@ -136,7 +137,6 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
 
 
 def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None, recap_budget=None, deadline=None) -> NarrationArtifact:
-    from app.production.recap_budget import requires_chapter_planning, resolve_recap_budget
     from app.content.model_registry import get_model
     selected = get_model(summary_model_id)
     composite = selected.visual_observer_model_id is not None

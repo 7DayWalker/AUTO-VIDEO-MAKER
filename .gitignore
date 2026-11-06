@@ -81,3 +81,9 @@ _real_smoke_source/
 _real_smoke_wk/
 single_window_frames/
 ChatGPT to Gemini Handoff Note.md
+
+# Local creator-recap verification records/screenshots (never production data).
+diagnostics/kung_fu_*_live_*.json
+diagnostics/summary_resume_preservation_*.json
+diagnostics/summary-*-20261106.png
+diagnostics/summary_creator*_browser_*/

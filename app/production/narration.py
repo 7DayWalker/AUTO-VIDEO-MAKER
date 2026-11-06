@@ -34,7 +34,7 @@ from app.production.storage import (
     save_narration_artifact,
     save_narration_audio,
 )
-from app.production.recap_budget import resolve_recap_budget, chapter_planning_timeout_seconds
+from app.production.recap_budget import chapter_planning_timeout_seconds, resolve_recap_budget
 from app.voice.config import (
     TTS_OUTPUT_FORMAT,
     TTS_PITCH,

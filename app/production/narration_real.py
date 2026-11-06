@@ -20,7 +20,10 @@ from app.content.exceptions import LLMConnectionError
 from app.production.models import (
     NarrativeBeat, NarrativeEndingAnchor, NarrationArtifact, NarrationSourceRef, SourceAsset, SourceSegment, SourceTranscript,
 )
-from app.production.recap_budget import RecapBudget, resolve_recap_budget, timeline_sections, validate_recap_depth
+from app.production.recap_budget import (
+    RecapBudget, requires_chapter_planning, resolve_recap_budget,
+    timeline_sections, validate_recap_depth,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -651,7 +654,6 @@ def ai_grounded_plan(
         raise ValueError("Narration source duration must be finite and positive")
     if not source_transcript.segments:
         raise ValueError("Narration requires transcript evidence")
-    from app.production.recap_budget import requires_chapter_planning
     budget = recap_budget or resolve_recap_budget(source_asset.duration, target_duration_seconds=duration)
     if requires_chapter_planning(source_asset.duration, budget):
         from app.production.narration_chapters import build_chapter_plan

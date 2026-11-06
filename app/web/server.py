@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import threading
+from functools import wraps
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,6 +31,10 @@ from app.assembly.audio_contract import (
     AudioPolicy,
     audio_policy_requires_narration,
     normalize_audio_policy,
+)
+from app.production.recap_budget import (
+    chapter_planning_timeout_seconds, normalize_duration_override,
+    normalize_length_preset, resolve_recap_budget,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,8 @@ MEDIA_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v"}
 
 # Tracks an in-flight interactive connect so repeated POSTs don't stack flows.
 _connect_running = {"platform": None}
+_summary_runs: dict[tuple[str, str, str], dict] = {}
+_summary_runs_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -2988,6 +2995,9 @@ def production_detail_payload(production_id: str):
         "created_at": production.created_at,
         "revised_at": production.revised_at,
         "unit_count": len(production.units),
+        # Source identity only; K3 explicitly reads the chosen transcript. Do
+        # not scan/redecode media or load narration plans on a detail request.
+        "source_assets": [asset.model_dump() for asset in production.source_assets or []],
         "counts": _state_counts(report),
         "complete": report.complete,
         "units": units,
@@ -4297,6 +4307,77 @@ def _track9_check_unit(production_id: str, unit_id: str):
     return prod, None
 
 
+def summary_runtime_payload() -> dict:
+    """Read-only proof of the recap imports in THIS server, not a new Python shell.
+
+    Keep /api/health's existing contract unchanged. No paths, environment,
+    credentials or provider calls are included in this diagnostic.
+    """
+    from app.production import narration, narration_chapters, narration_real, narration_pro
+    from app.production import recap_budget
+
+    imports = {
+        "recap_budget": callable(recap_budget.chapter_planning_timeout_seconds),
+        "server": chapter_planning_timeout_seconds is recap_budget.chapter_planning_timeout_seconds,
+        "narration": narration.chapter_planning_timeout_seconds is recap_budget.chapter_planning_timeout_seconds,
+        "narration_chapters": narration_chapters.chapter_planning_timeout_seconds is recap_budget.chapter_planning_timeout_seconds,
+        "narration_real": narration_real.requires_chapter_planning is recap_budget.requires_chapter_planning,
+        "narration_pro": narration_pro.requires_chapter_planning is recap_budget.requires_chapter_planning,
+    }
+    feature = resolve_recap_budget(3742.174331)
+    return {
+        "ok": all(imports.values()), "service": "avm-web", "process_id": os.getpid(),
+        "contract": "recap-budget-startup-v1", "imports": imports,
+        "chapter_planning_timeout_seconds": {
+            "feature_standard": chapter_planning_timeout_seconds(feature),
+            "feature_pro_composite": chapter_planning_timeout_seconds(feature, composite=True),
+        },
+    }
+
+
+def _summary_single_flight(action):
+    """A browser refresh/second tab cannot overwrite in-flight unit artifacts."""
+    def decorate(handler):
+        @wraps(handler)
+        def command(production_id, unit_id, body):
+            key = (str(PRODUCTIONS_DIR.resolve()), production_id, unit_id)
+            with _summary_runs_lock:
+                if key in _summary_runs:
+                    return 409, {"error": "SUMMARY_ALREADY_RUNNING", "production_id": production_id,
+                        "unit_id": unit_id, "active_action": _summary_runs[key]["active_action"],
+                        "message": "This movie recap is already processing. Check saved progress; do not resubmit the command."}
+                _summary_runs[key] = {"running": True, "active_action": action, "started_at": datetime.now().isoformat()}
+            try:
+                return handler(production_id, unit_id, body)
+            finally:
+                with _summary_runs_lock:
+                    _summary_runs.pop(key, None)
+        return command
+    return decorate
+
+
+def summary_progress_payload(production_id: str, unit_id: str):
+    """Read-only current work and checkpoint counts; never transcript/story text."""
+    _, error = _track9_check_unit(production_id, unit_id)
+    if error:
+        return error
+    key = (str(PRODUCTIONS_DIR.resolve()), production_id, unit_id)
+    with _summary_runs_lock:
+        run = dict(_summary_runs.get(key) or {"running": False, "active_action": None, "started_at": None})
+    from app.production.storage import unit_plan_dir
+    checkpoint = unit_plan_dir(production_id, unit_id, root=PRODUCTIONS_DIR) / "narration_chapters.partial.json"
+    completed = None
+    if checkpoint.is_file():
+        try:
+            data = json.loads(checkpoint.read_text(encoding="utf-8"))
+            if isinstance(data.get("chapters"), list):
+                completed = sum(isinstance(chapter, dict) and isinstance(chapter.get("plan"), dict) for chapter in data["chapters"])
+        except (OSError, ValueError, AttributeError):
+            pass  # Concurrent checkpoint writes/old shapes are not invented counts.
+    return 200, {"production_id": production_id, "unit_id": unit_id, **run,
+                 "chapters_completed": completed, "checkpoint_available": completed is not None}
+
+
 def narration_get_payload(production_id: str, unit_id: str):
     _, err = _track9_check_unit(production_id, unit_id)
     if err:
@@ -4355,6 +4436,7 @@ def transcribe_payload(production_id: str, body: dict, asset_id=None):
     return status, payload
 
 
+@_summary_single_flight("narrating")
 def narration_build_payload(production_id: str, unit_id: str, body: dict):
     try:
         mock_mode = _track9_mock_mode(body)
@@ -4368,7 +4450,6 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
     summary_mode = str(body.get("summary_mode") or "standard").strip().lower()
     if summary_mode not in ("standard", "pro"):
         return 400, {"error": "INVALID_REQUEST", "message": "summary_mode must be standard or pro"}
-    from app.production.recap_budget import normalize_length_preset, normalize_duration_override
     try:
         length_preset = normalize_length_preset(body.get("target_length_preset", "auto"))
         tds = normalize_duration_override(body.get("target_duration_seconds"), body.get("target_minutes"))
@@ -4456,6 +4537,7 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
     d=art.model_dump(); d["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return (200 if replacing else 201), d
 
 
+@_summary_single_flight("synthesizing")
 def narration_synthesize_payload(production_id: str, unit_id: str, body: dict):
     try:
         mock_mode = _track9_mock_mode(body)
@@ -4605,6 +4687,7 @@ def summary_video_promote_payload(production_id: str, unit_id: str, body=None):
         _publish_lock.release()
 
 
+@_summary_single_flight("assembling")
 def summary_video_build_payload(production_id: str, unit_id: str, body: dict):
     try:
         mock_mode = _track9_mock_mode(body)
@@ -4794,6 +4877,10 @@ class AVMHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json(500, {"error": "LOAD_FAILED", "message": f"{e.__class__.__name__}"})
         # Track 9: summary-video metadata GET (must be before generic unit match)
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/summary-progress/?$", path)
+        if match:
+            status, payload = summary_progress_payload(match.group(1), match.group(2))
+            return self._json(status, payload)
         m = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/summary-video/?$", path)
         if m:
             status, payload = summary_video_get_payload(m.group(1), m.group(2))
@@ -4976,6 +5063,9 @@ class AVMHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 return self._json(200, {"ok": True, "service": "avm-web"})
+            if path == "/api/summary/runtime":
+                runtime = summary_runtime_payload()
+                return self._json(200 if runtime["ok"] else 503, runtime)
             if path == "/api/connections":
                 return self._json(200, connections_payload())
             if path == "/api/capabilities":
@@ -5054,6 +5144,8 @@ class AVMHandler(BaseHTTPRequestHandler):
                     "error": "METHOD_NOT_ALLOWED",
                     "message": "Scene media delivery is GET-only.",
                 })
+            if path == "/api/summary/runtime" or re.match(r"^/api/productions/[^/]+/units/[^/]+/summary-progress/?$", path):
+                return self._json(405, {"error": "METHOD_NOT_ALLOWED", "message": "Summary runtime/progress is read-only."})
             if re.match(r"^/api/projects/[^/]+/assets/[^/]+/(media|verify)$", path):
                 return self._json(405, {
                     "error": "METHOD_NOT_ALLOWED",
@@ -5307,8 +5399,14 @@ def main() -> int:
     from app.logging_setup import configure_logging
 
     configure_logging()
+    # Fail before binding the port if a deployment has an incompatible recap
+    # module. Never reload sys.modules while requests are using its classes.
+    runtime = summary_runtime_payload()
+    if not runtime["ok"]:
+        raise RuntimeError("Recap startup imports are inconsistent; restart with a coherent deployment")
     logger.info(
-        "server.startup runtime=command_center logging_configured=true"
+        "server.startup runtime=command_center logging_configured=true recap_imports=verified pid=%d",
+        os.getpid(),
     )
     port = DEFAULT_PORT
     server = ThreadingHTTPServer(("127.0.0.1", port), AVMHandler)
