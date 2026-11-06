@@ -49,6 +49,17 @@ from typing import Dict, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+# Stage 1 workflow priority, NOT cross-model fallback for a locked storyteller.
+# Configuration/route admission is assessed at runtime; no quota/cost is inferred.
+VISUAL_OBSERVER_PRIORITY: Tuple[str, ...] = (
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "qwen-vl-max",
+    "qwen2.5-vl-72b-instruct",
+    "gemini-3.5-flash-lite",
+)
+
+
 class InputModality:
     """Distinct input modalities. NOT collapsed into one boolean.
 
@@ -954,16 +965,17 @@ def _build_registry() -> Dict[str, CanonicalModel]:
                                            vision=False, video=False, multimodal=False),
             bindings=(ProviderBinding(
                 provider="agentrouter", provider_model_id=model_id,
-                config_keys=("AGENTROUTER_API_KEY", "AGENTROUTER_BASE_URL"),
+                config_keys=("AGENTROUTER_API_KEY",),
                 supported_input_modalities=(InputModality.TEXT,),
                 supported_operations=(ApiOperation.CHAT_COMPLETION, ApiOperation.JSON_MODE),
                 identity_verification=IdentityVerification.DECLARED,
                 identity_evidence=(
-                    "AgentRouter local model catalogue and successful text-only requests declare this exact ID. "
+                    "AgentRouter GET /v1/models and direct /v1/responses text/JSON requests verified this exact ID "
+                    "on 2026-11-06; local Chat Completions proxy also verified. "
                     "Upstream weights are not independently attested. Image payloads are forbidden; "
-                    "Summary Pro uses a separate Gemini observer and a text-only storyteller."
+                    "Summary Pro uses separately admitted Gemini/Qwen vision observers and a text-only storyteller."
                 ),
-            ),), default_binding="agentrouter", visual_observer_model_id="gemini-3.5-flash-lite",
+            ),), default_binding="agentrouter", visual_observer_model_id=VISUAL_OBSERVER_PRIORITY[0],
         ))
     registry: Dict[str, CanonicalModel] = {}
 
@@ -1027,6 +1039,7 @@ def list_models() -> Tuple[CanonicalModel, ...]:
 
 
 __all__ = [
+    "VISUAL_OBSERVER_PRIORITY",
     "InputModality",
     "ApiOperation",
     "IdentityVerification",

@@ -104,10 +104,8 @@ def test_gemini_rate_limit_uses_only_admitted_alternate_vision_routes(monkeypatc
         def generate_multimodal(self, *args, **kwargs): raise LLMRateLimitError("gemini")
     alternate = Observer()
     alternate.name, alternate.model = "openrouter", "fixture-vision"
-    binding = SimpleNamespace(provider="openrouter", provider_model_id="fixture-vision")
-    model = SimpleNamespace(id="fixture-vision", capabilities=SimpleNamespace(image_input=True), bindings=[binding])
-    monkeypatch.setattr("app.content.model_registry.list_models", lambda: [model])
-    monkeypatch.setattr("app.content.capability_router.assess_provider_route", lambda *a, **k: SimpleNamespace(eligible=True))
+    route = SimpleNamespace(canonical_model_id="qwen2.5-vl-72b-instruct", provider="openrouter", provider_model_id="fixture-vision")
+    monkeypatch.setattr("app.content.capability_router.configured_visual_observer_routes", lambda *a: [route])
     alternate.is_available = lambda: True
     monkeypatch.setattr("app.content.provider_registry.create_provider", lambda *a: alternate)
     supplied = frames(0, 300, 0)[:4]

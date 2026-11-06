@@ -96,7 +96,9 @@ def pro_auto_model_ids() -> tuple[str, ...]:
     from app.content.model_registry import list_models_for_pro
     from app.content.capability_router import assess_model_for_job, capability_rank
 
-    pool = sorted(list_models_for_pro(), key=capability_rank, reverse=True)
+    from app.content.model_registry import VISUAL_OBSERVER_PRIORITY
+    pool = sorted(list_models_for_pro(), key=lambda model: (
+        model.id == VISUAL_OBSERVER_PRIORITY[-1], -capability_rank(model)))
     return tuple(model.id for model in pool if (model.capabilities.image_input or model.visual_observer_model_id)
                  and assess_model_for_job(model.id, JOB_SOURCE_VIDEO_RECAP).eligible)
 

@@ -176,9 +176,19 @@ def _canonical_models_projection() -> dict:
 
     for canonical in canonical_models:
         capabilities = getattr(canonical, "capabilities", None)
+        observer_metadata = {}
+        if canonical.visual_observer_model_id:
+            from app.content.capability_router import configured_visual_observer, visual_observer_priority_ids
+            try:
+                observer_metadata = {
+                    "visual_observer_model_id": configured_visual_observer(canonical).id,
+                    "visual_observer_priority": list(visual_observer_priority_ids(canonical)),
+                }
+            except ValueError:
+                observer_metadata = {"visual_observer_model_id": canonical.visual_observer_model_id}
         entry = {
             "id": canonical.id,
-            **({"visual_observer_model_id": canonical.visual_observer_model_id} if canonical.visual_observer_model_id else {}),
+            **observer_metadata,
             "display_name": canonical.display_name,
             "family": getattr(canonical, "family", None),
             # Generic, provider-agnostic capability flags only (Step 1
@@ -325,10 +335,12 @@ def _ai_summary_projection() -> dict:
         entry_configured = configured > 0
         pro_configured = entry_configured
         visual_observer_id = canonical.visual_observer_model_id
+        visual_observer_priority = []
         if canonical.visual_observer_model_id:
-            from app.content.capability_router import assess_model_for_job, configured_visual_observer
+            from app.content.capability_router import assess_model_for_job, configured_visual_observer, visual_observer_priority_ids
             try:
                 visual_observer_id = configured_visual_observer(canonical).id
+                visual_observer_priority = list(visual_observer_priority_ids(canonical))
                 pro_configured = assess_model_for_job(canonical.id, JOB_SOURCE_VIDEO_RECAP).eligible
             except ValueError:
                 pro_configured = False
@@ -343,6 +355,7 @@ def _ai_summary_projection() -> dict:
             "display_name": canonical.display_name,
             "family": getattr(canonical, "family", None),
             "visual_observer_model_id": visual_observer_id,
+            **({"visual_observer_priority": visual_observer_priority} if canonical.visual_observer_model_id else {}),
             "visual_understanding_strategy": "visual_notes_then_text_storyteller" if canonical.visual_observer_model_id else "direct_multimodal" if is_pro else None,
             "video_understanding_method": "frame_sequence" if canonical.visual_observer_model_id else "native_video" if caps.video else "frame_sequence" if caps.vision else None,
             "pro_configured": pro_configured if is_pro else False,

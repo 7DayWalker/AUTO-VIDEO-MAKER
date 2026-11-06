@@ -166,11 +166,22 @@ def hydrate_prior_pro(path, prior_path, asset, transcript, frames, *, start, end
             description = " ".join(dict.fromkeys(beat.narration_text for beat in beats))
             if len(description) > 1700:
                 return False
+            chapter = next((c for c in prior.chapters if stamp in {round(t, 3) for t in c.frame_timestamps}), None)
+            observer_model = getattr(chapter, "visual_observer_model_id", None) or prior.visual_observer_model_id
+            if not observer_model and prior.visual_understanding_strategy != "visual_notes_then_text_storyteller":
+                # A legacy direct-Pro model can be the observer. A text-only
+                # storyteller can NEVER stand in for missing observer metadata.
+                from app.content.model_registry import get_model
+                try:
+                    if get_model(prior.summary_understanding_model_id).capabilities.image_input:
+                        observer_model = prior.summary_understanding_model_id
+                except KeyError:
+                    pass
             note = {"frame_id": index, "timestamp_seconds": stamp,
                 "action": "Retained scene-level observation; not an individual-frame caption: " + description,
                 "evidence_kind": "prior_pro_scene", "citable": True,
-                "observer_model": prior.visual_observer_model_id or prior.summary_understanding_model_id,
-                "observer_provider": prior.visual_observer_provider or "retained_pro_artifact",
+                "observer_model": observer_model,
+                "observer_provider": getattr(chapter, "visual_observer_provider", None) or prior.visual_observer_provider,
                 "source_beat_orders": [beat.order for beat in beats],
                 "evidence_frame_timestamps": sorted({ts for beat in beats for ref in beat.source_refs
                                                      for ts in ref.visual_frame_timestamps})}

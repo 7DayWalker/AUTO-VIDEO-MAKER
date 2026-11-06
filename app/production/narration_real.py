@@ -16,6 +16,7 @@ from typing import List, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from app.content.exceptions import LLMConnectionError
 from app.production.models import (
     NarrativeBeat, NarrativeEndingAnchor, NarrationArtifact, NarrationSourceRef, SourceAsset, SourceSegment, SourceTranscript,
 )
@@ -190,44 +191,99 @@ def cached_visual_observations(plan_dir, asset, transcript, frames, *, start, en
     return None, None
 
 
+def admitted_visual_observer(provider):
+    """Reject text gateways even if a vision adapter is accidentally pointed at one."""
+    from urllib.parse import urlsplit
+    if getattr(provider, "name", None) not in {"gemini", "alibaba", "openrouter"} or not provider.supports_multimodal():
+        return False
+    try:
+        endpoint = urlsplit(getattr(provider, "_base_url", ""))
+        host = (endpoint.hostname or "").lower().rstrip(".")
+        return (endpoint.port != 8318 and host != "agentrouter.org" and not host.endswith(".agentrouter.org")
+                and not endpoint.username and not endpoint.password and not endpoint.query and not endpoint.fragment)
+    except (TypeError, ValueError):
+        return False
+
+
+def observer_canonical_model_id(provider_name, wire_model_id):
+    """Map exact recorded binding identity, never rename one model to another."""
+    from app.content.model_registry import list_models
+    matches = [model.id for model in list_models() for binding in model.bindings
+               if (binding.provider, binding.provider_model_id) == (provider_name, wire_model_id)]
+    return matches[0] if len(set(matches)) == 1 else wire_model_id
+
+
+def visual_observer_attribution(notes):
+    """Use successful/cached evidence, not the initial observer or current config.
+
+    Mixed or partially unknown provenance has no single model/provider. The
+    plural fields retain every known identity; older evidence stays unknown.
+    """
+    citable = [note for note in notes or [] if note.get("citable", True)]
+    models = list(dict.fromkeys(observer_canonical_model_id(note.get("observer_provider"), note["observer_model"])
+                                for note in citable if note.get("observer_model")))
+    providers = list(dict.fromkeys(note["observer_provider"] for note in citable if note.get("observer_provider")))
+    return {
+        "visual_observer_model_id": models[0] if len(models) == 1 and all(n.get("observer_model") for n in citable) else None,
+        "visual_observer_provider": providers[0] if len(providers) == 1 and all(n.get("observer_provider") for n in citable) else None,
+        "visual_observer_models": models,
+        "visual_observer_providers": providers,
+    }
+
+
 def observe_with_vision_failover(primary, frames, rows, *, start, end, continuity, deadline,
                                 cached_batches=None, on_batch=None, on_request=None):
-    """Stage 1 only: admitted alternate image routes never receive the storyteller job."""
+    """Quality-first Stage 1 only; never substitute the locked text storyteller."""
+    import time
     from app.production.visual_observation import observe_chapter_frames
-    from app.content.model_registry import list_models
-    from app.content.capability_router import assess_provider_route
+    from app.content.capability_router import (
+        configured_visual_observer_routes, visual_observer_priority_ids, _active_blocker, record_quota_blocker,
+    )
     from app.content.provider_registry import create_provider
-    from urllib.parse import urlsplit
-    candidates = [primary]
-    attempted = {(getattr(primary, "name", ""), getattr(primary, "model", ""))}
-    for model in list_models():
-        if not model.capabilities.image_input:
-            continue
-        for binding in model.bindings:
-            key = (binding.provider, binding.provider_model_id)
-            if binding.provider not in {"alibaba", "openrouter"} or key in attempted:
-                continue
-            attempted.add(key)
-            if not assess_provider_route(model.id, binding, required_modality="image").eligible:
-                continue
-            provider = create_provider(*key)
-            # AgentRouter and its local proxy are text-only even if another
-            # configured adapter accidentally points its base URL at that port.
-            if urlsplit(getattr(provider, "_base_url", "")).port == 8318:
-                continue
-            if provider.is_available() and provider.supports_multimodal():
-                candidates.append(provider)
+    from app.providers.fallback_policy import FailureCategory
+    if not admitted_visual_observer(primary):
+        raise ValueError("Stage 1 requires an admitted image observer; text gateways are forbidden")
+    primary_key = (primary.name, primary.model)
+    candidates = [(route.canonical_model_id, (route.provider, route.provider_model_id),
+                   primary if (route.provider, route.provider_model_id) == primary_key else None)
+                  for route in configured_visual_observer_routes()]
+    # An explicitly supplied/resolved observer (including an offline test double)
+    # retains its own tier, never leapfrogging stronger configured routes.
+    if primary_key not in [key for _, key, _ in candidates] and not _active_blocker(*primary_key):
+        candidates.append((observer_canonical_model_id(*primary_key), primary_key, primary))
+    priority = visual_observer_priority_ids()
+    candidates.sort(key=lambda entry: priority.index(entry[0]) if entry[0] in priority else -1)
+    batch_cache = cached_batches if cached_batches is not None else {}
+
+    def retain_batch(offset, notes):
+        batch_cache[str(offset)] = notes
+        if on_batch is not None:
+            on_batch(offset, notes)
+
     last_error = None
-    for provider in candidates:
+    for _, key, instance in candidates:
+        if time.monotonic() >= deadline:
+            raise LLMConnectionError(key[0], "Visual observation deadline exhausted")
         try:
+            provider = instance if instance is not None else create_provider(*key)
+            if not admitted_visual_observer(provider) or (instance is None and not provider.is_available()):
+                continue
+            if hasattr(provider, "_timeout"):
+                from copy import copy
+                provider = copy(provider)
+                provider._timeout = min(provider._timeout, 45, max(.001, deadline - time.monotonic()))
             return observe_chapter_frames(provider, frames, rows, start=start, end=end, continuity=continuity,
-                cached_batches=cached_batches, on_batch=on_batch, on_request=on_request, deadline=deadline)
+                cached_batches=batch_cache, on_batch=retain_batch, on_request=on_request, deadline=deadline)
         except Exception as exc:
             category = standard_transient_failure_category(exc)
             if category is None:
                 raise
+            if category in {FailureCategory.RATE_LIMIT, FailureCategory.QUOTA}:
+                retry_after = getattr(exc, "retry_after", None)
+                retry_after = retry_after if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) else None
+                record_quota_blocker(*key, "Stage 1 observer " + category, retry_after_seconds=retry_after)
             logger.warning("Visual observer route failed: provider=%s model=%s category=%s",
-                           provider.name, provider.model, category)
+                           key[0], key[1], category)
             last_error = exc
     if last_error is not None:
         raise last_error

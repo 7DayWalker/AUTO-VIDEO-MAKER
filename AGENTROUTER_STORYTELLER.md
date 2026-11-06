@@ -7,16 +7,22 @@ through the text-only `agentrouter` provider. Explicit canonical selection stays
 locked. A gateway catalogue entry and successful calls verify route readiness,
 not independent attestation of upstream model weights or remaining quota.
 
-`AGENTROUTER_API_KEY` stays in the ignored local environment. Set
-`AGENTROUTER_BASE_URL=http://127.0.0.1:8318/v1`. Never put credentials in URLs,
+`AGENTROUTER_API_KEY` stays in the ignored local environment. Omit
+`AGENTROUTER_BASE_URL` for direct `https://agentrouter.org/v1/responses`, or retain
+`AGENTROUTER_BASE_URL=http://127.0.0.1:8318/v1` for the existing local Chat proxy.
+Both paths were verified; the Python adapter never edits or depends on reading
+the private proxy. Never put credentials in URLs,
 browser state, source files, logs, or version control. K3 uses Core's registry
 projection for the AI Brain and Summary selectors; there is no frontend model list.
 
 Summary Pro uses a declared two-stage workflow:
 
-1. Core extracts timestamped keyframes and asks the separately configured Gemini
-   vision adapter (default `gemini-3.5-flash-lite`, configurable via
-   `AVM_RECAP_VISION_MODEL`) for visual action notes in batches of
+1. Core extracts timestamped keyframes and asks separately configured vision
+   observers in this priority order: `gemini-3-flash-preview`, `gemini-2.5-flash`,
+   `qwen-vl-max`, `qwen2.5-vl-72b-instruct`, then `gemini-3.5-flash-lite`.
+   Only locally admitted routes are called; no free-quota or balance is inferred.
+   `AVM_RECAP_VISION_MODEL` can reorder an observer within its tier; the legacy
+   Flash-Lite setting stays the last fallback. Visual action notes use batches of
    four images by default, with two concurrent observation requests. Set
    `AVM_RECAP_VISION_BATCH_SIZE` from 1 to 32 to trade payload size against
    request quota. The actual observer is recorded, never silently relabelled. Every note
@@ -38,6 +44,14 @@ Summary Pro uses a declared two-stage workflow:
 Artifacts record observer identity, storyteller provider, frame and text-call
 counts, and `visual_notes_then_text_storyteller`. Validated chapters and pending
 visual notes can resume interruptions without treating partial output as final.
+Chapter observer attribution comes from accepted notes, including cache provenance,
+not the configured first choice. `visual_observer_model_id` is populated only when
+all citable evidence has one known observer. Mixed/partially unknown provenance
+retains `visual_observer_models` and `visual_observer_providers`; the singular
+fields stay null rather than falsely naming the initial observer. Qwen wire IDs
+are mapped only through their exact registered binding. Storyteller identity is
+never substituted into missing Stage 1 evidence.
+K3 displays the Core-owned priority separately from runtime chapter evidence.
 Reasoning effort `none` and a 300-second per-text-request timeout are configurable
 with `AGENTROUTER_REASONING_EFFORT` and `AGENTROUTER_REQUEST_TIMEOUT`. Two-stage
 planning has a bounded 14-minute operation budget; K3 allows 15 minutes and never
@@ -57,6 +71,12 @@ the helper deliberately does not terminate processes itself.
 The private proxy was observed reverting during the session; re-check/reapply
 the helper if an external process restores it. Core's own text-only adapter
 remains the mandatory independent media guard.
+
+The 2026-11-06 Stage 1/direct-Responses upgrade did **not** run that helper or
+change/restart the proxy. Its file hash remained unchanged and a small local
+Chat text call still succeeded. See `AGENTROUTER_ENDPOINT_PROBE.md` for exact
+endpoint/model status evidence; Claude/GPT-4o/cloud audio/images were not enabled
+through AgentRouter because they did not pass verification.
 
 ## Speech and source audio
 

@@ -20,6 +20,7 @@ from app.production.narration_real import (
     STORYTELLER_SYSTEM_PROMPT, STORYTELLER_PROMPT_VERSION, validate_storyteller_language,
     resolve_ending_anchor, validate_true_ending, cold_open_instruction, ending_instruction,
     align_final_story_clip,
+    visual_observer_attribution,
 )
 from app.production.recap_budget import validate_recap_depth
 
@@ -295,7 +296,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
             if action_notes is None:
                 for observation_attempt in range(2):
                     if time.monotonic() >= deadline:
-                        raise LLMConnectionError("gemini", "Chapter observation deadline exhausted")
+                        raise LLMConnectionError(visual_observer.name, "Chapter observation deadline exhausted")
                     if hasattr(visual_observer, "_timeout"):
                         visual_observer._timeout = min(visual_observer._timeout, max(1, deadline - time.monotonic()))
                     started = time.monotonic()
@@ -372,7 +373,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                 raise NarrationModelOutputError("Final Stage 1 chapter must inspect the final three minutes and the closing story scene")
         if composite:
             payload["visual_action_notes"] = action_notes
-            payload["visual_observer_model_id"] = visual_observer.model
+            payload.update(visual_observer_attribution(action_notes))
         prompt = "Plan this chapter from source evidence:\n" + json.dumps(payload, ensure_ascii=False) + "\nRequired JSON schema:\n" + schema
         prompt += "\n" + payload.get("cold_open_instruction", "") + "\n" + payload.get("ending_instruction", "")
         preferred = payload["preferred_beat_count"]
@@ -527,6 +528,9 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                         word_count=len(partial.narration_text.split()), transcript_segment_ids=[row["id"] for row in rows],
                         frame_timestamps=[ts for ts, _ in frames], summary=plan.summary,
                         visual_observation_source=observation_source,
+                        **(visual_observer_attribution(action_notes) if composite else
+                           visual_observer_attribution([{"observer_model": prov.model, "observer_provider": prov.name}])
+                           if visual else {}),
                         citable_frame_count=sum(note.get("citable", True) for note in action_notes or []),
                         unavailable_frame_count=sum(not note.get("citable", True) for note in action_notes or [])))
         completed.append({"plan": plan.model_dump(), "frame_timestamps": [ts for ts, _ in frames],
@@ -557,8 +561,12 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
     if visual:
         artifact.visual_understanding_strategy = "visual_notes_then_text_storyteller" if composite else "direct_multimodal"
     if composite:
-        artifact.visual_observer_model_id = visual_observer.model
-        artifact.visual_observer_provider = visual_observer.name
+        artifact.visual_observer_models = list(dict.fromkeys(mid for chapter in chapters for mid in chapter.visual_observer_models))
+        artifact.visual_observer_providers = list(dict.fromkeys(name for chapter in chapters for name in chapter.visual_observer_providers))
+        if len(artifact.visual_observer_models) == 1 and all(chapter.visual_observer_model_id for chapter in chapters):
+            artifact.visual_observer_model_id = artifact.visual_observer_models[0]
+        if len(artifact.visual_observer_providers) == 1 and all(chapter.visual_observer_provider for chapter in chapters):
+            artifact.visual_observer_provider = artifact.visual_observer_providers[0]
         artifact.storytelling_provider = prov.name
         artifact.text_storyteller_calls = text_calls
     if artifact.narration_text.casefold() == " ".join(segment.text for segment in transcript.segments).casefold():

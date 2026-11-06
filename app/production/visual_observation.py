@@ -100,7 +100,7 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
     if deadline is not None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise LLMConnectionError("gemini", "Visual observation deadline exhausted")
+            raise LLMConnectionError(prov.name, "Visual observation deadline exhausted")
         if hasattr(provider, "_timeout"):
             provider._timeout = min(provider._timeout, remaining)
     if on_request is not None:
@@ -125,11 +125,13 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
         ),
         images=frames, video=None, response_schema=_VisualActionNotes, temperature=.15, max_tokens=8192,
     )
+    if getattr(response, "model", prov.model) != prov.model:
+        raise NarrationModelOutputError("Visual observer response does not match the requested model")
     try:
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.content.strip(), flags=re.I)
         notes = _VisualActionNotes.model_validate(json.loads(raw))
     except ValueError:
-        raise NarrationModelOutputError("Gemini visual observations do not match the action-note schema") from None
+        raise NarrationModelOutputError("Visual observations do not match the action-note schema") from None
     result = [note.model_copy(update={"evidence_kind": "live_frame", "citable": True,
               "observer_provider": prov.name, "observer_model": prov.model,
               "source_beat_orders": [], "evidence_frame_timestamps": []}).model_dump() for note in notes.observations]

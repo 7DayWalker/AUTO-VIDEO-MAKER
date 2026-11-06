@@ -141,15 +141,17 @@ def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: So
         from app.production.storage import unit_plan_dir
         observer = None
         if composite:
-            from app.content.model_resolver import resolve_model
-            from app.content.capability_router import assess_provider_route, configured_visual_observer
-            observer_model = configured_visual_observer(selected)
-            if not any(assess_provider_route(observer_model.id, binding, required_modality="image").eligible
-                       for binding in observer_model.bindings):
+            from app.content.capability_router import configured_visual_observer_routes
+            from app.content.provider_registry import create_provider
+            from app.production.narration_real import admitted_visual_observer
+            observer_routes = configured_visual_observer_routes(selected)
+            for route in observer_routes:
+                candidate = create_provider(route.provider, route.provider_model_id)
+                if candidate.is_available() and admitted_visual_observer(candidate):
+                    observer = candidate
+                    break
+            if observer is None:
                 raise ValueError("Summary Pro visual observer is not configured; no transcript-only downgrade")
-            observer = resolve_model(observer_model.id, mode="exact", try_next_on_failure=True).provider_instance
-            if observer.name != "gemini" or not observer.supports_multimodal():
-                raise ValueError("Summary Pro requires its declared Gemini visual observer")
             if hasattr(observer, "_timeout"):
                 observer._timeout = min(observer._timeout, 45)
         src = _src_arg(source_asset, production_id, root=root)

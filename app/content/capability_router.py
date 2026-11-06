@@ -43,6 +43,7 @@ from app.content.model_registry import (
     JOB_SOURCE_VIDEO_RECAP,
     IdentityVerification,
     QuotaEvidence,
+    VISUAL_OBSERVER_PRIORITY,
     get_model,
     job_video_understanding_method,
     model_meets_job,
@@ -341,8 +342,7 @@ def assess_model_for_job(
         # FRAME_SEQUENCE describes the whole job, never the AgentRouter wire input.
         required_modality = "text"
         observer = configured_visual_observer(model)
-        observer_routes = tuple(assess_provider_route(observer.id, binding, required_modality="image")
-                                for binding in observer.bindings)
+        observer_routes = configured_visual_observer_routes(model)
 
     routes = tuple(
         assess_provider_route(model.id, b, required_modality=required_modality)
@@ -366,16 +366,54 @@ def assess_model_for_job(
     )
 
 
-def configured_visual_observer(model):
-    """An explicit Gemini observer override never changes storyteller identity."""
-    observer_id = os.getenv("AVM_RECAP_VISION_MODEL") or model.visual_observer_model_id
-    try:
+def visual_observer_priority_ids(model=None):
+    """Quality-first Stage 1 order; a legacy Flash-Lite override stays LAST.
+
+    Overrides reorder within their tier, not ahead of stronger tiers. A registered
+    non-default image observer can be explicitly opted into, but AgentRouter and
+    CodeCraft are never image observers. No paid/free claim is inferred here.
+    """
+    priority = list(VISUAL_OBSERVER_PRIORITY)
+    override = (os.getenv("AVM_RECAP_VISION_MODEL") or "").strip()
+    if override:
+        try:
+            observer = get_model(override)
+        except KeyError:
+            raise ValueError("The configured recap visual observer is not a registered canonical model") from None
+        if not observer.capabilities.image_input or not any(
+            binding.provider in {"gemini", "alibaba", "openrouter"}
+            and binding.supports_modality("image") is not False for binding in observer.bindings
+        ):
+            raise ValueError("The configured recap visual observer must have an admitted Gemini/Qwen image route")
+        override = observer.id
+        if override in priority:
+            index = priority.index(override)
+            tier_start = 0 if index < 2 else 2 if index < 4 else 4
+            priority.remove(override)
+            priority.insert(tier_start, override)
+        else:
+            priority.insert(0, override)
+    return tuple(priority)
+
+
+def configured_visual_observer_routes(model=None):
+    """All admitted IMAGE routes in priority order, without creating providers."""
+    routes = []
+    for observer_id in visual_observer_priority_ids(model):
         observer = get_model(observer_id)
-    except KeyError:
-        raise ValueError("The configured recap visual observer is not a registered canonical model") from None
-    if not observer.capabilities.image_input or not any(binding.provider == "gemini" for binding in observer.bindings):
-        raise ValueError("The configured recap visual observer must have a Gemini image route")
-    return observer
+        for binding in observer.bindings:
+            if binding.provider not in {"gemini", "alibaba", "openrouter"}:
+                continue
+            route = assess_provider_route(observer.id, binding, required_modality="image")
+            if route.eligible:
+                routes.append(route)
+    return tuple(routes)
+
+
+def configured_visual_observer(model):
+    """First configured image model, not a claim that it has succeeded live."""
+    routes = configured_visual_observer_routes(model)
+    return get_model(routes[0].canonical_model_id if routes else visual_observer_priority_ids(model)[0])
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +523,8 @@ def select_model_auto(job_id: str = JOB_SOURCE_VIDEO_RECAP) -> AutoSelection:
 
     order = {mid: i for i, mid in enumerate(considered)}
     eligible.sort(
-        key=lambda a: (-capability_rank(get_model(a.canonical_model_id)),
+        key=lambda a: (job_id == JOB_SOURCE_VIDEO_RECAP and a.canonical_model_id == VISUAL_OBSERVER_PRIORITY[-1],
+                       -capability_rank(get_model(a.canonical_model_id)),
                        order[a.canonical_model_id])
     )
     chosen = eligible[0]
@@ -537,6 +576,9 @@ __all__ = [
     "clear_quota_blockers",
     "assess_provider_route",
     "assess_model_for_job",
+    "visual_observer_priority_ids",
+    "configured_visual_observer_routes",
+    "configured_visual_observer",
     "list_eligible_models_for_job",
     "capability_rank",
     "select_model_auto",

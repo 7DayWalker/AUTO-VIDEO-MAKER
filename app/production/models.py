@@ -622,6 +622,10 @@ class NarrationChapter(BaseModel):
     frame_timestamps: List[float] = Field(default_factory=list)
     summary: str = Field(min_length=1)
     visual_observation_source: Optional[str] = None
+    visual_observer_model_id: Optional[str] = None
+    visual_observer_provider: Optional[str] = None
+    visual_observer_models: List[str] = Field(default_factory=list)
+    visual_observer_providers: List[str] = Field(default_factory=list)
     citable_frame_count: int = Field(default=0, ge=0)
     unavailable_frame_count: int = Field(default=0, ge=0)
 
@@ -680,6 +684,8 @@ class NarrationArtifact(BaseModel):
     visual_observer_model_id: Optional[str] = None
     visual_observer_provider: Optional[str] = None
     storytelling_provider: Optional[str] = None
+    visual_observer_models: List[str] = Field(default_factory=list)
+    visual_observer_providers: List[str] = Field(default_factory=list)
     visual_understanding_strategy: Optional[Literal["direct_multimodal", "visual_notes_then_text_storyteller"]] = None
     text_storyteller_calls: int = Field(default=0, ge=0)
     stage1_cache_hits: int = Field(default=0, ge=0)

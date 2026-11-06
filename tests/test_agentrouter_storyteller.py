@@ -68,7 +68,7 @@ def test_text_envelope_json_mode_and_usage_are_safe(monkeypatch):
                                   "usage": {"total_tokens": 12, "details": {"x": 1}}}
     post = Mock(return_value=response)
     monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
-    provider = AgentRouterProvider(api_key="synthetic-credential", model="gpt-6-astra")
+    provider = AgentRouterProvider(api_key="synthetic-credential", model="gpt-6-astra", base_url="http://127.0.0.1:8318/v1")
     result = provider.generate("Pure text dialogue", system_prompt="Tell the grounded story", response_schema=dict, max_tokens=8192)
     body = post.call_args.kwargs["json"]
     assert body["model"] == "gpt-6-astra" and body["max_tokens"] == 8192
@@ -104,7 +104,7 @@ def test_model_substitution_and_incomplete_output_fail_closed(monkeypatch, model
     response.json.return_value = {"model": model, "choices": [{"finish_reason": finish, "message": {"content": "{}"}}]}
     monkeypatch.setattr("app.content.providers.agentrouter.requests.post", Mock(return_value=response))
     with pytest.raises(error_type):
-        AgentRouterProvider(api_key="synthetic-credential").generate("probe")
+        AgentRouterProvider(api_key="synthetic-credential", base_url="http://127.0.0.1:8318/v1").generate("probe")
 
 
 def frames(start, end, index):
@@ -264,7 +264,7 @@ def test_observer_override_changes_only_the_gemini_dependency(monkeypatch):
     assert assessment.eligible and assessment.canonical_model_id == "gpt-6.1-sol"
     assert assessment.routes[0].provider == "agentrouter" and assessment.routes[0].input_modality == "text"
     monkeypatch.setenv("AVM_RECAP_VISION_MODEL", "gpt-6-astra")
-    with pytest.raises(ValueError, match="Gemini image route"):
+    with pytest.raises(ValueError, match="image route"):
         configured_visual_observer(model)
 
 
