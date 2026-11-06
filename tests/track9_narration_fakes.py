@@ -64,8 +64,8 @@ def story_evidence(duration=1800, count=365):
 
 
 def story_response(count=18, segment_count=365):
-    sentence = ("A determined traveler protects a vulnerable companion while enemies approach. "
-                "Their difficult choice reveals new danger and changes the course of the journey.")
+    sentence = ("A determined traveler protects a vulnerable companion while dangerous enemies approach. "
+                "Their difficult choice reveals new danger and changes the course of the difficult journey.")
     return {"summary": "A companion's rescue unfolds through the full source story.", "beats": [
         {"order": index + 1, "title": f"Story event {index + 1}", "narration_text": sentence,
          "source_refs": [{"transcript_segment_ids": [round(index * (segment_count - 1) / (count - 1))]}]}

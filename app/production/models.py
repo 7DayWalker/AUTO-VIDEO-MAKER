@@ -36,7 +36,7 @@ from pydantic import (
 )
 
 from app.production.routes import KNOWN_ROUTES, PRIVATE_ONLY_ROUTES, PRODUCTION_ROUTES
-from app.production.recap_budget import RecapBudget
+from app.production.recap_budget import RecapBudget, RecapLengthPreset
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -672,7 +672,7 @@ class NarrationArtifact(BaseModel):
     unit_id: str = Field(min_length=1)
     source_asset_id: str = Field(pattern=r"^src-\d{3}$")
     target_duration_seconds: float = Field(gt=0.0)
-    target_length_preset: Optional[Literal["auto", "short", "story", "deep", "extended", "custom"]] = None
+    target_length_preset: Optional[RecapLengthPreset] = None
     narration_budget: Optional[RecapBudget] = None
     summary_mode: Optional[Literal["standard", "pro"]] = None
     understanding_method: Optional[Literal["transcript_audio", "frame_sequence", "native_video"]] = None

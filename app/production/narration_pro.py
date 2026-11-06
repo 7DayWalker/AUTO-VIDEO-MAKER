@@ -86,8 +86,14 @@ def _provider_uses_native_video(prov) -> bool:
 
 
 def _window_frame_timestamps(ws, we, count):
-    span = max(0.0, float(we) - float(ws))
-    return [round(float(ws) + span * (index + 1) / (count + 1), 3) for index in range(count)]
+    step = max(0.0, float(we) - float(ws)) / (count + 1)
+    stamps = [round(float(ws) + step * (k + 1), 3) for k in range(count)]
+    # Feature/epic chapters can span 10-15 source minutes. Uniform interior
+    # sampling alone then misses the closing scene by >15 seconds. Retain the
+    # existing short-window cache grid, but inspect near EOF on wider chapters.
+    if count >= 8 and step > 15:
+        stamps[-1] = round(float(we) - 5, 3)
+    return stamps
 
 
 def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, window_idx: int, *, frame_count=None):
@@ -105,8 +111,7 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
     else:
         # Interior sampling: avoids the exact boundary frames, which are often
         # black/transitional.
-        step = span / (count + 1)
-        stamps = [float(ws) + step * (k + 1) for k in range(count)]
+        stamps = _window_frame_timestamps(ws, we, count)
 
     from app.assembly.ffmpeg import get_ffmpeg_runner
     runner = get_ffmpeg_runner()

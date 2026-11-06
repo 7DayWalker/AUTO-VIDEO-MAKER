@@ -56,6 +56,29 @@ def _make_media_tools_discoverable() -> None:
             return
 
 
+def _pytest_arguments(arguments):
+    """Flags alone must not collect root-level live/manual smoke scripts.
+
+    Explicit file/directory/node targets still work. The normal hermetic suite
+    is tests/, including when an operator uses just -q or --tb=short.
+    """
+    options_with_values = {
+        "-k", "-m", "-c", "-o", "--override-ini", "--tb", "--capture", "--color",
+        "--basetemp", "--junitxml", "--junit-xml", "--rootdir", "--confcutdir",
+        "--log-level", "--log-cli-level", "--log-file", "--log-file-level",
+        "--maxfail", "--ignore", "--ignore-glob", "--deselect", "--import-mode",
+    }
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+        elif argument in options_with_values:
+            skip_value = True
+        elif not argument.startswith("-"):
+            return list(arguments)
+    return ["tests", *arguments]
+
+
 def main() -> int:
     sys.path.insert(0, str(REPO_ROOT))
     os.chdir(REPO_ROOT)
@@ -142,7 +165,7 @@ def main() -> int:
         print("Hermetic pytest: dotenv disabled; inherited AVM/provider config removed;")
         print("runtime/credential paths isolated; external network blocked; loopback allowed.")
         try:
-            result = pytest.main(sys.argv[1:] or ["tests"])
+            result = pytest.main(_pytest_arguments(sys.argv[1:]))
         finally:
             # File handlers otherwise keep Windows scratch logs open on cleanup.
             logging.shutdown()

@@ -4368,9 +4368,12 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
     summary_mode = str(body.get("summary_mode") or "standard").strip().lower()
     if summary_mode not in ("standard", "pro"):
         return 400, {"error": "INVALID_REQUEST", "message": "summary_mode must be standard or pro"}
-    from app.production.recap_budget import normalize_length_preset
+    from app.production.recap_budget import normalize_length_preset, normalize_duration_override
     try:
         length_preset = normalize_length_preset(body.get("target_length_preset", "auto"))
+        tds = normalize_duration_override(body.get("target_duration_seconds"), body.get("target_minutes"))
+        if length_preset == "custom" and tds is None:
+            raise ValueError("Custom recap requires target_minutes or target_duration_seconds")
     except ValueError as exc:
         return 400, {"error": "INVALID_REQUEST", "message": str(exc)}
     sel = body.get("selection_mode")
@@ -4392,18 +4395,6 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
             return 400, {"error": "INVALID_REQUEST", "message": "model id must be text"}
     if sel in ("explicit", "manual") and not explicit:
         return 400, {"error": "INVALID_REQUEST", "message": "explicit selection_mode requires a model id"}
-    raw_dur = body.get("target_duration_seconds")
-    tds = None
-    if raw_dur is not None:
-        try:
-            if isinstance(raw_dur, bool):
-                raise ValueError
-            tds = float(raw_dur)
-        except Exception:
-            return 400, {"error": "INVALID_REQUEST", "message": "target_duration_seconds must be a number"}
-        import math
-        if not math.isfinite(tds) or not tds > 0:
-            return 400, {"error": "INVALID_REQUEST", "message": "target_duration_seconds must be finite and positive"}
     aid = body.get("asset_id")
     if aid is not None:
         if not isinstance(aid, str) or not aid.strip():

@@ -22,7 +22,7 @@ from app.production.narration_real import (
     align_final_story_clip,
     visual_observer_attribution,
 )
-from app.production.recap_budget import validate_recap_depth
+from app.production.recap_budget import validate_recap_depth, chapter_planning_timeout_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +67,11 @@ class _ChapterPlan(BaseModel):
     beats: list[_ChapterBeat] = Field(min_length=1, max_length=54)
 
 
-def chapter_windows(duration, transcript, *, context_tokens=None, visual=False, max_chapters=12):
-    """~6-minute chapters, subdivided if needed; never truncate transcript text."""
-    count = max(1, min(max_chapters, max(3 if duration >= 900 else 1, round(duration / 360))))
+def chapter_windows(duration, transcript, *, context_tokens=None, visual=False, min_chapters=1, max_chapters=16):
+    """Preset-sized chronological chapters; subdivide dense evidence, never truncate it."""
+    if not 1 <= min_chapters <= max_chapters <= 40:
+        raise ValueError("Chapter bounds must be ordered between 1 and 40")
+    count = min(max_chapters, max(min_chapters, 3 if duration >= 900 else 1, round(duration / 360)))
     limit = max(1500, (context_tokens or 32768) - 8192 - 6000 - (12000 if visual else 0))
     pending = [(duration * i / count, duration * (i + 1) / count) for i in range(count)]
     windows = []
@@ -95,6 +97,7 @@ def _chapter_budget(budget, index, count):
     return budget.model_copy(update={
         "target_duration_seconds": budget.target_duration_seconds / count,
         "min_duration_seconds": None, "max_duration_seconds": None,
+        "min_chapters": 1, "max_chapters": 1,
         "min_beats": max(1, _share(budget.min_beats, index, count)),
         "max_beats": max(1, _share(budget.max_beats, index, count)),
         "min_narration_words": _share(budget.min_narration_words, index, count),
@@ -163,14 +166,14 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
     visual = frame_loader is not None
     composite = visual and visual_observer is not None
     windows = chapter_windows(asset.duration, transcript, context_tokens=context_tokens, visual=visual and not composite,
-                              max_chapters=min(12, budget.min_beats))
+                              min_chapters=budget.min_chapters, max_chapters=min(budget.max_chapters, budget.min_beats))
     if len(windows) > budget.min_beats:
         raise ValueError("Model context requires too many chapters for the requested beat budget")
     all_beats, chapters, continuity = [], [], []
     calls = 0
     text_calls = 0
     cache_hits, hydrated_chapters, live_vision_calls = 0, 0, 0
-    deadline = min(deadline or float("inf"), time.monotonic() + (840 if composite else 240))
+    deadline = min(deadline or float("inf"), time.monotonic() + chapter_planning_timeout_seconds(budget, composite=composite))
     identity = hashlib.sha256(json.dumps({"version": 3, "prompt_version": STORYTELLER_PROMPT_VERSION, "source": asset.model_dump(),
         "transcript": transcript.model_dump(), "budget": budget.model_dump(), "visual": visual,
         "provider": getattr(prov, "name", None), "model": getattr(prov, "model", None),

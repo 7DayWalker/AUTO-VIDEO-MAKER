@@ -1039,7 +1039,9 @@ def test_real_narration_http_duration_presets_persist_story_budget(monkeypatch, 
 
 @pytest.mark.parametrize("body", [{"target_length_preset": "long"}, {"target_length_preset": None},
     {"target_length_preset": []}, {"target_length_preset": False}, {"target_duration_seconds": "NaN"},
-    {"target_duration_seconds": "Infinity"}, {"target_duration_seconds": True}])
+    {"target_duration_seconds": "Infinity"}, {"target_duration_seconds": True}, {"target_duration_seconds": 2101},
+    {"target_minutes": 36}, {"target_minutes": 0}, {"target_minutes": True}, {"target_minutes": "NaN"},
+    {"target_length_preset": "custom"}])
 def test_invalid_recap_preset_and_nonfinite_duration_fail_before_provider(monkeypatch, tmp_path, body):
     monkeypatch.setattr("app.production.narration.build_grounded_narration_plan", lambda *a, **k: pytest.fail("invalid request must not generate"))
     base, httpd, _ = _server(monkeypatch, tmp_path)
@@ -1047,5 +1049,51 @@ def test_invalid_recap_preset_and_nonfinite_duration_fail_before_provider(monkey
         _make_prod(tmp_path)
         status, payload, _ = _post(base, f"/api/productions/{PID}/units/{UID}/narration", body)
         assert status == 400 and payload["error"] == "INVALID_REQUEST", payload
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
+@pytest.mark.parametrize("duration,preset,minutes,seconds,chapter_range", [
+    (5400, "feature", None, None, (7, 8)), (9000, "blockbuster", None, None, (10, 12)),
+    (14400, "epic", None, None, (14, 16)),
+    (5400, "auto", None, None, (7, 8)), (9000, "auto", None, None, (10, 12)),
+    (14400, "auto", None, None, (14, 16)),
+    (5400, "custom", 15, None, (7, 8)), (9000, "custom", 20, None, (10, 12)),
+    (14400, "custom", 30, None, (14, 16)), (14400, "custom", 35, None, (14, 16)),
+    (14400, "epic", 30, 900, (7, 8)),
+])
+def test_longform_http_contract_and_saved_budget_without_movie_io(monkeypatch, tmp_path, duration, preset, minutes, seconds, chapter_range):
+    from tests.track9_narration_fakes import story_evidence, install_standard_provider, ChapterNarrationProvider
+    from app.content import provider_registry
+    from app.production.storage import save_revision, transcript_path_for, load_narration_artifact
+    from app.production.recap_budget import resolve_recap_budget
+    import app.assembly.ffmpeg as ffmpeg
+    install_standard_provider(monkeypatch)
+    provider = ChapterNarrationProvider()
+    monkeypatch.setitem(provider_registry._REGISTRY, "codecraft", lambda wire_id=None: provider)
+    monkeypatch.setattr(ffmpeg, "run_ffmpeg", lambda *a, **k: pytest.fail("Longform API policy tests must not render a movie"))
+    base, httpd, _ = _server(monkeypatch, tmp_path)
+    try:
+        production = _make_prod(tmp_path)
+        asset, transcript = story_evidence(duration=duration, count=720)
+        save_revision(production.model_copy(update={"source_assets": [asset], "plan_version": 2}), root=tmp_path / "productions")
+        path = transcript_path_for(PID, AID, root=tmp_path / "productions")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(transcript.model_dump_json(), encoding="utf-8")
+        body = {"summary_mode": "standard", "mock_mode": False, "target_length_preset": preset}
+        if minutes is not None:
+            body["target_minutes"] = minutes
+        if seconds is not None:
+            body["target_duration_seconds"] = seconds
+        route = f"/api/productions/{PID}/units/{UID}/narration"
+        status, payload, _ = _post(base, route, body)
+        assert status == 201, payload
+        budget = resolve_recap_budget(duration, target_length_preset=preset, target_minutes=minutes, target_duration_seconds=seconds)
+        assert payload["narration_budget"] == budget.model_dump()
+        assert payload["target_duration_seconds"] == budget.target_duration_seconds
+        assert chapter_range[0] <= payload["chapter_count"] <= chapter_range[1]
+        status, saved, _ = _get(base, route)
+        assert status == 200 and saved["narration_budget"] == payload["narration_budget"]
+        assert load_narration_artifact(PID, UID, root=tmp_path / "productions").chapter_count == payload["chapter_count"]
     finally:
         httpd.shutdown(); httpd.server_close()

@@ -693,9 +693,9 @@ def test_edge_tts_transport_diagnostics_never_expose_request_tokens(monkeypatch,
 
 @pytest.mark.parametrize("seconds,beats,words,target", [
     (120, (4, 6), (100, 150), 60), (179.9, (4, 6), (100, 150), 60),
-    (180, (8, 12), (180, 270), 100), (599.9, (8, 12), (180, 270), 100),
-    (600, (14, 22), (320, 500), 180), (899, (14, 22), (320, 500), 180),
-    (900, (28, 40), (750, 1150), 390), (1499, (28, 40), (750, 1150), 390),
+    (180, (8, 12), (180, 270), 90), (599.9, (8, 12), (180, 270), 90),
+    (600, (16, 26), (450, 750), 210), (899, (16, 26), (450, 750), 210),
+    (900, (16, 26), (450, 750), 210), (1499, (16, 26), (450, 750), 210),
     (1500, (45, 54), (1400, 1680), 540), (1805, (45, 54), (1400, 1680), 540),
     (2700, (45, 54), (1400, 1680), 540), (2700.1, (45, 54), (1400, 1680), 540),
 ])
@@ -738,8 +738,8 @@ def test_real_auto_story_budget_persists_and_covers_whole_movie(tmp_path):
     provider = StubNarrationProvider(data=story_response(segment_count=100))
     artifact = build_grounded_narration_plan(PID, UID, asset, transcript, summary_mode="standard",
                                             mock_mode=False, llm_provider_override=provider)
-    assert artifact.target_duration_seconds == 180 and artifact.target_length_preset == "auto"
-    assert len(artifact.beats) == 18 and 320 <= len(artifact.narration_text.split()) <= 500
+    assert artifact.target_duration_seconds == 210 and artifact.target_length_preset == "auto"
+    assert len(artifact.beats) == 18 and 450 <= len(artifact.narration_text.split()) <= 750
     validate_recap_depth(artifact, artifact.narration_budget, transcript, asset.duration)
     assert len(timeline_sections(transcript, asset.duration)) == 5
     assert artifact.source_refs[0].start_seconds == 0
@@ -748,7 +748,7 @@ def test_real_auto_story_budget_persists_and_covers_whole_movie(tmp_path):
                             source_asset=asset, source_transcript=transcript)
     assert load_narration_artifact(PID, UID, root=tmp_path).narration_budget == artifact.narration_budget
     prompt = provider.calls[0]["prompt"]
-    assert '"min_beats":14' in prompt and '"min_narration_words":320' in prompt
+    assert '"min_beats":16' in prompt and '"min_narration_words":450' in prompt
     assert "2-4 engaging narrative sentences" in provider.calls[0]["system_prompt"]
 
 
@@ -785,7 +785,7 @@ def test_underlength_story_is_never_saved_or_returned_when_repair_fails(tmp_path
     from tests.track9_narration_fakes import story_evidence, story_response
     asset, transcript = story_evidence(duration=840, count=100)
     provider = StubNarrationProvider(data=story_response(count=4, segment_count=100))
-    with pytest.raises(ValueError, match="14-22 beats"):
+    with pytest.raises(ValueError, match="16-26 beats"):
         build_grounded_narration_plan(PID, UID, asset, transcript, llm_provider_override=provider, root=tmp_path)
     assert len(provider.calls) == 2 and not list(tmp_path.rglob("narration.json"))
 
@@ -821,8 +821,8 @@ def test_long_movie_window_merge_keeps_global_ids_and_enforces_final_depth():
             return super().generate(prompt, system_prompt, **kwargs)
     provider = StoryWindowProvider()
     artifact = build_grounded_narration_plan(PID, UID, asset, transcript, llm_provider_override=provider)
-    assert len(provider.calls) > 1 and len(artifact.beats) >= 14
-    assert artifact.narration_budget.min_narration_words == 320
+    assert len(provider.calls) > 1 and len(artifact.beats) >= 16
+    assert artifact.narration_budget.min_narration_words == 450
     validate_recap_depth(artifact, artifact.narration_budget, transcript, asset.duration)
 
 
@@ -851,4 +851,4 @@ def test_pro_recap_uses_same_depth_budget_after_real_visual_boundary(monkeypatch
         summary_model_id="gemini-3.6-flash", prov=provider, root=tmp_path, recap_budget=resolve_recap_budget(840))
     assert provider.visual_calls == 15 and len(artifact.beats) == 18
     assert '"visual_windows"' in provider.calls[0]["prompt"]
-    assert artifact.narration_budget.min_narration_words == 320
+    assert artifact.narration_budget.min_narration_words == 450

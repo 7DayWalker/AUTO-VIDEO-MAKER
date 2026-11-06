@@ -1,14 +1,19 @@
-"""Recap-specific voice settings and bounded, natural silence tightening.
+"""Recap voice settings, resumable long-form TTS and broadcast mastering.
 
+Short scripts stay continuous. Long scripts use bounded chapter/beat batches,
+decoded to uniform PCM before concatenation; no artificial per-beat pauses.
 The shared voice engine remains unchanged for other production workflows.
-All beats are spoken in ONE continuous TTS request; no per-beat pause padding.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import math
 import os
 import re
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -23,6 +28,11 @@ BROADCAST_VOCAL_CHAIN = (
     "acompressor=threshold=0.089:ratio=4:attack=3:release=100:knee=4:makeup=1"
 )
 BROADCAST_CHAIN_VERSION = "recap-broadcast-v1"
+TTS_CHUNK_TRIGGER_WORDS = 1800
+TTS_CHUNK_MAX_WORDS = 450
+TTS_CHUNK_MAX_BYTES = 6000
+TTS_REQUEST_TIMEOUT_SECONDS = 90
+TTS_SYNTHESIS_TIMEOUT_SECONDS = 480
 
 
 def recap_voice(override=None):
@@ -39,6 +49,166 @@ def recap_rate(override=None):
 def spoken_recap_text(text):
     # Whitespace only: do not silently rewrite approved content or citations.
     return " ".join(text.split())
+
+
+@dataclass(frozen=True)
+class RecapTTSChunk:
+    text: str
+    chapter_index: int | None = None
+    beat_start_order: int | None = None
+    beat_end_order: int | None = None
+
+
+def recap_tts_chunks(artifact):
+    """Preserve approved prose exactly, batching at chapter/beat/sentence edges."""
+    text = spoken_recap_text(artifact.narration_text)
+    if not text:
+        raise ValueError("Recap TTS requires non-empty spoken narration")
+    if len(text.split()) <= TTS_CHUNK_TRIGGER_WORDS and len(text.encode("utf-8")) <= 24000:
+        return [RecapTTSChunk(text)]
+    beats = getattr(artifact, "beats", [])
+    chapters = getattr(artifact, "chapters", [])
+    if spoken_recap_text(" ".join(beat.narration_text for beat in beats)) == text:
+        units = [(spoken_recap_text(beat.narration_text), next((chapter.chapter_index for chapter in chapters
+                  if chapter.beat_start_order <= beat.order <= chapter.beat_end_order), None), beat.order)
+                 for beat in beats]
+    else:
+        # Never substitute a stale beat draft for the approved full script.
+        units = [(text, None, None)]
+    chunks, pending = [], []
+    chapter_index = beat_start = beat_end = None
+
+    def flush():
+        if pending:
+            chunks.append(RecapTTSChunk(" ".join(pending), chapter_index, beat_start, beat_end))
+            pending.clear()
+
+    def would_overflow(part):
+        return (len(pending) + len(part.split()) > TTS_CHUNK_MAX_WORDS
+                or len((" ".join(pending) + " " + part).encode("utf-8")) > TTS_CHUNK_MAX_BYTES)
+
+    for unit, chapter, order in units:
+        if pending and (chapter != chapter_index or would_overflow(unit)):
+            flush()
+        for sentence in re.split(r"(?<=[.!?。！？])\s+", unit):
+            if pending and would_overflow(sentence):
+                flush()
+            for word in sentence.split():
+                if len(word.encode("utf-8")) > TTS_CHUNK_MAX_BYTES:
+                    raise ValueError("A narration token exceeds the bounded TTS payload size")
+                if pending and (chapter != chapter_index or len(pending) >= TTS_CHUNK_MAX_WORDS
+                                or len((" ".join(pending) + " " + word).encode("utf-8")) > TTS_CHUNK_MAX_BYTES):
+                    flush()
+                if not pending:
+                    chapter_index, beat_start = chapter, order
+                beat_end = order
+                pending.append(word)
+            # Prefer a whole sentence/beat boundary over splitting the next one.
+            if pending and (len(pending) >= TTS_CHUNK_MAX_WORDS - 45
+                            or len(" ".join(pending).encode("utf-8")) >= TTS_CHUNK_MAX_BYTES - 600):
+                flush()
+    flush()
+    if " ".join(chunk.text for chunk in chunks) != text:
+        raise ValueError("Bounded TTS must preserve every approved narration word in order")
+    return chunks
+
+
+async def synthesize_recap_segments(artifact, provider, output_path, *, voice, rate, pitch, volume, cache_root=None):
+    """Retain validated chunks on failure; never reuse another script or voice.
+
+    Checkpoints contain hashes/timing only, never prompts or credentials. PCM
+    decoding removes per-request encoder delay before the file-backed concat.
+    The final loudness chain runs once, on the entire concatenated narration.
+    """
+    from app.assembly.ffmpeg import run_ffmpeg
+    from app.production.media_concat import write_concat_manifest
+    from app.production.storage import _atomic_write, compute_content_hash
+    from app.voice.exceptions import VoiceProviderError
+    from app.voice.validator import validate_audio_file
+
+    chunks = recap_tts_chunks(artifact)
+    metadata = {"method": "single_request" if len(chunks) == 1 else "chapter_beat_chunks",
+                "chunk_count": len(chunks), "resumed_chunks": 0,
+                "max_chunk_words": max(len(chunk.text.split()) for chunk in chunks),
+                "max_chunk_utf8_bytes": max(len(chunk.text.encode("utf-8")) for chunk in chunks),
+                "request_timeout_seconds": TTS_REQUEST_TIMEOUT_SECONDS}
+    if len(chunks) == 1:
+        try:
+            await asyncio.wait_for(provider.generate(text=chunks[0].text, output_path=output_path,
+                voice=voice, rate=rate, pitch=pitch, volume=volume), timeout=TTS_REQUEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise VoiceProviderError(provider.name, "Recap TTS request timed out; no completed audio was saved") from None
+        return metadata
+    identity = hashlib.sha256(json.dumps({"version": 1, "provider": provider.name,
+        "voice": voice, "rate": rate, "pitch": pitch, "volume": volume, "format": output_path.suffix,
+        "chunks": [hashlib.sha256(chunk.text.encode("utf-8")).hexdigest() for chunk in chunks]},
+        sort_keys=True).encode()).hexdigest()
+    cache = Path(cache_root or output_path.with_name(output_path.stem + ".tts_chunks")) / identity
+    cache.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = cache / "checkpoint.json"
+    completed = {}
+    try:
+        saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if saved.get("identity") == identity and isinstance(saved.get("chunks"), dict):
+            completed = saved["chunks"]
+    except (OSError, ValueError, AttributeError):
+        pass
+    deadline = time.monotonic() + TTS_SYNTHESIS_TIMEOUT_SECONDS
+    paths, timings = [], []
+    for index, chunk in enumerate(chunks, 1):
+        path = cache / f"chunk_{index:04d}.wav"
+        record = completed.get(str(index))
+        resumed = False
+        if isinstance(record, dict) and path.is_file() and record.get("sha256") == compute_content_hash(path):
+            validation = validate_audio_file(path)
+            resumed = bool(validation.valid and validation.codec == "pcm_s24le"
+                           and validation.sample_rate == 48000 and validation.channels == 2)
+        raw = cache / f"chunk_{index:04d}.partial.mp3"
+        pcm = cache / f"chunk_{index:04d}.partial.wav"
+        if not resumed:
+            remaining = min(TTS_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic())
+            if remaining <= 0:
+                raise VoiceProviderError(provider.name, "Long recap TTS deadline reached; retry resumes validated chunks")
+            try:
+                await asyncio.wait_for(provider.generate(text=chunk.text, output_path=raw, voice=voice,
+                    rate=rate, pitch=pitch, volume=volume), timeout=remaining)
+                validation = validate_audio_file(raw)
+                if not validation.valid:
+                    raise ValueError(f"Recap TTS chunk {index} failed audio validation")
+                run_ffmpeg(["-y", "-i", str(raw), "-vn", "-ar", "48000", "-ac", "2", "-c:a", "pcm_s24le", str(pcm)],
+                           "decoding a bounded recap TTS segment without encoder-delay padding")
+                validation = validate_audio_file(pcm)
+                if not validation.valid:
+                    raise ValueError(f"Recap TTS chunk {index} failed PCM validation")
+                pcm.replace(path)
+                completed[str(index)] = {"sha256": compute_content_hash(path), "duration_seconds": validation.duration}
+                _atomic_write(checkpoint_path, json.dumps({"identity": identity, "chunks": completed}))
+            except asyncio.TimeoutError:
+                raise VoiceProviderError(provider.name, f"Recap TTS chunk {index} timed out; retry resumes validated chunks") from None
+            finally:
+                raw.unlink(missing_ok=True)
+                pcm.unlink(missing_ok=True)
+        else:
+            metadata["resumed_chunks"] += 1
+        paths.append(path)
+        timings.append({"chunk_index": index, "chapter_index": chunk.chapter_index,
+                        "beat_start_order": chunk.beat_start_order, "beat_end_order": chunk.beat_end_order,
+                        "word_count": len(chunk.text.split()), "duration_seconds": validation.duration})
+    manifest = write_concat_manifest(cache / "segments.ffconcat", paths)
+    concatenated = cache / ("concatenated.partial" + output_path.suffix)
+    codec = ["-c:a", "libmp3lame", "-b:a", "192k"] if output_path.suffix.lower() == ".mp3" else ["-c:a", "pcm_s24le"]
+    try:
+        run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(manifest), "-vn", "-ar", "48000", "-ac", "2",
+                    *codec, str(concatenated)], "concatenating validated long-form TTS before broadcast normalization")
+        joined = validate_audio_file(concatenated)
+        expected = sum(item["duration_seconds"] for item in timings)
+        if not joined.valid or abs(float(joined.duration or 0) - expected) > .25:
+            raise ValueError("Concatenated recap TTS must contain every complete audio segment")
+        concatenated.replace(output_path)
+    finally:
+        concatenated.unlink(missing_ok=True)
+    metadata.update(concat_method="ffmpeg_concat_demuxer", intermediate_format="pcm_s24le_48000_stereo", chunks=timings)
+    return metadata
 
 
 def measure_audio_loudness(path, *, audio_filter=""):

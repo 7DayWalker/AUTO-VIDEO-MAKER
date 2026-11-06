@@ -34,7 +34,7 @@ from app.production.storage import (
     save_narration_artifact,
     save_narration_audio,
 )
-from app.production.recap_budget import resolve_recap_budget
+from app.production.recap_budget import resolve_recap_budget, chapter_planning_timeout_seconds
 from app.voice.config import (
     TTS_OUTPUT_FORMAT,
     TTS_PITCH,
@@ -254,11 +254,13 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
     is_pro = summary_mode == "pro"
     # Two-stage chapters include a separate vision request and reasoning-model
     # text request. Keep a bounded operation without the old single-stage limit.
-    composite = bool(model_id and get_model(model_id).visual_observer_model_id)
-    deadline = time.monotonic() + (870 if composite else 270) if is_pro else None
     job_id = JOB_SOURCE_VIDEO_RECAP if is_pro else JOB_SOURCE_TRANSCRIPT_RECAP
     label = "Pro" if is_pro else "Standard"
     candidates = (model_id,) if model_id is not None else (pro_auto_model_ids() if is_pro else standard_auto_model_ids())
+    composite = is_pro and any(get_model(candidate).visual_observer_model_id for candidate in candidates)
+    long_form = recap_budget is not None and recap_budget.target_duration_seconds >= 720
+    deadline = (time.monotonic() + chapter_planning_timeout_seconds(recap_budget, composite=composite) + 30
+                if is_pro or long_form else None)
     if not candidates:
         raise RuntimeError(f"Summary {label} has no eligible route: configure an available {'vision' if is_pro else 'text/JSON'} provider.")
     segments = [] if is_pro else _standard_source_segments(production_id, source_asset, root)
@@ -311,7 +313,7 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
                         target_duration_seconds=duration, prov=resolved.provider_instance,
                         status=status, source_segments=segments,
                         context_tokens=get_model(candidate_id).capabilities.context_tokens, output_attempts=2,
-                        recap_budget=recap_budget)
+                        recap_budget=recap_budget, deadline=deadline)
             except Exception as exc:
                 category = standard_transient_failure_category(exc)
                 if category is None:
@@ -352,6 +354,7 @@ def build_grounded_narration_plan(
     source_transcript: SourceTranscript,
     *,
     target_duration_seconds: Optional[float] = None,
+    target_minutes: Optional[float] = None,
     target_length_preset: str = "auto",
     # None means "not supplied" (capability-driven AUTO for Standard and Pro).
     # An explicit value is ALWAYS treated as explicit model selection.
@@ -405,7 +408,8 @@ def build_grounded_narration_plan(
         )
 
     budget = resolve_recap_budget(source_asset.duration, target_length_preset=target_length_preset,
-                                  target_duration_seconds=target_duration_seconds, mock_mode=mock_mode)
+                                  target_duration_seconds=target_duration_seconds, target_minutes=target_minutes,
+                                  mock_mode=mock_mode)
     duration = budget.target_duration_seconds
 
     # An injected adapter still exercises real planning unless mock is explicit.
@@ -632,7 +636,7 @@ def synthesize_narration_audio(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     from app.production.synthesis import (
-        recap_voice, recap_rate, spoken_recap_text, tighten_narration_silence, master_narration_audio,
+        recap_voice, recap_rate, synthesize_recap_segments, tighten_narration_silence, master_narration_audio,
     )
     chosen_voice = recap_voice(voice)
     chosen_rate = recap_rate(rate)
@@ -640,6 +644,7 @@ def synthesize_narration_audio(
     relative_path = output_path.relative_to(relative_root).as_posix()
 
     try:
+        synthesis_processing = {}
         if mock_mode or (provider_name or "").strip().lower() == "mock":
             from app.production.sandbox import create_sandbox_audio, sandbox_duration
             create_sandbox_audio(output_path, sandbox_duration(artifact.target_duration_seconds))
@@ -647,16 +652,8 @@ def synthesize_narration_audio(
             provider_id = "mock"
         else:
             provider = _resolve_narration_provider(provider_name)
-            asyncio.run(
-                provider.generate(
-                    text=spoken_recap_text(artifact.narration_text),
-                    output_path=output_path,
-                    voice=chosen_voice,
-                    rate=chosen_rate,
-                    pitch=pitch,
-                    volume=volume,
-                )
-            )
+            synthesis_processing = asyncio.run(synthesize_recap_segments(
+                artifact, provider, output_path, voice=chosen_voice, rate=chosen_rate, pitch=pitch, volume=volume))
             provider_id = provider.name
         validation = validate_audio_file(output_path)
         if not validation.valid:
@@ -671,6 +668,7 @@ def synthesize_narration_audio(
             validation, _, tempo_factor = _pace_long_narration(output_path, artifact, validation)
             logger.info("Recap timing complete; mastering broadcast narrator: duration=%.3fs", validation.duration)
             validation, audio_processing = master_narration_audio(output_path, validation)
+            audio_processing["synthesis"] = synthesis_processing
 
         metadata = NarrationAudioArtifact(
             narration_id=artifact.narration_id,

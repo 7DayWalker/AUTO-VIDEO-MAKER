@@ -20,7 +20,8 @@ PID, UID = "prd_20261104_extended_test_001", "unit-001"
 
 def frame_loader(start, end, index):
     # Fake frame IO only; adapter transmission has separate byte-level tests.
-    return [(round(start + (end - start) * (i + 1) / 31, 3), f"fixture-{index}-{i}.jpg") for i in range(30)]
+    from app.production.narration_pro import _window_frame_timestamps
+    return [(ts, f"fixture-{index}-{i}.jpg") for i, ts in enumerate(_window_frame_timestamps(start, end, 30))]
 
 
 @pytest.mark.parametrize("preset,min_beats,words", [("extended", 45, 1400), ("deep", 28, 750), ("auto", 45, 1400)])
@@ -324,3 +325,62 @@ def test_multichapter_ffmpeg_mux_is_real_and_cuts_to_audio_duration(tmp_path):
     measured = probe_media(tmp_path / media_pid / result.output_path)
     assert measured.has_video and measured.has_audio and abs(measured.duration - 9) < .25
     assert result.validation["visual_shots"] == 2 and result.validation["freeze_padding"] is False
+
+
+@pytest.mark.parametrize("source,preset,chapters", [
+    (5400, "feature", (7, 8)), (9000, "blockbuster", (10, 12)), (14400, "epic", (14, 16)),
+    (5400, "auto", (7, 8)), (9000, "auto", (10, 12)), (14400, "auto", (14, 16)),
+    (3300, "feature", (7, 8)), (14400, "custom", (14, 16)),
+])
+@pytest.mark.parametrize("visual", [False, True])
+def test_feature_blockbuster_epic_plan_preserves_full_story_and_budget(tmp_path, source, preset, chapters, visual):
+    from app.production.recap_budget import validate_recap_depth
+    from app.production.summary_video import _paced_visual_shots
+    from app.production.synthesis import recap_tts_chunks, TTS_CHUNK_MAX_WORDS, TTS_CHUNK_MAX_BYTES
+    asset, transcript = story_evidence(duration=source, count=720)
+    budget = resolve_recap_budget(source, target_length_preset=preset,
+                                  target_minutes=35 if preset == "custom" else None)
+    provider = ChapterNarrationProvider()
+    artifact = build_chapter_plan(PID, UID, asset, transcript, budget=budget, prov=provider,
+        frame_loader=frame_loader if visual else None, context_tokens=128000)
+    assert chapters[0] <= artifact.chapter_count <= chapters[1]
+    assert len(provider.calls) == artifact.chapter_count
+    assert {row["id"] for chapter in provider.chapters for row in chapter["transcript_segments"]} == set(range(720))
+    assert len(provider.chapters[-1]["prior_chapter_summaries"]) == 4
+    validate_recap_depth(artifact, budget, transcript, source)
+    validate_narration_artifact(artifact, source_asset=asset, source_transcript=transcript)
+    assert artifact.ending_anchor.narrative_end_seconds == source
+    shots = _paced_visual_shots(artifact, budget.target_duration_seconds)
+    assert sum(ref.end_seconds - ref.start_seconds for _, ref in shots) == pytest.approx(budget.target_duration_seconds)
+    assert max(ref.end_seconds - ref.start_seconds for _, ref in shots) <= 5.5 + 1e-6
+    assert all(any(ref.start_seconds <= shot.start_seconds < shot.end_seconds <= ref.end_seconds
+                   for ref in artifact.beats[order - 1].source_refs) for order, shot in shots)
+    chunks = recap_tts_chunks(artifact)
+    assert len(chunks) >= artifact.chapter_count
+    assert all(len(chunk.text.split()) <= TTS_CHUNK_MAX_WORDS
+               and len(chunk.text.encode("utf-8")) <= TTS_CHUNK_MAX_BYTES for chunk in chunks)
+    assert " ".join(chunk.text for chunk in chunks) == artifact.narration_text
+    save_narration_artifact(artifact, production_id=PID, unit_id=UID, root=tmp_path,
+                           source_asset=asset, source_transcript=transcript)
+    assert load_narration_artifact(PID, UID, root=tmp_path).model_dump() == artifact.model_dump()
+
+
+def test_epic_chapter_resume_does_not_discard_twelve_completed_chapters(tmp_path):
+    asset, transcript = story_evidence(duration=14400, count=720)
+    budget = resolve_recap_budget(14400, target_length_preset="epic")
+    checkpoint = tmp_path / "narration_chapters.partial.json"
+    class Interrupted(ChapterNarrationProvider):
+        def generate(self, prompt, *args, **kwargs):
+            evidence = json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+            if evidence["chapter_index"] == 13:
+                raise ValueError("hermetic chapter interruption")
+            return super().generate(prompt, *args, **kwargs)
+    with pytest.raises(ValueError, match="interruption"):
+        build_chapter_plan(PID, UID, asset, transcript, budget=budget, prov=Interrupted(),
+                           checkpoint_path=checkpoint, context_tokens=128000)
+    assert len(json.loads(checkpoint.read_text())["chapters"]) == 12
+    provider = ChapterNarrationProvider()
+    artifact = build_chapter_plan(PID, UID, asset, transcript, budget=budget, prov=provider,
+                                  checkpoint_path=checkpoint, context_tokens=128000)
+    assert artifact.chapter_count == 16 and len(provider.calls) == 4
+    assert not checkpoint.exists()

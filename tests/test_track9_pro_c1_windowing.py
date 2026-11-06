@@ -42,6 +42,7 @@ def _story_window_plan(transcript):
     from tests.track9_narration_fakes import story_response
     data = story_response(count=6, segment_count=len(transcript.segments))
     for beat in data["beats"]:
+        beat["narration_text"] = beat["narration_text"].replace("enemies approach.", "enemies approach the shelter.")
         ref = beat["source_refs"][0]
         segment = transcript.segments[ref["transcript_segment_ids"][0]]
         ref.update(start_seconds=segment.start + 1, end_seconds=segment.end - 1)

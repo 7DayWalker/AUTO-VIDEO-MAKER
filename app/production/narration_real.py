@@ -47,8 +47,9 @@ STORYTELLER_SYSTEM_PROMPT = (
     "into every beat. Each beat flows into the next as a cohesive spoken paragraph, without stage directions, "
     "chapter announcements, excessive ellipses or artificial pauses. Write 2-4 naturally varied complete "
     "sentences per story beat, following the requested TOTAL word budget, not a fixed length per sentence. "
-    "For extended recaps, sustain 1,400-1,680 spoken words across 45-54 chronological beats; the selected "
-    "local chapter budget takes precedence on short sources and smaller presets. Aim for brisk 165-175 WPM "
+    "Follow the selected recap budget, including feature, blockbuster and epic recaps of up to 5,400 words "
+    "and custom recaps up to 35 minutes. The supplied local chapter budget always takes precedence; never "
+    "compress a long film to an extended-recap cap. Aim for brisk 165-175 WPM "
     "recap energy through richer story detail, never filler or a transcript copy. "
     "Beat 1 starts with ONE punchy stakes-hook sentence grounded in the opening evidence, then flows "
     "straight into the opening scene. No greetings, generic trailer teasers or invented future stakes. "
@@ -638,6 +639,7 @@ def ai_grounded_plan(
     output_attempts: int = 1,
     recap_budget: RecapBudget | None = None,
     visual_evidence: Sequence[dict] = (),
+    deadline: float | None = None,
 ) -> NarrationArtifact:
     """Bounded map/reduce of real JSON completions; no copied/mock fallback."""
     duration = float(target_duration_seconds)
@@ -654,7 +656,7 @@ def ai_grounded_plan(
     if requires_chapter_planning(source_asset.duration, budget):
         from app.production.narration_chapters import build_chapter_plan
         return build_chapter_plan(production_id, unit_id, source_asset, source_transcript,
-               budget=budget, prov=prov, context_tokens=context_tokens, status=status)
+               budget=budget, prov=prov, context_tokens=context_tokens, status=status, deadline=deadline)
     segments_by_id = {segment.segment_id: segment for segment in source_segments}
     if any(segment.asset_id != source_asset.asset_id for segment in source_segments):
         raise ValueError("Source segments must belong to the canonical source asset")
