@@ -629,7 +629,9 @@ def synthesize_narration_audio(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from app.production.synthesis import recap_voice, recap_rate, spoken_recap_text, tighten_narration_silence
+    from app.production.synthesis import (
+        recap_voice, recap_rate, spoken_recap_text, tighten_narration_silence, master_narration_audio,
+    )
     chosen_voice = recap_voice(voice)
     chosen_rate = recap_rate(rate)
     relative_root = production_dir(production_id, root=root)
@@ -657,11 +659,16 @@ def synthesize_narration_audio(
         validation = validate_audio_file(output_path)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors) or "audio validation failed")
+        if provider_id != "mock":
+            logger.info("Recap TTS complete: words=%d duration=%.3fs", len(artifact.narration_text.split()), validation.duration)
         original_duration, tempo_factor = float(validation.duration or 0), 1.0
         silence_trimmed = 0.0
+        audio_processing = {}
         if provider_id != "mock":
             validation, silence_trimmed = tighten_narration_silence(output_path, validation)
             validation, _, tempo_factor = _pace_long_narration(output_path, artifact, validation)
+            logger.info("Recap timing complete; mastering broadcast narrator: duration=%.3fs", validation.duration)
+            validation, audio_processing = master_narration_audio(output_path, validation)
 
         metadata = NarrationAudioArtifact(
             narration_id=artifact.narration_id,
@@ -683,6 +690,7 @@ def synthesize_narration_audio(
             synthesis_rate=chosen_rate if provider_id != "mock" else None,
             words_per_minute=(len(artifact.narration_text.split()) * 60 / float(validation.duration)) if provider_id != "mock" else None,
             silence_trimmed_seconds=silence_trimmed,
+            audio_processing=audio_processing,
         )
         save_narration_audio(metadata, production_id=production_id, unit_id=unit_id, root=root)
 

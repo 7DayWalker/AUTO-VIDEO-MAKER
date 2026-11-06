@@ -16,6 +16,7 @@ from app.content.exceptions import LLMConnectionError, LLMOutputTruncatedError
 from app.content.providers.agentrouter import require_text_only
 from app.production.narration_real import (
     NarrationModelOutputError, _call_json, validate_storyteller_language, standard_transient_failure_category,
+    validate_true_ending,
 )
 from app.production.recap_budget import validate_recap_depth
 
@@ -26,7 +27,10 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                               cached_batches=None, on_batch=None, context_tokens=None):
     from app.production.narration_chapters import _ChapterPlan, _chapter_beats, _artifact, _share
 
-    count = max(1, min(4, local_budget.min_beats // 2))
+    # The last text window needs room for three distinct ending beats. Keep
+    # earlier chapter batching unchanged so cached completed writing survives.
+    required = payload.get("ending_anchor", {}).get("required_final_beats", 2)
+    count = max(1, min(4, local_budget.min_beats // max(2, required)))
     start, end = payload["start_seconds"], payload["end_seconds"]
     # Identity/plot continuity is read-only context for every parallel batch;
     # only the local evidence IDs below are citable. This avoids each batch
@@ -42,7 +46,7 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
         rows = [{**row, "start_seconds": max(left, row["start_seconds"]),
                  "end_seconds": min(right, row["end_seconds"])} for row in payload["transcript_segments"]
                 if row["start_seconds"] < right and row["end_seconds"] > left]
-        notes = [note for note in payload["visual_action_notes"] if note.get("citable", True)
+        notes = [note for note in payload["visual_action_notes"] if note.get("citable", True) and not note.get("credits_only")
                  and left <= note["timestamp_seconds"] < right]
         allowed_frames = {note["frame_id"] for note in notes}
         allowed_transcript = {row["id"] for row in rows}
@@ -66,6 +70,14 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
             "previous_narration_tail": payload["previous_narration_tail"] if index == 0 else "",
             **({"repair_instructions": payload["repair_instructions"]} if payload.get("repair_instructions") else {}),
         }
+        if index == 0 and payload.get("cold_open_instruction"):
+            evidence["cold_open_instruction"] = payload["cold_open_instruction"]
+        anchor = None
+        if index == count - 1 and payload.get("ending_anchor"):
+            from app.production.models import NarrativeEndingAnchor
+            anchor = NarrativeEndingAnchor.model_validate(payload["ending_anchor"])
+            evidence["ending_anchor"] = anchor.model_dump()
+            evidence["ending_instruction"] = payload["ending_instruction"]
         prompt = ("Write a short consecutive movie-recap passage from this evidence:\n"
                   + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
                   + "\nRequired JSON schema:\n" + json.dumps(_ChapterPlan.model_json_schema(), separators=(",", ":"))
@@ -119,6 +131,8 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                     # allowing a repair to correct its actual depth mismatch.
                     raise NarrationModelOutputError(str(exc)) from None
                 validate_storyteller_language(artifact)
+                if anchor is not None:
+                    validate_true_ending(beats, anchor, require_visual=True)
                 if on_batch is not None:
                     on_batch(index, {"plan": plan.model_dump(), "calls": calls})
                 return plan, calls

@@ -26,6 +26,7 @@ class _ActionNote(BaseModel):
     action: str = Field(min_length=1, max_length=1800)
     evidence_kind: Literal["live_frame", "prior_pro_scene", "unavailable"] = "live_frame"
     citable: bool = True
+    credits_only: bool = False
     observer_provider: str | None = None
     observer_model: str | None = None
     source_beat_orders: list[StrictInt] = Field(default_factory=list)
@@ -116,8 +117,10 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
             "Associate consistent transcript-backed names or roles with visible people only when justified; keep "
             "uncertain identity explicit. Connect visible action to relevant dialogue revelations and decisions, "
             "but do not invent motives, names, relationships, offscreen events or actions between still samples. "
+            "Set credits_only=true only for purely non-narrative closing credits or an end card, "
+            "never for silent story action or credits over an ongoing narrative scene. "
             "Use 25-45 words per observation with enough detail for another model to narrate the story. Return "
-            "only observations with frame_id, timestamp_seconds and action; no captions, narration script, image "
+            "only observations with frame_id, timestamp_seconds, action and optional credits_only; no captions, narration script, image "
             "paths, URLs, image data or base64."
         ),
         images=frames, video=None, response_schema=_VisualActionNotes, temperature=.15, max_tokens=8192,

@@ -78,7 +78,7 @@ def _spectral_amplitude(path, frequency):
 
 @pytest.mark.parametrize("has_source_audio", [True, False])
 @pytest.mark.parametrize("multi_chapter", [True, False])
-def test_real_summary_mix_retains_film_signal_at_one_tenth_voice(tmp_path, has_source_audio, multi_chapter):
+def test_real_summary_mix_retains_quiet_film_bed_without_halving_voice(tmp_path, has_source_audio, multi_chapter):
     from app.production.models import NarrativeBeat, NarrationSourceRef, NarrationArtifact, NarrationAudioArtifact
     from app.production.summary_video import assemble_narrated_summary
     from tests.test_track9_phase3_a import _reg, PID, UID
@@ -105,9 +105,11 @@ def test_real_summary_mix_retains_film_signal_at_one_tenth_voice(tmp_path, has_s
     output = tmp_path / PID / artifact.output_path
     assert probe_media(output).has_audio and abs(probe_media(output).duration - 9) < .25
     assert artifact.background_audio_mixed == has_source_audio
-    assert artifact.background_audio_volume == (.10 if has_source_audio else 0)
+    assert artifact.background_audio_volume == (.05 if has_source_audio else 0)
     ratio = _spectral_amplitude(output, 220) / _spectral_amplitude(output, 440)
-    assert (.065 < ratio < .14) if has_source_audio else ratio < .01
+    assert (.012 < ratio < .055) if has_source_audio else ratio < .01
+    assert _spectral_amplitude(output, 440) / _spectral_amplitude(voice, 440) > .9
+    assert artifact.audio_processing["amix_normalize"] is False
 
 
 def test_live_mix_verifier_decodes_local_audio_without_emitting_pcm(tmp_path):

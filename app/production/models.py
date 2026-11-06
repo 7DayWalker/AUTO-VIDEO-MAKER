@@ -596,6 +596,7 @@ class NarrationAudioArtifact(BaseModel):
     synthesis_rate: Optional[str] = None
     words_per_minute: Optional[float] = Field(default=None, gt=0)
     silence_trimmed_seconds: float = Field(default=0.0, ge=0)
+    audio_processing: Dict = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_audio_path(self) -> "NarrationAudioArtifact":
@@ -631,6 +632,29 @@ class NarrationChapter(BaseModel):
             raise ValueError("Chapter source and beat ranges must be finite and ordered")
         if any(not math.isfinite(ts) or not self.start_seconds <= ts <= self.end_seconds for ts in self.frame_timestamps):
             raise ValueError("Inspected chapter frames must be inside the chapter window")
+        return self
+
+
+class NarrativeEndingAnchor(BaseModel):
+    """Verified active-story boundary, not an invented resolution or credits cut."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_duration_seconds: float = Field(gt=0, allow_inf_nan=False)
+    narrative_end_seconds: float = Field(gt=0, allow_inf_nan=False)
+    finale_start_seconds: float = Field(ge=0, allow_inf_nan=False)
+    latest_story_evidence_seconds: float = Field(ge=0, allow_inf_nan=False)
+    excluded_tail_seconds: float = Field(default=0, ge=0, allow_inf_nan=False)
+    detection_method: str = Field(min_length=1)
+    required_final_beats: int = Field(default=3, ge=1, le=3)
+
+    @model_validator(mode="after")
+    def _check_boundary(self):
+        if not (self.finale_start_seconds < self.narrative_end_seconds <= self.source_duration_seconds
+                and self.latest_story_evidence_seconds <= self.narrative_end_seconds
+                and abs(self.finale_start_seconds - self.narrative_end_seconds * .92) < .01
+                and abs(self.excluded_tail_seconds - (self.source_duration_seconds - self.narrative_end_seconds)) < .01):
+            raise ValueError("Narrative ending evidence and excluded tail must match the source boundary")
         return self
 
 
@@ -673,6 +697,8 @@ class NarrationArtifact(BaseModel):
     # Optional so accepted legacy Track 9 artifacts retain their old identity.
     source_transcript_path: Optional[str] = None
     source_media_path: Optional[str] = None
+    ending_anchor: Optional[NarrativeEndingAnchor] = None
+    cold_open_hook: Optional[str] = Field(default=None, min_length=1)
     # Actual successful Standard planning choice, not UI intent or provider ids.
     summary_understanding_model_id: Optional[str] = None
     summary_selection_mode: Optional[Literal["auto", "explicit"]] = None

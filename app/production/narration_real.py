@@ -17,7 +17,7 @@ from typing import List, Sequence
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from app.production.models import (
-    NarrativeBeat, NarrationArtifact, NarrationSourceRef, SourceAsset, SourceSegment, SourceTranscript,
+    NarrativeBeat, NarrativeEndingAnchor, NarrationArtifact, NarrationSourceRef, SourceAsset, SourceSegment, SourceTranscript,
 )
 from app.production.recap_budget import RecapBudget, resolve_recap_budget, timeline_sections, validate_recap_depth
 
@@ -49,6 +49,11 @@ STORYTELLER_SYSTEM_PROMPT = (
     "For extended recaps, sustain 1,400-1,680 spoken words across 45-54 chronological beats; the selected "
     "local chapter budget takes precedence on short sources and smaller presets. Aim for brisk 165-175 WPM "
     "recap energy through richer story detail, never filler or a transcript copy. "
+    "Beat 1 starts with ONE punchy stakes-hook sentence grounded in the opening evidence, then flows "
+    "straight into the opening scene. No greetings, generic trailer teasers or invented future stakes. "
+    "In the final chapter reserve the final 2-3 beats for the last 8% of ACTIVE story: climax consequence, "
+    "aftermath and the actual closing scene. If the source ends on a cliffhanger, SAY it remains unresolved; "
+    "do not invent victory, survival or a peaceful resolution. Closing credits are not story evidence. "
 )
 _CAPTION_LANGUAGE = re.compile(
     r"\b(?:a hand displays|a woman gently touches|an elderly bearded sage stands|armed guards direct|"
@@ -63,6 +68,105 @@ def validate_storyteller_language(artifact):
             raise NarrationModelOutputError(
                 f"Beat {beat.order} uses forbidden camera-caption phrasing; rewrite as connected character-driven storytelling"
             )
+
+
+_CREDITS_ONLY = re.compile(
+    r"^(?:\s*(?:closing credits|end credits|credits roll|rolling credits|scrolling credits|"
+    r"credits only|the end|end title|end card)[\s.!:;-]*)+$", re.I,
+)
+
+
+def resolve_ending_anchor(asset, transcript, visual_notes=(), *, narrative_end_seconds=None,
+                          detection_method=None, required_final_beats=3):
+    """Conservative story end: never equate absent dialogue with absent action.
+
+    A trailing run explicitly marked credits-only may shorten the boundary.
+    Unknown/silent tails retain the full source duration. A locally verified
+    boundary may be supplied (for example an operator-inspected end-credit cut).
+    """
+    duration = float(asset.duration)
+    end = duration if narrative_end_seconds is None else float(narrative_end_seconds)
+    method = detection_method or ("source_duration_no_verified_credits" if narrative_end_seconds is None
+                                  else "verified_narrative_boundary")
+    notes = sorted((n for n in visual_notes if n.get("citable", True)), key=lambda n: n["timestamp_seconds"])
+    credits_start = None
+    if narrative_end_seconds is None:
+        for note in reversed(notes):
+            if note.get("credits_only") or _CREDITS_ONLY.fullmatch(note["action"]):
+                credits_start = float(note["timestamp_seconds"])
+            else:
+                break
+        if credits_start is None and transcript.segments:
+            for segment in reversed(transcript.segments):
+                if _CREDITS_ONLY.fullmatch(segment.text):
+                    credits_start = float(segment.start)
+                else:
+                    break
+        last_dialogue = max((s.end for s in transcript.segments if not _CREDITS_ONLY.fullmatch(s.text)), default=0)
+        if credits_start is not None and credits_start >= duration * .8 and last_dialogue <= credits_start:
+            end, method = credits_start, "explicit_credits_only_tail"
+    if not math.isfinite(end) or not 0 < end <= duration:
+        raise ValueError("Verified narrative end must be inside the registered source")
+    story_times = [float(n["timestamp_seconds"]) for n in notes
+                   if n["timestamp_seconds"] <= end and not n.get("credits_only") and not _CREDITS_ONLY.fullmatch(n["action"])]
+    story_times += [min(end, s.end) for s in transcript.segments
+                    if s.start < end and not _CREDITS_ONLY.fullmatch(s.text)]
+    return NarrativeEndingAnchor(
+        source_duration_seconds=duration, narrative_end_seconds=end, finale_start_seconds=end * .92,
+        latest_story_evidence_seconds=max(story_times, default=end), excluded_tail_seconds=duration - end,
+        detection_method=method, required_final_beats=required_final_beats,
+    )
+
+
+def validate_true_ending(beats, anchor, *, require_visual=False):
+    """Fail closed on missing closing beats; citations alone cannot invent an ending."""
+    if len(beats) < anchor.required_final_beats:
+        raise NarrationModelOutputError("Final chapter has too few beats to cover climax aftermath and the true ending")
+    final = beats[-anchor.required_final_beats:]
+    for beat in final:
+        refs = [ref for ref in beat.source_refs if ref.end_seconds > anchor.finale_start_seconds
+                and ref.start_seconds < anchor.narrative_end_seconds]
+        if not refs or (require_visual and not any(
+                any(anchor.finale_start_seconds <= ts <= anchor.narrative_end_seconds
+                    for ts in ref.visual_frame_timestamps) for ref in refs)):
+            raise NarrationModelOutputError("Final 2-3 beats must narrate cited ending scenes in the final 92%-100% story window")
+        if any(ref.end_seconds > anchor.narrative_end_seconds + .001 for ref in beat.source_refs):
+            raise NarrationModelOutputError("Final beats must not use closing credits beyond the verified story boundary")
+    tolerance = min(15.0, anchor.narrative_end_seconds * .01)
+    if max(ref.end_seconds for ref in final[-1].source_refs) < anchor.narrative_end_seconds - tolerance:
+        raise NarrationModelOutputError("Final beat stops before the true closing scene; cite the latest ending evidence")
+
+
+def cold_open_instruction(enabled=True):
+    return ("Beat 1 must OPEN with one punchy, evidence-backed stakes-hook sentence, then immediately "
+            "ground into the opening scene. Preserve chronology and the requested total word budget. "
+            "Frame a specific danger, forbidden discovery or urgent conflict, not a procedural caption "
+            "such as guards giving orders. Use a strong contrast or question to spark curiosity. "
+            "Do not greet viewers or invent future events.") if enabled else ""
+
+
+def align_final_story_clip(beats, anchor, *, require_visual=False):
+    """Carry the last cited moving scene to the verified narrative boundary.
+
+    Extends only the VIDEO range, never invents dialogue or visual observations.
+    The latest citation must already pass the bounded closing-scene validator.
+    This prevents interior frame sampling from dropping the final story seconds.
+    """
+    validate_true_ending(beats, anchor, require_visual=require_visual)
+    candidates = [r for r in beats[-1].source_refs if not require_visual or r.visual_frame_timestamps]
+    last = max(candidates, key=lambda r: r.end_seconds)
+    if last.end_seconds < anchor.narrative_end_seconds - 15:
+        raise NarrationModelOutputError("Latest visual scene is too early to align the true ending clip")
+    index = beats[-1].source_refs.index(last)
+    beats[-1].source_refs[index] = last.model_copy(update={"end_seconds": anchor.narrative_end_seconds})
+
+
+def ending_instruction(anchor):
+    return (f"MANDATORY TRUE FINALE: reserve the final {anchor.required_final_beats} beats for source "
+            f"{anchor.finale_start_seconds:.3f}-{anchor.narrative_end_seconds:.3f}s (92%-100% of ACTIVE story). "
+            "Narrate the climax consequences/aftermath and the LAST narrative scene, not just the battle setup. "
+            "Cite the latest supplied story evidence in the final beat; exclude credits. If unresolved, explicitly "
+            "preserve the cliffhanger rather than inventing a resolution.")
 
 
 def cached_visual_observations(plan_dir, asset, transcript, frames, *, start, end, production_id, unit_id):

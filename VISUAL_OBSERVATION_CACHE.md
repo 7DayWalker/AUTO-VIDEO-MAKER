@@ -92,3 +92,17 @@ Final hermetic verification: **309 passed**, zero external network attempts,
 with two existing Pydantic deprecation warnings. The run includes the three
 requested Track 9 suites plus cache, attachment-guard, routing and audio regressions.
 Evidence: `C:\Projects\AUTO-VIDEO-MAKER\temp\sol_cached_ship_tests.log`.
+
+## Final operator polish — 2026-11-06
+
+The reviewed render above is retained as the before baseline. The final
+closeout replaces it with a **503.466417s, 92-shot** recap, measured at
+**-14.27 LUFS narrator / -14.01 LUFS MP4**, with the source bed at **0.05**,
+vocal-pocket EQ and speech ducking. Beat 1 now opens with a curiosity hook;
+the final three beats preserve Part I's actual unresolved ending, and the
+last source cut reaches **1803.566667s**, before the branded end card.
+
+All Stage 1 observations are byte-for-byte unchanged, Beats 2-50 and Chapters
+2-4 are retained, and **zero new vision calls** were made. See
+`C:\Projects\AUTO-VIDEO-MAKER\RECAP_FINAL_POLISH.md` for exact closing
+timestamps, audio measurements, test evidence and read-only verification.

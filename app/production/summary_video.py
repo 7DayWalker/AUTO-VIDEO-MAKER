@@ -63,6 +63,7 @@ class NarratedSummaryArtifact(BaseModel):
     background_audio_mixed: bool = False
     background_audio_volume: float = Field(default=0.0, ge=0, le=1)
     audio_mix_method: Optional[str] = None
+    audio_processing: Dict = Field(default_factory=dict)
     # Assembly-time fingerprints tie promotion to the bytes/script actually
     # assembled. Optional for existing, already signed-off Track 9 sidecars.
     file_fingerprint: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -104,6 +105,10 @@ def narration_content_hash(artifact: NarrationArtifact) -> str:
         fields.add("source_transcript_path")
     if artifact.source_media_path is not None:
         fields.add("source_media_path")
+    if artifact.ending_anchor is not None:
+        fields.add("ending_anchor")
+    if artifact.cold_open_hook is not None:
+        fields.add("cold_open_hook")
     content = artifact.model_dump(mode="json", include=fields)
     # Empty additive visual fields must not change accepted legacy fingerprints.
     for ref in content.get("source_refs", []):
@@ -215,7 +220,7 @@ def _paced_visual_shots(narration, narration_duration):
     total_weight = sum(weights)
     shots = []
     max_shot = 5.5
-    for beat, weight in zip(narration.beats, weights):
+    for beat_index, (beat, weight) in enumerate(zip(narration.beats, weights)):
         target = narration_duration * weight / total_weight
         ranges = sorted(beat.source_refs, key=lambda ref: ref.start_seconds)
         # Give every cited range airtime, even when one is much shorter than
@@ -228,6 +233,8 @@ def _paced_visual_shots(narration, narration_duration):
             travel = max(0.0, length - duration)
             for index in range(count):
                 start = ref.start_seconds + travel * index / max(1, count - 1)
+                if (beat_index == len(narration.beats) - 1 and ref == ranges[-1] and index == count - 1):
+                    start = ref.end_seconds - duration
                 end = min(ref.end_seconds, start + duration)
                 shots.append((beat.order, ref.model_copy(update={"start_seconds": start, "end_seconds": end})))
     return shots
@@ -258,6 +265,7 @@ def _chapter_visual_shots(narration, duration):
                         key=lambda ref: ref.start_seconds)
         if not ranges:
             raise ValueError("Chronological moving shots require distinct source windows for each beat")
+        latest_ending_range = max(ranges, key=lambda ref: ref.end_seconds)
         # A short dialogue citation is evidence, not an obligation to make a
         # one-second cut. Prefer the inspected visual moments that can support
         # a full moving shot; otherwise use the longest admitted source ranges.
@@ -266,11 +274,22 @@ def _chapter_visual_shots(narration, duration):
         if full:
             ranges = visual or full
         else:
-            ranges = [max(ranges, key=lambda ref: ref.end_seconds - ref.start_seconds)]
+            ranges = ([max(ranges, key=lambda ref: ref.end_seconds)] if beat_index == len(beats) - 1
+                      else [max(ranges, key=lambda ref: ref.end_seconds - ref.start_seconds)])
+        if beat_index == len(beats) - 1 and latest_ending_range not in ranges:
+            # A short closing citation is still mandatory. Long earlier refs
+            # must not win the full-shot preference and erase the true ending.
+            ranges = sorted(ranges + [latest_ending_range], key=lambda ref: ref.start_seconds)
         for index in range(take):
-            range_index = min(len(ranges) - 1, index * len(ranges) // take)
+            # Include BOTH ends of a beat's evidence. The old floor(i*N/take)
+            # mapping silently skipped the final scene when N > take.
+            def selected_range(i):
+                if take > 1:
+                    return round(i * (len(ranges) - 1) / (take - 1))
+                return 0 if beat_index == 0 else len(ranges) - 1
+            range_index = selected_range(index)
             ref = ranges[range_index]
-            siblings = [i for i in range(take) if min(len(ranges) - 1, i * len(ranges) // take) == range_index]
+            siblings = [i for i in range(take) if selected_range(i) == range_index]
             rank = siblings.index(index)
             length = ref.end_seconds - ref.start_seconds
             # Short citations get more short moving cuts, never fabricated range expansion.
@@ -279,9 +298,100 @@ def _chapter_visual_shots(narration, duration):
             for part in range(parts):
                 fraction = (rank * parts + part) / max(1, len(siblings) * parts - 1)
                 start = ref.start_seconds + max(0, length - shot_duration) * fraction
+                if beat_index == len(beats) - 1 and index == take - 1 and part == parts - 1:
+                    start = ref.end_seconds - shot_duration
                 shots.append((beat.order, ref.model_copy(update={"start_seconds": start,
                               "end_seconds": min(ref.end_seconds, start + shot_duration)})))
     return shots
+
+
+RECAP_BED_EQ = "highpass=f=80,equalizer=f=1500:t=q:w=1.0:g=-6,lowpass=f=10000"
+RECAP_DUCKING = "sidechaincompress=threshold=0.08:ratio=2:attack=12:release=180:knee=2:makeup=1"
+
+
+def _recap_mix_filter(duration, background_volume, background_mixed):
+    voice = (f"[1:a:0]aresample=48000,asetpts=PTS-STARTPTS,"
+             f"aformat=channel_layouts=stereo,atrim=duration={duration:.6f}[voice]")
+    if not background_mixed:
+        return voice + ";[voice]anull[mix]"
+    return (voice + ";[voice]asplit=2[narrator][control];"
+            f"[0:a:0]aresample=48000,asetpts=PTS-STARTPTS,{RECAP_BED_EQ},"
+            f"volume={background_volume:.4f},apad,atrim=duration={duration:.6f}[bed];"
+            f"[bed][control]{RECAP_DUCKING}[ducked];"
+            "[narrator][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]")
+
+
+def _measure_mix_separation(carrier, voice_path, duration, background_volume, background_mixed, scratch):
+    """Measure the REAL ducked source stem, not a gain-only audibility claim."""
+    from app.production.synthesis import measure_audio_loudness
+    if not background_mixed:
+        return {"narrator_to_background_rms_db": None, "source_stem_rms_db": None}
+    bed = Path(scratch) / 'ducked_source.wav'
+    filters = _recap_mix_filter(duration, background_volume, True).replace(
+        "[narrator][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]",
+        "[narrator]anullsink;[ducked]anull[mix]")
+    run_ffmpeg(['-y', '-i', str(carrier), '-i', str(voice_path), '-filter_complex', filters,
+                '-map', '[mix]', '-vn', '-c:a', 'pcm_s24le', '-ar', '48000', '-ac', '2', str(bed)],
+               'measuring the actual EQ-carved ducked movie bed')
+    source_levels = measure_audio_loudness(bed)
+    narrator_levels = measure_audio_loudness(voice_path, audio_filter='aformat=channel_layouts=stereo')
+    voice_rms, bed_rms = narrator_levels['rms_db'], source_levels['rms_db']
+    ratio = voice_rms - bed_rms if voice_rms is not None and bed_rms is not None else None
+    return {'narrator_to_background_rms_db': round(ratio, 3) if ratio is not None else None,
+            'source_stem_rms_db': bed_rms, 'narrator_stem_rms_db': voice_rms,
+            'source_stem_lufs': source_levels['integrated_lufs'], 'measurement': 'decoded_actual_ducked_stems'}
+
+
+def _master_summary_mix(input_path, output_path, *, broadcast):
+    from app.production.synthesis import (
+        measure_audio_loudness, measured_loudnorm_filter, validate_broadcast_loudness, correct_encoded_loudness,
+    )
+
+    before = measure_audio_loudness(input_path)
+    # Legacy/mock sources still assemble truthfully, but no broadcast claim is
+    # made for sandbox tones. Real TTS tracks always get an encoded loudness check.
+    filters = measured_loudnorm_filter(before) if broadcast else "anull"
+    run_ffmpeg(["-y", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy",
+                "-af", filters, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                "-movflags", "+faststart", str(output_path)], "mastering the encoded recap mix without halving narration")
+    after = measure_audio_loudness(output_path)
+    if broadcast:
+        after = correct_encoded_loudness(output_path, after)
+        validate_broadcast_loudness(after)
+    return {"target_lufs": -14.0 if broadcast else None, "before": before, "after": after,
+            "normalization": "two_pass_loudnorm" if broadcast else "none", "amix_normalize": False,
+            "source_eq": RECAP_BED_EQ, "speech_ducking": RECAP_DUCKING}
+
+
+def _shot_manifest(ordered_refs, clips, narration_duration):
+    """Measured cut timing, so source timestamps remain auditable after encoding."""
+    timeline, manifest = 0.0, []
+    for index, ((order, ref), clip) in enumerate(zip(ordered_refs, clips)):
+        actual = float(probe_media(clip).duration or 0)
+        end = min(narration_duration, timeline + actual)
+        if end > timeline:
+            manifest.append({"shot_index": index + 1, "beat_order": order,
+                "source_start_seconds": round(ref.start_seconds, 6), "source_end_seconds": round(ref.end_seconds, 6),
+                "output_start_seconds": round(timeline, 6), "output_end_seconds": round(end, 6),
+                "moving_footage_looped": actual > ref.end_seconds - ref.start_seconds + .15})
+        timeline += actual
+    return manifest
+
+
+def validate_finale_shots(narration, shots):
+    from app.production.narration_real import validate_true_ending
+    anchor = narration.ending_anchor
+    if anchor is None:
+        return
+    validate_true_ending(narration.beats, anchor, require_visual=narration.summary_mode == "pro")
+    for beat in narration.beats[-anchor.required_final_beats:]:
+        selected = [ref for order, ref in shots if order == beat.order]
+        if (not selected or any(ref.start_seconds < anchor.finale_start_seconds - .001
+                                or ref.end_seconds > anchor.narrative_end_seconds + .001 for ref in selected)):
+            raise ValueError("Final beats require moving source clips from the true ending window")
+    last = shots[-1][1]
+    if last.end_seconds < anchor.narrative_end_seconds - .05 or last.end_seconds > anchor.narrative_end_seconds + .001:
+        raise ValueError("Last moving shot must reach the latest cited ending scene and exclude credits")
 
 
 def _build_intermediate_clips(ordered_refs: List[Tuple[int, object]], source_asset: SourceAsset, source_path: Path, temp_dir: Path, *, narration_duration=None) -> List[Path]:
@@ -420,14 +530,15 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
         raise ValueError(f'source {source_path} is not valid video')
     narration_duration, narration_audio_file=_measure_narration_audio_duration(narration_audio, narration_artifact, production_id, unit_id, root_p)
     try:
-        background_volume = float(os.getenv("AVM_RECAP_BACKGROUND_VOLUME", "0.10"))
+        background_volume = float(os.getenv("AVM_RECAP_BACKGROUND_VOLUME", "0.05"))
     except (TypeError, ValueError):
-        raise ValueError("Recap background volume must be between 0 and 0.30") from None
-    if not math.isfinite(background_volume) or not 0 <= background_volume <= .30:
-        raise ValueError("Recap background volume must be between 0 and 0.30")
+        raise ValueError("Recap background volume must be between 0 and 0.055") from None
+    if not math.isfinite(background_volume) or not 0 <= background_volume <= .055:
+        raise ValueError("Recap background volume must be between 0 and 0.055 so movie audio cannot mask narration")
     source_refs = _ordered_visual_refs(narration_artifact)
     if not source_refs: raise ValueError('narrated summary requires at least one grounded visual reference')
     ordered_refs = _paced_visual_shots(narration_artifact, narration_duration)
+    validate_finale_shots(narration_artifact, ordered_refs)
     temp_base=pathlib.Path(tempfile.mkdtemp(prefix=f'track9_{production_id}_{unit_id}_'))
     try:
         clips=_build_intermediate_clips(ordered_refs, source_asset, source_path, temp_base)
@@ -451,9 +562,28 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
                         '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', str(padded)],
                        'matching moving summary footage to narration')
             clips[-1] = padded
+        if narration_artifact.ending_anchor is not None:
+            preceding = sum(float(probe_media(clip).duration or 0) for clip in clips[:-1])
+            remaining = narration_duration - preceding
+            order, last_ref = ordered_refs[-1]
+            original = max(narration_artifact.beats[-1].source_refs, key=lambda r: r.end_seconds)
+            if not 0 < remaining <= original.end_seconds - original.start_seconds:
+                raise ValueError('Cut-frame rounding cannot fit the complete true ending scene')
+            last_ref = last_ref.model_copy(update={'start_seconds': last_ref.end_seconds - remaining})
+            final_clip = temp_base / 'clip_true_ending.mp4'
+            _extract_clip_range(source_path, last_ref.start_seconds, remaining, final_clip,
+                                source_has_audio=background_mixed)
+            clips[-1] = final_clip
+            ordered_refs[-1] = (order, last_ref)
+            validate_finale_shots(narration_artifact, ordered_refs)
         target_w=source_info.width if source_info.width else 1280
         target_h=source_info.height if source_info.height else 720
         aspect='16:9' if (target_w or 0) >= (target_h or 0) else '9:16'
+        concat = temp_base / 'recap_cuts.txt'
+        concat.write_text("".join("file '" + clip.as_posix().replace("'", "'\\''") + "'\n" for clip in clips), encoding='utf-8')
+        cut_source = temp_base / 'cut_source.mp4'
+        run_ffmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', str(concat), '-c', 'copy', str(cut_source)],
+                   'retaining the original cut movie audio for recap mixing and separation measurement')
         from app.assembly.models import AssemblyProject, Scene, VideoResolution
         from app.assembly.audio_contract import AudioPolicy
         from app.assembly.pipeline import assemble_project
@@ -464,22 +594,37 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
             # settings. Avoid re-normalizing/re-encoding 100+ clips a second time.
             concat = temp_base / 'chapter_cuts.txt'
             concat.write_text("".join("file '" + clip.as_posix().replace("'", "'\\''") + "'\n" for clip in clips), encoding='utf-8')
-            assembled_file = temp_base / 'chapter_summary.mp4'
-            mix_args = (['-filter_complex',
-                         f'[0:a:0]aresample=48000,asetpts=PTS-STARTPTS,volume={background_volume:.4f},'
-                         f'apad,atrim=duration={narration_duration:.6f}[bed];'
-                         '[1:a:0]aresample=48000,asetpts=PTS-STARTPTS,volume=1.0[voice];'
-                         '[voice][bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]',
-                         '-map', '[mix]'] if background_mixed else ['-map', '1:a:0'])
-            run_ffmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', str(concat), '-i', str(narration_audio_file),
+            assembled_file = temp_base / 'chapter_summary_unmastered.mp4'
+            mix_args = ['-filter_complex', _recap_mix_filter(narration_duration, background_volume, background_mixed),
+                        '-map', '[mix]']
+            run_ffmpeg(['-y', '-i', str(cut_source), '-i', str(narration_audio_file),
                         '-map', '0:v:0', *mix_args, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
                         '-t', f'{narration_duration:.6f}', '-shortest', '-movflags', '+faststart', str(assembled_file)],
                        'muxing chronological recap cuts to the exact narration duration')
         else:
+            # Keep the shared assembly engine unchanged for non-recap jobs.
+            # Its output supplies the video carrier; remix original cut audio
+            # below with the SAME recap-specific vocal pocket/ducking chain.
             result=assemble_project(project, base_dir=pathlib.Path.cwd())
             if not result.success: raise RuntimeError(f'assembly failed: {result.errors}')
-            assembled_file=pathlib.Path(result.output_path) if result.output_path else None
+            carrier=pathlib.Path(result.output_path) if result.output_path else None
+            if not carrier or not carrier.is_file(): raise RuntimeError('summary video carrier was not assembled')
+            concat = temp_base / 'recap_cuts.txt'
+            concat.write_text("".join("file '" + clip.as_posix().replace("'", "'\\''") + "'\n" for clip in clips), encoding='utf-8')
+            assembled_file = temp_base / 'summary_unmastered.mp4'
+            run_ffmpeg(['-y', '-i', str(cut_source), '-i', str(narration_audio_file),
+                        '-i', str(carrier), '-filter_complex', _recap_mix_filter(narration_duration, background_volume, background_mixed),
+                        '-map', '2:v:0', '-map', '[mix]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                        '-t', f'{narration_duration:.6f}', '-movflags', '+faststart', str(assembled_file)],
+                       'applying the recap vocal pocket and speech ducking to standard cuts')
         if not assembled_file or not assembled_file.is_file(): raise RuntimeError(f'assembled output not present: {assembled_file}')
+        mastered = temp_base / 'summary_broadcast.mp4'
+        broadcast = bool(narration_audio.audio_processing) or narration_audio.provider == 'edge_tts'
+        separation = _measure_mix_separation(cut_source, narration_audio_file, narration_duration,
+            background_volume, background_mixed, temp_base) if broadcast else {}
+        audio_processing = _master_summary_mix(assembled_file, mastered, broadcast=broadcast)
+        audio_processing.update(separation)
+        assembled_file = mastered
         final_info=probe_media(assembled_file)
         if not final_info.has_video: raise ValueError(f'assembled file has no video stream: {assembled_file}')
         if not final_info.has_audio: raise ValueError(f'assembled file has no audio stream (narration missing): {assembled_file}')
@@ -508,10 +653,14 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
         artifact.background_audio_mixed = background_mixed
         artifact.background_audio_volume = background_volume if background_mixed else 0.0
         artifact.audio_mix_method = "amix_ducked_source" if background_mixed else "narration_only"
+        artifact.audio_processing = audio_processing
         artifact.validation.update(source_has_audio=bool(source_info.has_audio), background_audio_mixed=background_mixed,
                                    background_audio_volume=artifact.background_audio_volume, narrator_volume=1.0,
                                    audio_mix_method=artifact.audio_mix_method)
         artifact.validation['audio_video_delta_seconds'] = round(artifact.output_duration_seconds - narration_duration, 6)
+        artifact.validation['shot_manifest'] = _shot_manifest(ordered_refs, clips, narration_duration)
+        artifact.validation['ending_anchor'] = narration_artifact.ending_anchor.model_dump() if narration_artifact.ending_anchor else None
+        artifact.validation['true_ending_shots_validated'] = narration_artifact.ending_anchor is not None
         artifact.narration_content_hash = narration_content_hash(narration_artifact)
         _atomic_write_json(summary_video_metadata_path(production_id, unit_id, root=root_p), artifact.model_dump())
         return artifact

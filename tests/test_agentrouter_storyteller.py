@@ -137,7 +137,9 @@ def test_two_stage_chapters_send_frames_only_to_observer(model_id):
         prov=storyteller, visual_observer=observer, frame_loader=frames)
     assert len(observer.calls) == result.multimodal_calls == 40
     assert all(len(batch) <= 4 for batch in observer.calls)
-    assert result.text_storyteller_calls == len(storyteller.calls) == 20
+    # Chapters 1-4 keep four cached-sized batches; the finale uses three
+    # slightly wider batches so its last passage has three ending beats.
+    assert result.text_storyteller_calls == len(storyteller.calls) == 19
     assert not storyteller.visual_calls
     assert result.visual_understanding_strategy == "visual_notes_then_text_storyteller"
     assert result.visual_observer_model_id == observer.model and result.storytelling_provider == "agentrouter"
@@ -147,7 +149,7 @@ def test_two_stage_chapters_send_frames_only_to_observer(model_id):
         assert len(payload["visual_action_notes"]) == len(payload["frames"])
         require_text_only(json.dumps(payload))
         assert "never-read" not in json.dumps(payload)
-        assert len(payload["frames"]) <= 8  # Bounded text-only quarters, not a full chapter.
+        assert len(payload["frames"]) <= (11 if payload["chapter_index"] == 5 else 8)
     assert {row["id"] for batch in storyteller.chapters for row in batch["transcript_segments"]} == set(range(len(transcript.segments)))
     starts = [min(ref.start_seconds for ref in beat.source_refs) for beat in result.beats]
     assert starts == sorted(starts)
