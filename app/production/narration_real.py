@@ -13,6 +13,9 @@ import math
 import re
 import threading
 from copy import copy
+from contextvars import ContextVar
+from functools import wraps
+from uuid import uuid4
 from datetime import datetime
 from typing import List, Sequence
 
@@ -32,8 +35,43 @@ from app.production.token_budget import text_token_budget
 logger = logging.getLogger(__name__)
 
 CHAPTER_OUTPUT_TOKENS = 16384
+_NARRATION_REQUEST_ID = ContextVar("narration_request_id", default=None)
 _VISION_QUARANTINE = {}
 _VISION_QUARANTINE_LOCK = threading.Lock()
+
+
+def narration_request(function):
+    """One retry allowance per explicit build invocation, including route loops.
+
+    A new POST gets a new scope. Nested chapter/writer retries share it, while
+    concurrently running units have separate contexts. Disk counts are audit
+    history, never a permanent ban on the operator's next Resume request.
+    """
+    @wraps(function)
+    def scoped(*args, **kwargs):
+        if _NARRATION_REQUEST_ID.get() is not None:
+            return function(*args, **kwargs)  # Nested work cannot buy a fresh allowance.
+        token = _NARRATION_REQUEST_ID.set(uuid4().hex)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _NARRATION_REQUEST_ID.reset(token)
+    return scoped
+
+
+def narration_request_id():
+    return _NARRATION_REQUEST_ID.get() or uuid4().hex
+
+
+def chapter_attempt_state(saved, request_id):
+    """Retain recovery shape but reset only the new invocation's attempt count."""
+    state = dict(saved) if isinstance(saved, dict) else {}
+    if state.get("request_id") != request_id:
+        previous = state.get("calls", 0)
+        state["previous_request_calls"] = previous if type(previous) is int and previous >= 0 else 0
+        state.update(request_id=request_id, calls=0)
+        state.pop("claimed_parts", None)
+    return state
 
 
 def quarantine_vision_observer(provider, exc):

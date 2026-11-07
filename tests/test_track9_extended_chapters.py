@@ -13,7 +13,7 @@ from app.production.narration import build_grounded_narration_plan, validate_nar
 from app.production.narration_chapters import build_chapter_plan, chapter_windows
 from app.production.recap_budget import resolve_recap_budget, requires_chapter_planning
 from app.production.storage import load_narration_artifact, save_narration_artifact
-from tests.track9_narration_fakes import ChapterNarrationProvider, story_evidence
+from tests.track9_narration_fakes import ChapterNarrationProvider, story_evidence, chapter_prompt_evidence
 
 PID, UID = "prd_20261104_extended_test_001", "unit-001"
 
@@ -72,7 +72,7 @@ def test_validated_chapters_resume_after_provider_failure_without_final_artifact
     path = tmp_path / "narration_chapters.partial.json"
     class Interrupted(ChapterNarrationProvider):
         def generate_multimodal(self, prompt, *args, **kwargs):
-            evidence = json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+            evidence = chapter_prompt_evidence(prompt)
             if evidence["chapter_index"] == 3:
                 raise ValueError("local interruption")
             return super().generate_multimodal(prompt, *args, **kwargs)
@@ -225,7 +225,7 @@ def _install_pro_pool(monkeypatch, providers):
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_pro_auto_fails_over_only_to_eligible_vision_models_explicit_stays_locked(monkeypatch, tmp_path, explicit):
+def test_pro_auto_and_explicit_never_renew_spent_chapter_allowance_via_another_model(monkeypatch, tmp_path, explicit):
     providers = [ChapterNarrationProvider(error=LLMConnectionError("fixture", "HTTP 503")), ChapterNarrationProvider()]
     models = _install_pro_pool(monkeypatch, providers)
     asset, transcript = story_evidence()
@@ -236,15 +236,8 @@ def test_pro_auto_fails_over_only_to_eligible_vision_models_explicit_stays_locke
     def run():
         return build_grounded_narration_plan(PID, UID, asset, transcript, summary_mode="pro", mock_mode=False,
                                             target_length_preset="extended", root=tmp_path, **kwargs)
-    if explicit:
-        with pytest.raises(LLMConnectionError): run()
-        assert not providers[1].calls
-    else:
-        artifact = run()
-        assert artifact.summary_understanding_model_id == models[1].id
-        assert artifact.summary_failover_used and artifact.understanding_method == "frame_sequence"
-        assert artifact.summary_mode == "pro" and artifact.chapter_count == 5
-        assert len(providers[1].calls) == 5
+    with pytest.raises(LLMConnectionError): run()
+    assert not providers[1].calls
     assert len(providers[0].calls) == 2  # At most one retry, including fast overloads.
 
 
@@ -372,7 +365,7 @@ def test_epic_chapter_resume_does_not_discard_twelve_completed_chapters(tmp_path
     checkpoint = tmp_path / "narration_chapters.partial.json"
     class Interrupted(ChapterNarrationProvider):
         def generate(self, prompt, *args, **kwargs):
-            evidence = json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+            evidence = chapter_prompt_evidence(prompt)
             if evidence["chapter_index"] == 13:
                 raise ValueError("hermetic chapter interruption")
             return super().generate(prompt, *args, **kwargs)

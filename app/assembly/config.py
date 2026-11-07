@@ -92,6 +92,8 @@ VOICEOVER_MAX_OVERAGE = 5.0
 
 # FFmpeg command timeout (seconds)
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "600"))  # 10 minutes
+# Independent bounded metadata timeout for heavily paged local workstations.
+FFPROBE_TIMEOUT = int(os.getenv("FFPROBE_TIMEOUT", "30"))
 
 
 def ensure_assembly_directories() -> None:

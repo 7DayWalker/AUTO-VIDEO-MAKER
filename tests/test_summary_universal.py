@@ -10,7 +10,7 @@ import pytest
 from app.content.exceptions import LLMConnectionError, LLMOutputTruncatedError, LLMModelUnavailableError, LLMQuotaError
 from app.production.narration_chapters import build_chapter_plan, chapter_windows, _chapter_budget
 from app.production.recap_budget import resolve_recap_budget
-from tests.track9_narration_fakes import ChapterNarrationProvider, story_evidence
+from tests.track9_narration_fakes import ChapterNarrationProvider, story_evidence, chapter_prompt_evidence
 from tests.test_agentrouter_storyteller import Observer, frames
 from tests.test_track9_extended_chapters import frame_loader
 
@@ -42,7 +42,7 @@ def test_protected_nine_chapters_are_never_regenerated(tmp_path):
     path = tmp_path / "narration_chapters.partial.json"
     class Interrupted(ChapterNarrationProvider):
         def generate(self, prompt, *args, **kwargs):
-            evidence = json.loads(prompt.split("evidence:\n")[1].split("\nRequired JSON schema:")[0])
+            evidence = chapter_prompt_evidence(prompt)
             if evidence["chapter_index"] == 10:
                 raise ValueError("interrupted before final chapter")
             return super().generate(prompt, *args, **kwargs)
@@ -62,7 +62,7 @@ def test_protected_nine_chapters_are_never_regenerated(tmp_path):
             context_tokens=128000, checkpoint_path=path, minimum_cached_chapters=9)
 
 
-def test_paid_retry_claims_survive_restarts(tmp_path, monkeypatch):
+def test_new_explicit_build_resets_exhausted_claims_but_each_request_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr("app.production.narration_chapters.time.sleep", lambda seconds: None)
     asset, transcript = story_evidence()
     path = tmp_path / "chapters.json"
@@ -71,12 +71,12 @@ def test_paid_retry_claims_survive_restarts(tmp_path, monkeypatch):
         build_chapter_plan("p", "u", asset, transcript, budget=resolve_recap_budget(asset.duration), prov=provider, checkpoint_path=path)
     assert len(provider.calls) == 2
     fresh = ChapterNarrationProvider(name="agentrouter", model="gpt-6.1-sol")
-    with pytest.raises(RuntimeError, match="credit guard"):
-        build_chapter_plan("p", "u", asset, transcript, budget=resolve_recap_budget(asset.duration), prov=fresh, checkpoint_path=path)
-    assert not fresh.calls
+    result = build_chapter_plan("p", "u", asset, transcript, budget=resolve_recap_budget(asset.duration), prov=fresh, checkpoint_path=path)
+    assert len(fresh.calls) == result.chapter_count
 
 
-def test_whole_pro_chapter_only_splits_after_truncation_and_never_retries_halves():
+@pytest.mark.parametrize("legacy_split", [False, True])
+def test_whole_pro_chapter_retries_truncation_once_or_resumes_saved_halves(legacy_split):
     from app.production.narration_storyteller import write_storyteller_chapter
     asset, transcript = story_evidence()
     start, end, rows = chapter_windows(asset.duration, transcript)[0]
@@ -89,21 +89,21 @@ def test_whole_pro_chapter_only_splits_after_truncation_and_never_retries_halves
     class Truncated(ChapterNarrationProvider):
         def generate(self, *args, **kwargs):
             response = super().generate(*args, **kwargs)
-            if len(self.calls) == 1:
+            if not legacy_split and len(self.calls) == 1:
                 raise LLMOutputTruncatedError()
             return response
     provider = Truncated(name="agentrouter", model="gpt-6.1-sol")
-    cache, state = {}, {}
+    cache, state = {}, ({"calls": 3, "split": True, "claimed_parts": ["split:0", "split:1"]} if legacy_split else {})
     result, calls = write_storyteller_chapter(provider, "Grounded recap", payload, asset=asset, frames=supplied,
         local_budget=budget, deadline=-10, cached_batches=cache, call_state=state,
         on_batch=lambda key, value: cache.update({key: value}))
-    assert calls == len(provider.calls) == 3
-    assert state["split"] and set(cache) == {"split:0", "split:1"}
+    assert calls == len(provider.calls) == 2
+    assert set(cache) == ({"split:0", "split:1"} if legacy_split else {"whole"})
     assert all(call["max_tokens"] == 16384 for call in provider.calls)
     assert len(result["beats"]) == budget.max_beats
     again, _ = write_storyteller_chapter(provider, "Grounded recap", payload, asset=asset, frames=supplied,
         local_budget=budget, deadline=-10, cached_batches=cache, call_state=state)
-    assert again == result and len(provider.calls) == 3
+    assert again == result and len(provider.calls) == 2
 
 
 @pytest.mark.parametrize("failure", [LLMModelUnavailableError(), LLMQuotaError("gemini"), LLMConnectionError("gemini", "socket failed")])
@@ -272,7 +272,7 @@ def test_oserror_after_paid_chapter_never_cross_model_regenerates(monkeypatch, t
     from tests.test_track9_extended_chapters import _install_pro_pool, PID, UID
     class BrokenAfterFirst(ChapterNarrationProvider):
         def generate(self, prompt, *args, **kwargs):
-            evidence = json.loads(prompt.split("evidence:\n")[1].split("\nRequired JSON schema:")[0])
+            evidence = chapter_prompt_evidence(prompt)
             if evidence["chapter_index"] == 2:
                 raise ConnectionError("synthetic interrupted paid route")
             return super().generate(prompt, *args, **kwargs)

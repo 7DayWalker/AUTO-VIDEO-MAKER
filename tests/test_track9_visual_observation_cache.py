@@ -161,7 +161,7 @@ def test_transient_storyteller_transport_failure_retries_only_missing_text_batch
     original_call_count = len(provider.calls)
     again, calls = write_storyteller_chapter(provider, "Grounded recap", payload, asset=asset, frames=supplied,
         local_budget=local, deadline=time.monotonic() + 30, cached_batches=cache)
-    assert result == again and len(provider.calls) == original_call_count and calls == 2
+    assert result == again and len(provider.calls) == original_call_count and calls == 0
 
 
 def test_cached_pro_route_does_not_decode_or_extract_any_frame(monkeypatch, tmp_path):

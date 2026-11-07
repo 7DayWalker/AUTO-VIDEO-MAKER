@@ -255,6 +255,35 @@ def validate_recap_depth(artifact, budget, transcript, source_duration, allowed_
         beat_words = len(beat.narration_text.split())
         if beat_words < budget.min_words_per_beat or not 2 <= len(sentences) <= 4:
             raise ValueError(f"Beat {beat.order} has {len(sentences)} sentences and {beat_words} words; each beat needs 2-4 varied sentences, normally 26-36 words for extended recaps, not one-line blurbs")
+    validate_recap_coverage(artifact, budget, transcript, source_duration, allowed_ids)
+
+
+def validate_standard_depth(artifact, budget, transcript, source_duration):
+    """Grounding-first Standard: editorial targets are not paid-output gates.
+
+    Keep coarse abuse/empty-blurb bounds, not exact word/sentence or citation
+    density targets. In particular 180 words for a 250-word chapter is useful
+    grounded work, not a reason to buy another response. Original budgets remain
+    on the artifact; measured variation is reported, never padded or fabricated.
+    """
+    count = len(artifact.beats)
+    words = len(artifact.narration_text.split())
+    minimum_beats = max(1, math.floor(budget.min_beats * .5))
+    maximum_beats = min(MAX_RECAP_BEATS, math.ceil(budget.max_beats * 1.5))
+    minimum_words = max(1, math.floor(budget.min_narration_words * .5))
+    maximum_words = max(64, math.ceil(budget.max_narration_words * 1.75))
+    if not minimum_beats <= count <= maximum_beats or not minimum_words <= words <= maximum_words:
+        raise ValueError("Standard chapter is empty, grossly underdeveloped or exceeds the bounded narration size")
+    # Counts and sentence lengths are editorial; source coverage is not.
+    validate_recap_coverage(artifact, budget, transcript, source_duration)
+    return {"policy": "dialogue_grounding_first_v1", "beats": count, "words": words,
+            "nominal_min_words": budget.min_narration_words, "nominal_max_words": budget.max_narration_words,
+            "nominal_min_beats": budget.min_beats, "nominal_max_beats": budget.max_beats,
+            "outside_nominal_target": not (budget.min_beats <= count <= budget.max_beats
+                and budget.min_narration_words <= words <= budget.max_narration_words)}
+
+
+def validate_recap_coverage(artifact, budget, transcript, source_duration, allowed_ids=None):
     if not budget.require_story_coverage:
         return
     beat_ids = [set(index for ref in beat.source_refs for index in ref.transcript_segment_ids) for beat in artifact.beats]

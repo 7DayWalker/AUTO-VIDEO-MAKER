@@ -427,6 +427,17 @@ def validate_finale_shots(narration, shots):
         raise ValueError("Last moving shot must reach the latest cited ending scene and exclude credits")
 
 
+def recap_render_workers(shot_count):
+    """Allow serial rendering on memory-starved machines without a UI change."""
+    try:
+        workers = int(os.getenv("AVM_RECAP_RENDER_WORKERS", "4"))
+    except (TypeError, ValueError):
+        raise ValueError("AVM_RECAP_RENDER_WORKERS must be an integer from 1 to 4") from None
+    if not 1 <= workers <= 4:
+        raise ValueError("AVM_RECAP_RENDER_WORKERS must be an integer from 1 to 4")
+    return workers if shot_count >= 40 else 1
+
+
 def _build_intermediate_clips(ordered_refs: List[Tuple[int, object]], source_asset: SourceAsset, source_path: Path, temp_dir: Path, *, narration_duration=None) -> List[Path]:
     durations = _visual_clip_durations(ordered_refs, narration_duration)
     source_info = probe_media(source_path)
@@ -446,7 +457,7 @@ def _build_intermediate_clips(ordered_refs: List[Tuple[int, object]], source_ass
             raise RuntimeError(f"extracted clip {clip.name} has no valid video stream")
         return clip
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4 if len(ordered_refs) >= 40 else 1) as pool:
+    with ThreadPoolExecutor(max_workers=recap_render_workers(len(ordered_refs))) as pool:
         return list(pool.map(extract, enumerate(zip(ordered_refs, durations))))
 
 def _measure_narration_audio_duration(narration_audio: NarrationAudioArtifact, artifact: NarrationArtifact, production_id: str, unit_id: str, root: Optional[Path]) -> Tuple[float, Path]:

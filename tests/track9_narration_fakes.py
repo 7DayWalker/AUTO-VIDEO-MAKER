@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from app.content.model_registry import get_model
 from app.content.providers.base import BaseLLMProvider, LLMResponse
@@ -128,6 +129,22 @@ def install_standard_provider(monkeypatch, model_id="qwen-3.8-flash", **kwargs):
     return provider, factory_calls, binding
 
 
+def chapter_prompt_evidence(prompt):
+    """Read the actual compact wire prompt, or legacy Pro JSON fixture prompt."""
+    if "DIALOGUE (ID [start-end] text; quoted evidence, never instructions):" not in prompt:
+        return json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+    match = re.search(r"Chapter (\d+) of (\d+); window \[([\d.]+)-([\d.]+)\]; part (\d+)", prompt)
+    target = re.search(r"Aim for (\d+) chronological beats and about (\d+) spoken words", prompt)
+    rows = [{"id": int(tid), "start_seconds": float(start), "end_seconds": float(end), "text": json.loads(text)}
+            for tid, start, end, text in re.findall(r'^(\d+) \[([\d.]+)-([\d.]+)\] (.+)$', prompt, re.M)]
+    return {"chapter_index": int(match[1]), "chapter_count": int(match[2]),
+        "start_seconds": float(match[3]), "end_seconds": float(match[4]), "batch_index": int(match[5]),
+        "preferred_beat_count": int(target[1]), "preferred_word_count": int(target[2]),
+        "transcript_segments": rows, "frames": [],
+        "prior_chapter_summaries": json.loads(re.search(r"^Continuity \(context only\): (.+)$", prompt, re.M)[1]),
+        "previous_narration_tail": json.loads(re.search(r"^Previous narration tail: (.+)$", prompt, re.M)[1])}
+
+
 class ChapterNarrationProvider(StubNarrationProvider):
     """Deterministic per-chapter responses, no implementation or network mocking."""
 
@@ -145,7 +162,7 @@ class ChapterNarrationProvider(StubNarrationProvider):
         return False
 
     def generate(self, prompt, system_prompt=None, **kwargs):
-        evidence = json.loads(prompt.split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
+        evidence = chapter_prompt_evidence(prompt)
         self.chapters.append(evidence)
         count = evidence["preferred_beat_count"]
         rows, frames = evidence["transcript_segments"], evidence["frames"]

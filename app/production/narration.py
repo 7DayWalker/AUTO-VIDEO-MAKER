@@ -35,6 +35,7 @@ from app.production.storage import (
     save_narration_audio,
 )
 from app.production.recap_budget import chapter_planning_timeout_seconds, resolve_recap_budget
+from app.production.narration_real import narration_request
 from app.voice.config import (
     TTS_OUTPUT_FORMAT,
     TTS_PITCH,
@@ -321,14 +322,21 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
                 from app.production.storage import unit_plan_dir
                 checkpoint = unit_plan_dir(production_id, unit_id, root=root) / "narration_chapters.partial.json"
                 retained_chapters = False
+                chapter_attempted = False
                 if checkpoint.is_file():
                     try:
-                        retained_chapters = bool(json.loads(checkpoint.read_text(encoding="utf-8")).get("chapters"))
+                        saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+                        retained_chapters = bool(saved.get("chapters"))
+                        from app.production.narration_real import narration_request_id
+                        claim = (saved.get("pending_story") or {}).get("request_state") or {}
+                        chapter_attempted = (claim.get("request_id") == narration_request_id()
+                            and claim.get("calls", 0) > 0)
                     except (OSError, json.JSONDecodeError):
                         pass
-                if retained_chapters:
+                if retained_chapters or chapter_attempted:
                     # Raise outside the checkpoint-read try: network exceptions
                     # may themselves subclass OSError and must not be swallowed.
+                    # A provider/model fallback must not renew chapter credits.
                     raise
                 continue
             artifact.summary_understanding_model_id = resolved.canonical_model_id
@@ -355,6 +363,7 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
     )
 
 
+@narration_request
 def build_grounded_narration_plan(
     production_id: str,
     unit_id: str,
@@ -597,6 +606,13 @@ def _pace_long_narration(output_path, artifact, validation):
     minimum = max(budget.min_duration_seconds, words * 60 / 180)
     maximum = min(budget.max_duration_seconds, words * 60 / 155)
     if minimum > maximum:
+        if (getattr(artifact, "summary_mode", None) == "standard"
+                and getattr(artifact, "narration_quality", {}).get("policy") == "dialogue_grounding_first_v1"):
+            # Accepted grounded prose is not thrown away after paying for TTS.
+            # Keep natural cadence and report actual duration, rather than pad,
+            # truncate or demand another script because a target was missed.
+            artifact.narration_quality["runtime_target_unattainable_at_natural_cadence"] = True
+            return validation, original, 1.0
         raise ValueError("Narration word density cannot meet both runtime and 155-180 WPM; rebuild the script")
     if minimum <= original <= maximum:
         return validation, original, 1.0
@@ -604,6 +620,10 @@ def _pace_long_narration(output_path, artifact, validation):
     target = min(max(preferred, minimum + .03), maximum - .03) if maximum - minimum > .06 else (minimum + maximum) / 2
     factor = original / target
     if not .75 <= factor <= 1.35:
+        if (getattr(artifact, "summary_mode", None) == "standard"
+                and getattr(artifact, "narration_quality", {}).get("policy") == "dialogue_grounding_first_v1"):
+            artifact.narration_quality["runtime_target_unattainable_at_natural_cadence"] = True
+            return validation, original, 1.0
         raise ValueError("Narration cannot meet the requested runtime at a natural speaking pace; rebuild with a suitable word budget or voice")
     from app.assembly.ffmpeg import run_ffmpeg
     paced = output_path.with_name(output_path.stem + ".paced" + output_path.suffix)

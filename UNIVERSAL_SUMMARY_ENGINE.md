@@ -1,5 +1,35 @@
 # Universal source-length summary hardening
 
+## 2026-11-07 backend-only correction: explicit Resume is a new allowance
+
+The original persisted credit guard incorrectly made a failed chapter impossible
+to retry in a later user request. This is superseded: each narration invocation
+now has its own request ID. Nested retries and same-request route handling share
+that ID and stay capped at one retry, while a new Generate/Resume POST resets
+only the unfinished chapter's attempt count. Completed chapters and validated
+partial storyteller results remain reusable. Old checkpoint counters migrate
+automatically; the previous count is retained as diagnostic history.
+
+Standard chapter generation now uses the shared text storyteller engine with
+compact `ID [start-end] "dialogue"` evidence, a small JSON example, 16,384 output
+tokens, low reasoning and a fresh 300-second socket timeout. All dialogue IDs
+remain present; the JSON schema and repeated word-count instructions are not
+sent. Beat/word counts are targets, with broad empty/gross-size safeguards rather
+than strict editorial rejection. Actual counts and deviations are recorded in
+`narration_quality`, not hidden through filler or truncation. Invalid/unseen IDs,
+wrong-source citations, nonchronological or missing source coverage still fail.
+
+For Standard only, a silent source tail ends narration at the last transcribed
+dialogue, explicitly labelled `last_transcribed_dialogue`. It is not classified
+as credits or filled with fabricated visual events. Pro's visual ending checks
+are unchanged. Auto/Feature checkpoints are interchangeable only when every
+effective budget value, source, transcript, model and chapter boundary matches.
+
+This correction does not change or access any K3 frontend file. Existing Core
+single-flight protection still rejects simultaneous writes. Without a separate
+client intent identifier, Core cannot distinguish a manual POST from a new
+client recovery POST; the one-retry limit is per received build invocation.
+
 ## Supported workflow and honest limits
 
 Both real Summary modes retain the existing source-grounded validation, recap
@@ -28,12 +58,12 @@ File body, not multipart parsing or a base64 JSON envelope.
   setting asks for high effort. The private proxy preserves the nested Responses
   object and converts Chat's equivalent field without dropping token budgets.
 - **Credit guard:** one sequential whole-chapter call. One repair/transport retry
-  is the ceiling. A proven first-call truncation in Pro may instead use one
-  recovery round of two sequential halves (at most three requests total); those
-  halves are not retried. Claims are saved *before* dispatch, so reconnecting or
-  restarting cannot reset the allowance. This intentionally fails closed if a
-  provider bills work but loses its response; exactly-once billing cannot be
-  promised without upstream idempotency support.
+  is the ceiling, including Pro truncation (at most two requests per chapter per
+  invocation). Legacy saved recovery halves are reusable but the old three-call
+  path is removed. Claims are saved *before* dispatch, so reconnecting or
+  retrying internally cannot reset the allowance. A NEW operator Resume request
+  does reset unfinished attempts, as corrected above. Exactly-once billing
+  cannot be promised without upstream idempotency support.
 - **Durability:** Standard and Pro persist every completed chapter; completed
   checkpoints remain after the final artifact save. Source/transcript/budget/
   storyteller identity is checked, with stable observer-independent identity

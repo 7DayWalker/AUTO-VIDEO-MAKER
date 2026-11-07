@@ -16,6 +16,7 @@ from app.assembly.config import (
     FFMPEG_PATH,
     FFPROBE_PATH,
     FFMPEG_TIMEOUT,
+    FFPROBE_TIMEOUT,
 )
 from app.assembly.exceptions import (
     FFmpegNotFoundError,
@@ -96,10 +97,14 @@ class FFmpegRunner:
         ffmpeg_path: str = FFMPEG_PATH,
         ffprobe_path: str = FFPROBE_PATH,
         timeout: int = FFMPEG_TIMEOUT,
+        probe_timeout: int = FFPROBE_TIMEOUT,
     ):
+        if type(probe_timeout) is not int or not 1 <= probe_timeout <= 300:
+            raise ValueError("FFPROBE_TIMEOUT must be an integer between 1 and 300 seconds")
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
         self.timeout = timeout
+        self.probe_timeout = probe_timeout
         self._ffmpeg_available: Optional[bool] = None
         self._ffprobe_available: Optional[bool] = None
     
@@ -270,7 +275,7 @@ class FFmpegRunner:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=self.probe_timeout,
             )
             
             if result.returncode != 0:
@@ -283,6 +288,11 @@ class FFmpegRunner:
             data = json.loads(result.stdout)
             return self._parse_probe_result(path, data)
             
+        except subprocess.TimeoutExpired:
+            raise FFmpegExecutionError(
+                command="ffprobe metadata inspection", exit_code=-1,
+                stderr=f"Media probe timed out after {self.probe_timeout} seconds",
+            ) from None
         except json.JSONDecodeError as e:
             raise FFmpegExecutionError(
                 command=self._format_command(cmd),

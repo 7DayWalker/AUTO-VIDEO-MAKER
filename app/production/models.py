@@ -674,6 +674,7 @@ class NarrationArtifact(BaseModel):
     target_duration_seconds: float = Field(gt=0.0)
     target_length_preset: Optional[RecapLengthPreset] = None
     narration_budget: Optional[RecapBudget] = None
+    narration_quality: Dict = Field(default_factory=dict)
     summary_mode: Optional[Literal["standard", "pro"]] = None
     understanding_method: Optional[Literal["transcript_audio", "frame_sequence", "native_video"]] = None
     planning_strategy: Optional[Literal["windowed", "multi_chapter"]] = None

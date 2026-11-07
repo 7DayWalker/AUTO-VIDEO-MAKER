@@ -22,8 +22,9 @@ from app.production.narration_real import (
     align_final_story_clip,
     visual_observer_attribution,
     CHAPTER_OUTPUT_TOKENS, chapter_request_provider,
+    chapter_attempt_state, narration_request_id,
 )
-from app.production.recap_budget import validate_recap_depth, chapter_planning_timeout_seconds
+from app.production.recap_budget import validate_recap_depth, validate_standard_depth, chapter_planning_timeout_seconds
 from app.production.token_budget import text_token_budget
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,78 @@ class _ChapterPlan(BaseModel):
     beats: list[_ChapterBeat] = Field(min_length=1, max_length=54)
 
 
+class _StandardBeat(_ChapterBeat):
+    source_refs: list[_ChapterCitation] = Field(min_length=1, max_length=128)
+
+
+class _StandardPlan(_ChapterPlan):
+    beats: list[_StandardBeat] = Field(min_length=1, max_length=54)
+
+
+def normalize_standard_chapter(data, rows, asset_id=None):
+    """Normalize harmless JSON/citation shape differences without inventing prose.
+
+    IDs remain the grounding authority. A timestamp-only reference may resolve
+    only to supplied overlapping dialogue. Oversized citation lists are split,
+    never silently truncated. Invalid IDs/assets/frames still fail validation.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("beats"), list) or not data["beats"]:
+        raise NarrationModelOutputError("Standard chapter requires non-empty JSON beats")
+    if not rows:
+        raise NarrationModelOutputError("Standard chapter requires dialogue evidence")
+    allowed_ids = {row["id"] for row in rows}
+    window_start = min(row["start_seconds"] for row in rows)
+    window_end = max(row["end_seconds"] for row in rows)
+    normalized = []
+    for index, beat in enumerate(data["beats"], 1):
+        if not isinstance(beat, dict):
+            raise NarrationModelOutputError("Standard beat must be a JSON object")
+        text = beat.get("narration_text", beat.get("text", beat.get("narration")))
+        if not isinstance(text, str) or not text.strip():
+            raise NarrationModelOutputError("Standard beat must contain narration")
+        refs = beat.get("source_refs")
+        if refs is None:
+            refs = [{key: value for key, value in beat.items() if key in {
+                "transcript_segment_ids", "segment_ids", "start_seconds", "end_seconds", "start", "end"}}]
+        if isinstance(refs, dict):
+            refs = [refs]
+        if not isinstance(refs, list) or not refs:
+            raise NarrationModelOutputError("Standard beat requires dialogue evidence")
+        citations = []
+        for ref in refs:
+            if not isinstance(ref, dict) or ref.get("frame_ids"):
+                raise NarrationModelOutputError("Standard citations must reference dialogue, not unseen frames")
+            if ref.get("asset_id") is not None and ref["asset_id"] != asset_id:
+                raise NarrationModelOutputError("Standard citation belongs to another source asset")
+            ids = ref.get("transcript_segment_ids", ref.get("segment_ids"))
+            left, right = ref.get("start_seconds", ref.get("start")), ref.get("end_seconds", ref.get("end"))
+            if left is not None or right is not None:
+                from app.production.narration_real import _seconds
+                if left is None or right is None:
+                    raise NarrationModelOutputError("Both source timestamps are required")
+                left, right = _seconds(left), _seconds(right)
+                if (not math.isfinite(left) or not math.isfinite(right) or not left < right
+                        or left < window_start - .05 or right > window_end + .05):
+                    raise NarrationModelOutputError("Standard citation timestamps are outside supplied dialogue")
+                overlapping = [row["id"] for row in rows if row["start_seconds"] < right and row["end_seconds"] > left]
+                if ids is None:
+                    ids = overlapping
+            if not isinstance(ids, list) or not ids:
+                raise NarrationModelOutputError("Standard beat requires supplied transcript IDs")
+            ids = [int(tid) if isinstance(tid, str) and tid.isdigit() else tid for tid in ids]
+            if any(type(tid) is not int or tid not in allowed_ids for tid in ids):
+                raise NarrationModelOutputError("Chapter cites transcript IDs outside its supplied window")
+            if left is not None and any(tid not in overlapping for tid in ids):
+                raise NarrationModelOutputError("Standard citation timestamps do not match its dialogue IDs")
+            ids = list(dict.fromkeys(ids))
+            citations.extend({"transcript_segment_ids": ids[offset:offset + 12]} for offset in range(0, len(ids), 12))
+        normalized.append({"title": str(beat.get("title") or f"Story beat {index}")[:160],
+                           "narration_text": text.strip(), "source_refs": citations})
+    summary = data.get("summary")
+    return {"summary": (summary.strip() if isinstance(summary, str) and summary.strip()
+                        else normalized[-1]["narration_text"])[:600], "beats": normalized}
+
+
 def chapter_windows(duration, transcript, *, context_tokens=None, visual=False, min_chapters=1, max_chapters=16):
     """Preset-sized chronological chapters; subdivide dense evidence, never truncate it."""
     if not 1 <= min_chapters <= max_chapters <= 40:
@@ -110,7 +183,7 @@ def _chapter_budget(budget, index, count):
 
 def _chapter_beats(data, asset, rows, frames, start, end, *, visual, offset, validate_coverage=True):
     try:
-        plan = _ChapterPlan.model_validate(data)
+        plan = (_ChapterPlan if visual else _StandardPlan).model_validate(data)
     except ValidationError:
         raise NarrationModelOutputError("Chapter JSON does not match the required schema") from None
     segments = {row["id"]: row for row in rows}
@@ -167,6 +240,8 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
     """Each completion writes final beats for ONE chapter, with rolling context."""
     visual = frame_loader is not None
     composite = visual and visual_observer is not None
+    text_storyteller = composite or not visual
+    request_id = narration_request_id()
     if context_tokens is None:
         from app.content.model_registry import get_model
         try:
@@ -189,13 +264,29 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
     identity = hashlib.sha256(json.dumps(identity_fields, sort_keys=True).encode()).hexdigest()
     stable_identity = hashlib.sha256(json.dumps({key: value for key, value in identity_fields.items()
         if key != "observer_model"}, sort_keys=True).encode()).hexdigest()
+    compatible_identities = {identity}
+    compatible_stable_identities = {stable_identity}
+    # Auto resolves to Feature for this movie. Switching that label must not
+    # discard paid chapters when EVERY effective duration/depth setting matches.
+    # No source, transcript, model or genuine budget change is admitted here.
+    from app.production.recap_budget import RECAP_PRESETS, resolve_recap_budget
+    for preset in RECAP_PRESETS:
+        if preset in {budget.preset, "custom"}:
+            continue
+        equivalent = resolve_recap_budget(asset.duration, target_length_preset=preset)
+        if equivalent.model_dump(exclude={"preset"}) == budget.model_dump(exclude={"preset"}):
+            alternate = {**identity_fields, "budget": equivalent.model_dump()}
+            compatible_identities.add(hashlib.sha256(json.dumps(alternate, sort_keys=True).encode()).hexdigest())
+            compatible_stable_identities.add(hashlib.sha256(json.dumps({key: value for key, value in alternate.items()
+                if key != "observer_model"}, sort_keys=True).encode()).hexdigest())
     cached = []
     pending_visual = None
     pending_story = None
     if checkpoint_path is not None and Path(checkpoint_path).is_file():
         try:
             checkpoint = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
-            if checkpoint.get("identity") == identity or checkpoint.get("stable_identity") == stable_identity:
+            if (checkpoint.get("identity") in compatible_identities
+                    or checkpoint.get("stable_identity") in compatible_stable_identities):
                 candidate = checkpoint.get("chapters", [])
                 cached = candidate if isinstance(candidate, list) else []
                 pending_visual = checkpoint.get("pending_visual")
@@ -365,8 +456,9 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
         # remaining chapters to enforce the final word range exactly.
         used_words = sum(chapter.word_count for chapter in chapters)
         remaining_max = sum(_share(budget.max_narration_words, i, len(windows)) for i in range(index + 1, len(windows)))
-        local = local.model_copy(update={"min_narration_words": max(
-            math.floor(local.min_narration_words * .85), budget.min_narration_words - used_words - remaining_max)})
+        if visual:
+            local = local.model_copy(update={"min_narration_words": max(
+                math.floor(local.min_narration_words * .85), budget.min_narration_words - used_words - remaining_max)})
         payload = {"asset_id": asset.asset_id, "chapter_index": index + 1, "chapter_count": len(windows),
                    "start_seconds": start, "end_seconds": end,
                    **local.model_dump(exclude={"preset", "require_story_coverage"}),
@@ -376,12 +468,26 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                    "previous_narration_tail": all_beats[-1].narration_text if all_beats else "",
                    "transcript_segments": rows,
                    "frames": [{"id": i, "timestamp_seconds": ts} for i, (ts, _) in enumerate(frames)]}
+        if not visual:
+            # Balance later guidance, never rewrite a saved light/heavy chapter.
+            preferred_words = round(((budget.min_narration_words + budget.max_narration_words) / 2 - used_words)
+                                    / (len(windows) - index))
+            payload["preferred_word_count"] = max(local.min_narration_words, min(local.max_narration_words, preferred_words))
         if index == 0:
             payload["cold_open_instruction"] = cold_open_instruction()
         ending_anchor = None
         if index == len(windows) - 1 and asset.duration >= 900 and budget.require_story_coverage:
             ending_anchor = resolve_ending_anchor(asset, transcript, action_notes or [],
-                required_final_beats=min(3, local.min_beats))
+                required_final_beats=min(3 if visual else 2, local.min_beats))
+            if not visual:
+                # Text-only Standard cannot observe a silent tail. Its closing
+                # boundary is explicitly the last supplied dialogue, not a claim
+                # that later source frames are credits or that a victory occurred.
+                dialogue_end = max(row["end_seconds"] for row in rows)
+                if dialogue_end < ending_anchor.narrative_end_seconds:
+                    ending_anchor = resolve_ending_anchor(asset, transcript,
+                        narrative_end_seconds=dialogue_end, detection_method="last_transcribed_dialogue",
+                        required_final_beats=min(2, local.min_beats))
             payload["ending_anchor"] = ending_anchor.model_dump()
             payload["ending_instruction"] = ending_instruction(ending_anchor)
             payload["end_seconds"] = ending_anchor.narrative_end_seconds
@@ -437,6 +543,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                        and pending_story.get("chapter_index") == index else {})
         story_state = (pending_story.get("request_state", {}) if isinstance(pending_story, dict)
                        and pending_story.get("chapter_index") == index else {})
+        story_state = chapter_attempt_state(story_state, request_id)
         checkpoint_request = {"chapter_index": index, "batches": story_cache, "request_state": story_state}
         story_lock = threading.Lock()
 
@@ -450,14 +557,11 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
             with story_lock:
                 story_cache[str(batch_index)] = value
                 if checkpoint_path is not None:
-                    save_checkpoint({"identity": identity, "chapters": checkpoint_chapters(),
-                        "pending_visual": {"chapter_index": index, "frame_timestamps": [ts for ts, _ in frames],
-                                           "visual_action_notes": action_notes, "multimodal_calls": observation_calls},
-                        "pending_story": {"chapter_index": index, "batches": story_cache}})
+                    save_story_state(story_state)
         for attempt in range(3):  # A cached validation is not a paid attempt.
             image_tokens = len(frames) * 384 if visual and not composite else 0
             # Composite writers validate the actual whole-chapter request.
-            if not composite and text_token_budget(system + prompt) + output_tokens + image_tokens > (context_tokens or 32768):
+            if not text_storyteller and text_token_budget(system + prompt) + output_tokens + image_tokens > (context_tokens or 32768):
                 raise NarrationModelOutputError("Full chapter evidence exceeds this model's context budget")
             data = None
             from_cache = False
@@ -475,11 +579,11 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                         cached[index] = None
                 if data is not None:
                     pass  # Re-validate cached evidence below; never trust it as a final artifact.
-                elif not composite:
+                elif not text_storyteller:
                     if index < minimum_cached_chapters:
                         raise ValueError("Protected chapter is missing; refusing regeneration")
                     if story_state.get("calls", 0) >= 2:
-                        error = RuntimeError("Chapter credit guard reached; no further request was sent. Completed chapters remain saved.")
+                        error = RuntimeError("This request's chapter retry limit was reached. Completed chapters are saved; a new Resume request can try again.")
                         error.category = "credit_limit"
                         raise error
                     story_state["calls"] = story_state.get("calls", 0) + 1
@@ -496,7 +600,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                         raise LLMOutputTruncatedError()
                     data = _extract_json(getattr(response, "content", response))
                 elif data is None:
-                    if composite:
+                    if text_storyteller:
                         from app.content.providers.agentrouter import require_text_only
                         from app.production.narration_storyteller import write_storyteller_chapter
                         require_text_only(prompt)
@@ -504,7 +608,8 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                             raise ValueError("Protected chapter is missing; refusing regeneration")
                         data, batch_calls = write_storyteller_chapter(prov, system, payload, asset=asset, frames=frames,
                             local_budget=local, deadline=deadline, cached_batches=story_cache, on_batch=save_story_batch,
-                            context_tokens=context_tokens, call_state=story_state, on_state=save_story_state)
+                            context_tokens=context_tokens, call_state=story_state, on_state=save_story_state,
+                            request_id=request_id)
                         chapter_text_calls = batch_calls
                     else:
                         data = _call_json(prov, system, prompt, max_tokens=output_tokens)
@@ -519,7 +624,10 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                     align_final_story_clip(beats, ending_anchor, require_visual=visual)
                 partial = _artifact(production_id, unit_id, asset, beats, local.target_duration_seconds, plan.summary, status)
                 try:
-                    validate_recap_depth(partial, local, transcript, asset.duration)
+                    if visual:
+                        validate_recap_depth(partial, local, transcript, asset.duration)
+                    else:
+                        validate_standard_depth(partial, local, transcript, asset.duration)
                     validate_storyteller_language(partial)
                     if ending_anchor is not None:
                         validate_true_ending(beats, ending_anchor, require_visual=visual)
@@ -539,7 +647,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                     cached[index] = None
                     chapter_calls = observation_calls
                     chapter_text_calls = 0
-                if (composite and not from_cache) or story_state.get("calls", 0) >= 2 or attempt == 2:
+                if (text_storyteller and not from_cache) or story_state.get("calls", 0) >= 2 or attempt == 2:
                     raise
                 if composite and data is not None:
                     story_cache.clear()
@@ -554,7 +662,7 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
                 # One recovery only; completed paid chapters and claims survive.
                 from app.providers.fallback_policy import FailureCategory
                 category = standard_transient_failure_category(exc)
-                if (composite or story_state.get("calls", 0) >= 2 or attempt == 2 or category not in {
+                if (text_storyteller or story_state.get("calls", 0) >= 2 or attempt == 2 or category not in {
                     FailureCategory.PROVIDER_5XX, FailureCategory.NETWORK, FailureCategory.PROVIDER_UNAVAILABLE, FailureCategory.TIMEOUT,
                 }):
                     raise
@@ -614,7 +722,12 @@ def build_chapter_plan(production_id, unit_id, asset, transcript, *, budget, pro
     if artifact.narration_text.casefold() == " ".join(segment.text for segment in transcript.segments).casefold():
         raise NarrationModelOutputError("Narration must be an original recap, not a transcript copy")
     try:
-        validate_recap_depth(artifact, budget, transcript, asset.duration)
+        if visual:
+            validate_recap_depth(artifact, budget, transcript, asset.duration)
+        else:
+            artifact.narration_quality = validate_standard_depth(artifact, budget, transcript, asset.duration)
+            artifact.storytelling_provider = prov.name
+            artifact.text_storyteller_calls = text_calls
     except ValueError as exc:
         raise NarrationModelOutputError(str(exc)) from None
     from app.production.narration import validate_narration_artifact
