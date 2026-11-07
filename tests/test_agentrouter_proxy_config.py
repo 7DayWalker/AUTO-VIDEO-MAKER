@@ -68,3 +68,13 @@ console.log(JSON.stringify(values.map(content => adapt(JSON.stringify({messages:
 """
     result = subprocess.run(["node", "-"], input=code, capture_output=True, text=True, check=True, timeout=10)
     assert json.loads(result.stdout) == [True, True, True]
+
+
+def test_proxy_defaults_to_16k_low_and_preserves_nested_responses_reasoning():
+    code = hardened_proxy_text(SOURCE) + """
+const defaults = adapt(JSON.stringify({model:'gpt-6.1-sol',messages:[]}));
+const explicit = adapt(JSON.stringify({model:'gpt-6-astra',messages:[],max_output_tokens:16384,reasoning:{effort:'low'}}));
+console.log(JSON.stringify([defaults.max_output_tokens, defaults.reasoning, explicit.max_output_tokens, explicit.reasoning]));
+"""
+    result = subprocess.run(["node", "-"], input=code, capture_output=True, text=True, check=True, timeout=10)
+    assert json.loads(result.stdout) == [16384, {"effort": "low"}, 16384, {"effort": "low"}]

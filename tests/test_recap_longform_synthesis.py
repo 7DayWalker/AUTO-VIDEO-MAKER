@@ -50,6 +50,12 @@ def test_small_scripts_stay_one_request_and_long_unstructured_text_is_bounded():
         recap_tts_chunks(artifact)
 
 
+def test_eight_minute_recaps_are_chunked_too_not_one_tts_socket():
+    chunks = recap_tts_chunks(script_fixture(1400, 5))
+    assert len(chunks) == 5
+    assert all(len(chunk.text.split()) <= 450 for chunk in chunks)
+
+
 def test_long_form_tts_deadlines_allow_real_time_chapters_below_ui_operation_budget():
     from app.production.synthesis import TTS_REQUEST_TIMEOUT_SECONDS, TTS_SYNTHESIS_TIMEOUT_SECONDS
     # A 450-word chapter at 150WPM needs 180s even without startup overhead.

@@ -89,7 +89,7 @@ class AgentRouterProvider(BaseLLMProvider):
         # Only these endpoint/transport pairs passed account-tier verification.
         # No speculative Messages/remote Chat readiness is advertised.
         self._api_style = "chat_completions" if loopback else "responses"
-        self._reasoning_effort = os.getenv("AGENTROUTER_REASONING_EFFORT", "none")
+        self._reasoning_effort = os.getenv("AGENTROUTER_REASONING_EFFORT", "low")
         if self._reasoning_effort not in {"none", "low", "medium", "high"}:
             raise ValueError("Invalid AgentRouter reasoning effort configuration")
 
@@ -112,11 +112,11 @@ class AgentRouterProvider(BaseLLMProvider):
         # Even an empty multimodal call is rejected before any HTTP request.
         raise LLMModelUnavailableError()
 
-    def generate_json(self, prompt, system_prompt=None, temperature=0.7, max_tokens=4096):
+    def generate_json(self, prompt, system_prompt=None, temperature=0.7, max_tokens=16384, reasoning=None):
         return self.generate(prompt, system_prompt=system_prompt, response_schema=dict,
-                             temperature=temperature, max_tokens=max_tokens)
+                             temperature=temperature, max_tokens=max_tokens, reasoning=reasoning)
 
-    def generate(self, prompt, system_prompt=None, response_schema=None, temperature=0.7, max_tokens=4096):
+    def generate(self, prompt, system_prompt=None, response_schema=None, temperature=0.7, max_tokens=16384, reasoning=None):
         prompt = require_text_only(prompt)
         if system_prompt is not None:
             require_text_only(system_prompt)
@@ -124,12 +124,18 @@ class AgentRouterProvider(BaseLLMProvider):
             raise LLMAuthenticationError(self.name)
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 131072:
             raise ValueError("AgentRouter output token budget must be an integer from 1 to 131072")
+        effort = self._reasoning_effort
+        if reasoning is not None:
+            if (not isinstance(reasoning, dict) or set(reasoning) != {"effort"}
+                    or reasoning.get("effort") not in {"none", "low", "medium", "high"}):
+                raise ValueError("Invalid AgentRouter reasoning effort")
+            effort = reasoning["effort"]
         if self._api_style == "responses":
             endpoint = "/responses"
             payload = {"model": self._model,
                        "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
                        "max_output_tokens": max_tokens, "stream": False,
-                       "reasoning": {"effort": self._reasoning_effort}}
+                       "reasoning": {"effort": effort}}
             if system_prompt:
                 payload["instructions"] = system_prompt
             if response_schema is not None:
@@ -142,7 +148,7 @@ class AgentRouterProvider(BaseLLMProvider):
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
             payload = {"model": self._model, "messages": messages, "temperature": temperature,
-                       "max_tokens": max_tokens, "stream": False, "reasoning_effort": self._reasoning_effort}
+                       "max_tokens": max_tokens, "stream": False, "reasoning_effort": effort}
             if response_schema is not None:
                 payload["response_format"] = {"type": "json_object"}
         try:

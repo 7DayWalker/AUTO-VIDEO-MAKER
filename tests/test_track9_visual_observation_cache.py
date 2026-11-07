@@ -57,7 +57,8 @@ def test_reusable_cache_survives_deleting_model_bound_partial_checkpoint(tmp_pat
     first = build_chapter_plan("prd_cache_test", "unit-001", asset, transcript,
         budget=resolve_recap_budget(asset.duration), prov=ChapterNarrationProvider(name="agentrouter", model="gpt-6.1-sol"),
         visual_observer=Observer(), frame_loader=frames, checkpoint_path=checkpoint)
-    assert not checkpoint.exists() and (tmp_path / CACHE_FILENAME).is_file()
+    assert json.loads(checkpoint.read_text())["complete"] and (tmp_path / CACHE_FILENAME).is_file()
+    checkpoint.unlink()  # Visual cache is independently reusable even without the script checkpoint.
     class NoNetwork(Observer):
         def generate_multimodal(self, *args, **kwargs):
             raise AssertionError("Cached observations must not make a vision request")
@@ -72,7 +73,7 @@ def test_reusable_cache_survives_deleting_model_bound_partial_checkpoint(tmp_pat
 def test_prior_pro_hydration_retains_scene_granularity_and_marks_missing_descriptions(tmp_path):
     asset, transcript = story_evidence()
     prior = build_chapter_plan("prd_cache_test", "unit-001", asset, transcript,
-        budget=resolve_recap_budget(asset.duration), prov=ChapterNarrationProvider(), frame_loader=frames)
+        budget=resolve_recap_budget(asset.duration), prov=ChapterNarrationProvider(), frame_loader=frames, context_tokens=128000)
     prior.source_media_path, prior.source_transcript_path = asset.stored_path, transcript.transcript_path
     path = tmp_path / "narration.json"
     path.write_text(prior.model_dump_json())
@@ -156,11 +157,11 @@ def test_transient_storyteller_transport_failure_retries_only_missing_text_batch
     cache = {}
     result, calls = write_storyteller_chapter(provider, "Grounded recap", payload, asset=asset, frames=supplied,
         local_budget=local, deadline=time.monotonic() + 30, on_batch=lambda index, value: cache.update({str(index): value}))
-    assert calls == 5 and provider.failures == 1 and len(cache) == 4
+    assert calls == 2 and provider.failures == 1 and list(cache) == ["whole"]
     original_call_count = len(provider.calls)
     again, calls = write_storyteller_chapter(provider, "Grounded recap", payload, asset=asset, frames=supplied,
         local_budget=local, deadline=time.monotonic() + 30, cached_batches=cache)
-    assert result == again and len(provider.calls) == original_call_count and calls == 5
+    assert result == again and len(provider.calls) == original_call_count and calls == 2
 
 
 def test_cached_pro_route_does_not_decode_or_extract_any_frame(monkeypatch, tmp_path):
@@ -189,7 +190,7 @@ def test_cached_pro_route_does_not_decode_or_extract_any_frame(monkeypatch, tmp_
 def test_changed_source_cannot_be_rehydrated_from_an_old_prior_pro_snapshot(tmp_path):
     asset, transcript = story_evidence()
     prior = build_chapter_plan("prd_cache_test", "unit-001", asset, transcript,
-        budget=resolve_recap_budget(asset.duration), prov=ChapterNarrationProvider(), frame_loader=frames)
+        budget=resolve_recap_budget(asset.duration), prov=ChapterNarrationProvider(), frame_loader=frames, context_tokens=128000)
     prior.source_media_path, prior.source_transcript_path = asset.stored_path, transcript.transcript_path
     path = tmp_path / "visual_evidence_prior_pro.json"
     path.write_text(prior.model_dump_json())

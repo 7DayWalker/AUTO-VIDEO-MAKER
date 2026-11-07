@@ -244,7 +244,7 @@ def _standard_source_segments(production_id, source_asset, root):
     return [SourceSegment.model_validate(item) for item in segment_payload["segments"]]
 
 
-def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, duration, status, root, model_id=None, recap_budget=None, summary_mode="standard"):
+def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, duration, status, root, model_id=None, recap_budget=None, summary_mode="standard", minimum_cached_chapters=0):
     from app.content.capability_router import assess_model_for_job
     from app.content.model_resolver import AllExactModelProvidersFailedError
     from app.production.narration_real import (
@@ -252,15 +252,11 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
         SummaryProTemporarilyUnavailableError,
     )
     is_pro = summary_mode == "pro"
-    # Two-stage chapters include a separate vision request and reasoning-model
-    # text request. Keep a bounded operation without the old single-stage limit.
+    # Two-stage chapters own independent observer and storyteller sockets.
     job_id = JOB_SOURCE_VIDEO_RECAP if is_pro else JOB_SOURCE_TRANSCRIPT_RECAP
     label = "Pro" if is_pro else "Standard"
     candidates = (model_id,) if model_id is not None else (pro_auto_model_ids() if is_pro else standard_auto_model_ids())
-    composite = is_pro and any(get_model(candidate).visual_observer_model_id for candidate in candidates)
-    long_form = recap_budget is not None and recap_budget.target_duration_seconds >= 720
-    deadline = (time.monotonic() + chapter_planning_timeout_seconds(recap_budget, composite=composite) + 30
-                if is_pro or long_form else None)
+    deadline = None  # Socket limits are chapter-local, never a movie-wide countdown.
     if not candidates:
         raise RuntimeError(f"Summary {label} has no eligible route: configure an available {'vision' if is_pro else 'text/JSON'} provider.")
     segments = [] if is_pro else _standard_source_segments(production_id, source_asset, root)
@@ -272,8 +268,6 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
         # Each route is visited once, with bounded per-window output repair.
         # Explicit selection can change routes, never canonical model identity.
         while True:
-            if deadline is not None and time.monotonic() >= deadline:
-                break
             routes = assess_model_for_job(candidate_id, job_id).eligible_routes()
             if not any((route.provider, route.provider_model_id) not in attempted for route in routes):
                 break
@@ -300,20 +294,20 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
                     if not composite and not resolved.provider_instance.supports_multimodal():
                         from app.content.exceptions import LLMModelUnavailableError
                         raise LLMModelUnavailableError()
-                    # A single overloaded model must not consume the entire
-                    # five-minute command budget before Auto can try another.
-                    if not composite and hasattr(resolved.provider_instance, "_timeout"):
-                        resolved.provider_instance._timeout = min(resolved.provider_instance._timeout, 45)
                     from app.production.narration_pro import build_pro_multimodal_plan
                     artifact = build_pro_multimodal_plan(production_id, unit_id, source_asset, transcript,
                         target_duration_seconds=duration, summary_model_id=resolved.canonical_model_id,
-                        prov=resolved.provider_instance, root=root, recap_budget=recap_budget, deadline=deadline)
+                        prov=resolved.provider_instance, root=root, recap_budget=recap_budget, deadline=deadline,
+                        minimum_cached_chapters=minimum_cached_chapters)
                 else:
+                    from app.production.storage import unit_plan_dir
                     artifact = ai_grounded_plan(production_id, unit_id, source_asset, transcript,
                         target_duration_seconds=duration, prov=resolved.provider_instance,
                         status=status, source_segments=segments,
                         context_tokens=get_model(candidate_id).capabilities.context_tokens, output_attempts=2,
-                        recap_budget=recap_budget, deadline=deadline)
+                        recap_budget=recap_budget, deadline=deadline,
+                        checkpoint_path=unit_plan_dir(production_id, unit_id, root=root) / "narration_chapters.partial.json",
+                        minimum_cached_chapters=minimum_cached_chapters)
             except Exception as exc:
                 category = standard_transient_failure_category(exc)
                 if category is None:
@@ -322,6 +316,20 @@ def _build_summary_routed(production_id, unit_id, source_asset, transcript, *, d
                                label, resolved.canonical_model_id, resolved.provider, resolved.provider_model_id, category)
                 last_error = exc
                 failed = True
+                # Once paid chapters exist, changing model/route would invalidate
+                # their identity and silently re-bill the entire opening.
+                from app.production.storage import unit_plan_dir
+                checkpoint = unit_plan_dir(production_id, unit_id, root=root) / "narration_chapters.partial.json"
+                retained_chapters = False
+                if checkpoint.is_file():
+                    try:
+                        retained_chapters = bool(json.loads(checkpoint.read_text(encoding="utf-8")).get("chapters"))
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                if retained_chapters:
+                    # Raise outside the checkpoint-read try: network exceptions
+                    # may themselves subclass OSError and must not be swallowed.
+                    raise
                 continue
             artifact.summary_understanding_model_id = resolved.canonical_model_id
             artifact.summary_selection_mode = "explicit" if model_id is not None else "auto"
@@ -369,6 +377,7 @@ def build_grounded_narration_plan(
     mock_mode: bool = False,
     summary_mode: str = "standard",
     root: Optional[Path] = None,
+    minimum_cached_chapters: int = 0,
 ) -> NarrationArtifact:
     # summary_mode is the product-level AI Summary mode (standard vs pro)
     mode = (summary_mode or "standard").strip().lower()
@@ -450,7 +459,7 @@ def build_grounded_narration_plan(
         explicit = canonical_model_id is not None or summary_understanding_model_id is not None
         return _build_summary_routed(production_id, unit_id, source_asset, source_transcript,
             duration=duration, status=status, root=root, model_id=summary_model_id if explicit else None,
-            recap_budget=budget, summary_mode=mode)
+            recap_budget=budget, summary_mode=mode, minimum_cached_chapters=minimum_cached_chapters)
     # Real provider path: hierarchical multimodal for Pro, text-only for Standard
     prov_real = llm_provider_override
     if not prov_real.is_available():
@@ -460,17 +469,21 @@ def build_grounded_narration_plan(
             raise RuntimeError("Pro requires a multimodal provider (no silent downgrade)")
         # Long-form hierarchical multimodal understanding (bounded windows)
         from app.production.narration_pro import build_pro_multimodal_plan
-        artifact = build_pro_multimodal_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, summary_model_id=summary_model_id, prov=prov_real, root=root, recap_budget=budget)
+        artifact = build_pro_multimodal_plan(production_id, unit_id, source_asset, source_transcript, target_duration_seconds=duration, summary_model_id=summary_model_id, prov=prov_real, root=root, recap_budget=budget, minimum_cached_chapters=minimum_cached_chapters)
         artifact.target_length_preset = budget.preset
         artifact.narration_budget = budget
         artifact.summary_selection_mode = "explicit" if canonical_model_id is not None or summary_understanding_model_id is not None else "auto"
         return artifact
     from app.production.narration_real import ai_grounded_plan
+    from app.production.storage import unit_plan_dir
     source_segments = _standard_source_segments(production_id, source_asset, root)
     artifact = ai_grounded_plan(
         production_id, unit_id, source_asset, source_transcript,
         target_duration_seconds=duration, prov=prov_real, status=status, source_segments=source_segments,
         recap_budget=budget, output_attempts=2 if budget.enforce_depth else 1,
+        context_tokens=get_model(summary_model_id).capabilities.context_tokens,
+        checkpoint_path=unit_plan_dir(production_id, unit_id, root=root) / "narration_chapters.partial.json",
+        minimum_cached_chapters=minimum_cached_chapters,
     )
     artifact.summary_understanding_model_id = summary_model_id
     artifact.summary_mode = "standard"

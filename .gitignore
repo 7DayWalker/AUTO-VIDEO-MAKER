@@ -59,6 +59,7 @@ browser_profile/
 logs/flow/
 
 # ----- Temporary & One-off Diagnostic Artifacts -----
+diagnostics/universal-summary-*/
 temp/
 oauth_diagnostic_report.txt
 check_page_state.py

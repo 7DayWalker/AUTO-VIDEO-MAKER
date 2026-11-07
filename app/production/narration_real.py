@@ -11,6 +11,8 @@ import json
 import logging
 import math
 import re
+import threading
+from copy import copy
 from datetime import datetime
 from typing import List, Sequence
 
@@ -24,9 +26,38 @@ from app.production.recap_budget import (
     RecapBudget, requires_chapter_planning, resolve_recap_budget,
     timeline_sections, validate_recap_depth,
 )
+from app.production.token_budget import text_token_budget
 
 
 logger = logging.getLogger(__name__)
+
+CHAPTER_OUTPUT_TOKENS = 16384
+_VISION_QUARANTINE = {}
+_VISION_QUARANTINE_LOCK = threading.Lock()
+
+
+def quarantine_vision_observer(provider, exc):
+    """A dead observer is tried once per process, not once per chapter/batch."""
+    from app.providers.fallback_policy import FailureCategory
+    category = standard_transient_failure_category(exc)
+    if category in {FailureCategory.CAPABILITY, FailureCategory.QUOTA, FailureCategory.NETWORK,
+                    FailureCategory.TIMEOUT, FailureCategory.AUTHENTICATION, FailureCategory.RATE_LIMIT}:
+        with _VISION_QUARANTINE_LOCK:
+            _VISION_QUARANTINE[(provider.name, provider.model)] = category
+
+
+def observer_is_quarantined(provider, model):
+    with _VISION_QUARANTINE_LOCK:
+        return (provider, model) in _VISION_QUARANTINE
+
+
+def chapter_request_provider(prov):
+    """Never shrink a shared adapter using total elapsed movie runtime."""
+    from app.production.recap_budget import chapter_planning_timeout_seconds
+    if hasattr(prov, "_timeout"):
+        prov = copy(prov)
+        prov._timeout = chapter_planning_timeout_seconds(None)
+    return prov
 
 
 STORYTELLER_PROMPT_VERSION = "cinema-storyteller-v2"
@@ -266,8 +297,9 @@ def observe_with_vision_failover(primary, frames, rows, *, start, end, continuit
 
     last_error = None
     for _, key, instance in candidates:
-        if time.monotonic() >= deadline:
-            raise LLMConnectionError(key[0], "Visual observation deadline exhausted")
+        if observer_is_quarantined(*key):
+            continue
+        provider = None
         try:
             provider = instance if instance is not None else create_provider(*key)
             if not admitted_visual_observer(provider) or (instance is None and not provider.is_available()):
@@ -275,13 +307,16 @@ def observe_with_vision_failover(primary, frames, rows, *, start, end, continuit
             if hasattr(provider, "_timeout"):
                 from copy import copy
                 provider = copy(provider)
-                provider._timeout = min(provider._timeout, 45, max(.001, deadline - time.monotonic()))
+                provider._timeout = min(provider._timeout, 45)
             return observe_chapter_frames(provider, frames, rows, start=start, end=end, continuity=continuity,
-                cached_batches=batch_cache, on_batch=retain_batch, on_request=on_request, deadline=deadline)
+                cached_batches=batch_cache, on_batch=retain_batch, on_request=on_request,
+                deadline=time.monotonic() + 300)
         except Exception as exc:
             category = standard_transient_failure_category(exc)
             if category is None:
                 raise
+            if provider is not None:
+                quarantine_vision_observer(provider, exc)
             if category in {FailureCategory.RATE_LIMIT, FailureCategory.QUOTA}:
                 retry_after = getattr(exc, "retry_after", None)
                 retry_after = retry_after if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) else None
@@ -319,6 +354,10 @@ def standard_transient_failure_category(exc: BaseException):
     import requests
 
     category = classify_provider_failure(exc)
+    # Older HTTP adapters use LLMConnectionError for both socket errors and
+    # explicit 5xx. Don't permanently quarantine a transient overload as network.
+    if category == FailureCategory.NETWORK and re.search(r"\b(?:HTTP|Server error:)\s*5\d\d\b", str(exc), re.I):
+        category = FailureCategory.PROVIDER_5XX
     transient = {FailureCategory.PROVIDER_5XX, FailureCategory.NETWORK, FailureCategory.TIMEOUT,
                  FailureCategory.PROVIDER_UNAVAILABLE, FailureCategory.RESPONSE_MALFORMED,
                  FailureCategory.CAPABILITY, FailureCategory.TASK_FAILURE,
@@ -417,13 +456,19 @@ def _extract_json(raw):
     raise NarrationModelOutputError("Narration model must return a complete JSON object or beat array")
 
 
-def _call_json(prov, sys_p, usr_p, max_tokens=8192):
+def _call_json(prov, sys_p, usr_p, max_tokens=CHAPTER_OUTPUT_TOKENS):
     # Real adapters own their native JSON operation; no mock-plan fallback.
+    prov = chapter_request_provider(prov)
     generate = getattr(prov, "generate_json", None)
     if not callable(generate):
         generate = prov.generate
+    # Reasoning is an AgentRouter capability, not a kwarg blindly sent to
+    # Gemini/legacy adapters. Sol/Astra always get low effort, even with an old
+    # workstation override requesting more hidden reasoning.
+    reasoning = {"reasoning": {"effort": "low"}} if getattr(prov, "name", None) == "agentrouter" else {}
     response = generate(
         prompt=usr_p, system_prompt=sys_p, temperature=0.35, max_tokens=max_tokens,
+        **reasoning,
     )
     from app.content.exceptions import LLMOutputTruncatedError
     metadata = getattr(response, "metadata", None) or {}
@@ -584,20 +629,25 @@ def _text_parts(text, limit):
         yield text
 
 
-def _transcript_windows(transcript, budget, *, compact=False):
+def _transcript_windows(transcript, budget, *, compact=False, token_limit=None):
     window = []
     size = 2
+    tokens = 2
     for index, segment in enumerate(transcript.segments):
         for part in _text_parts(segment.text, max(256, budget // 4)):
             row = {"id": index, "text": part}
             if not compact:
                 row.update(start_seconds=segment.start, end_seconds=segment.end)
             row_size = _json_size(row) + 1
-            if window and (size + row_size > budget or len(window) >= MAX_WINDOW_SEGMENTS):
+            row_tokens = max(1, text_token_budget(_json(row)) - 32) + 1
+            if window and (size + row_size > budget or len(window) >= MAX_WINDOW_SEGMENTS
+                           or (token_limit is not None and tokens + row_tokens > token_limit)):
                 yield window
                 window, size = [], 2
+                tokens = 2
             window.append(row)
             size += row_size
+            tokens += row_tokens
     if window:
         yield window
 
@@ -643,6 +693,8 @@ def ai_grounded_plan(
     recap_budget: RecapBudget | None = None,
     visual_evidence: Sequence[dict] = (),
     deadline: float | None = None,
+    checkpoint_path=None,
+    minimum_cached_chapters: int = 0,
 ) -> NarrationArtifact:
     """Bounded map/reduce of real JSON completions; no copied/mock fallback."""
     duration = float(target_duration_seconds)
@@ -658,15 +710,16 @@ def ai_grounded_plan(
     if requires_chapter_planning(source_asset.duration, budget):
         from app.production.narration_chapters import build_chapter_plan
         return build_chapter_plan(production_id, unit_id, source_asset, source_transcript,
-               budget=budget, prov=prov, context_tokens=context_tokens, status=status, deadline=deadline)
+               budget=budget, prov=prov, context_tokens=context_tokens, status=status, deadline=deadline,
+               checkpoint_path=checkpoint_path, minimum_cached_chapters=minimum_cached_chapters)
     segments_by_id = {segment.segment_id: segment for segment in source_segments}
     if any(segment.asset_id != source_asset.asset_id for segment in source_segments):
         raise ValueError("Source segments must belong to the canonical source asset")
     # Reserve both visible JSON and reasoning output before sizing evidence.
     # Unknown providers use a conservative 32K envelope, not an unbounded movie.
     context_limit = context_tokens or 32_768
-    output_tokens = min(8192, max(1024, context_limit // 3))
-    evidence_budget = min(MAX_EVIDENCE_BYTES, context_limit - output_tokens - 6000)
+    output_tokens = CHAPTER_OUTPUT_TOKENS
+    evidence_budget = min(MAX_EVIDENCE_BYTES, max(0, context_limit - output_tokens - 4000) * 2)
     if evidence_budget < 1500:
         raise ValueError("Model context is too small for grounded narration JSON")
     budget = recap_budget or resolve_recap_budget(source_asset.duration, target_duration_seconds=duration)
@@ -709,11 +762,10 @@ def ai_grounded_plan(
     schema = _json(_prompt_schema())
     # Reserve the ACTUAL storyteller/schema/coverage overhead before splitting
     # transcript windows. A richer prompt must not overrun the old fixed reserve.
-    overhead = (len(system_prompt.encode("utf-8")) + len(schema.encode("utf-8"))
-                + _json_size(base) + _json_size(budget.model_dump()) + 1000)
+    overhead = text_token_budget(system_prompt + schema + _json(base) + _json(budget.model_dump())) + 1000
     if budget.enforce_depth:
-        overhead += _json_size(timeline_sections(source_transcript, source_asset.duration))
-    evidence_budget = min(evidence_budget, context_limit - output_tokens - overhead)
+        overhead += text_token_budget(_json(timeline_sections(source_transcript, source_asset.duration)))
+    evidence_budget = min(evidence_budget, max(0, context_limit - output_tokens - overhead) * 2)
     if evidence_budget < 1500:
         raise ValueError("Model context is too small for the storyteller prompt and grounded evidence")
 
@@ -738,12 +790,12 @@ def ai_grounded_plan(
                  "visual_evidence": row["visual_evidence"][:limit]} for row in matches]}
         prompt = ("Plan a source-grounded narrated story recap from this transcript evidence:\n"
                   + _json({**base, **constraints, **evidence}) + "\nRequired JSON schema:\n" + schema)
-        if len((system_prompt + prompt).encode("utf-8")) + output_tokens + 256 > context_limit:
+        if text_token_budget(system_prompt + prompt) + output_tokens + 256 > context_limit:
             raise NarrationModelOutputError("Grounded narration evidence exceeds the model context budget")
         from app.content.exceptions import LLMOutputTruncatedError
         attempts = 2 if budget.enforce_depth else min(2, max(1, output_attempts))
         for attempt in range(attempts):
-            if len((system_prompt + prompt).encode("utf-8")) + output_tokens + 256 > context_limit:
+            if text_token_budget(system_prompt + prompt) + output_tokens + 256 > context_limit:
                 raise NarrationModelOutputError("Grounded narration repair exceeds the model context budget")
             try:
                 data = _call_json(prov, system_prompt, prompt, max_tokens=output_tokens)
@@ -781,7 +833,8 @@ def ai_grounded_plan(
     if visual_evidence:
         transcript_budget -= 4500
     windows = list(_transcript_windows(source_transcript, transcript_budget,
-                                      compact=len(source_transcript.segments) > 160))
+                                      compact=len(source_transcript.segments) > 160,
+                                      token_limit=max(512, context_limit - output_tokens - overhead - 600)))
     for window in windows:
         allowed = {row["id"] for row in window}
         source_rows = _source_rows(source_segments, allowed)

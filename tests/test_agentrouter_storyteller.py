@@ -72,7 +72,7 @@ def test_text_envelope_json_mode_and_usage_are_safe(monkeypatch):
     result = provider.generate("Pure text dialogue", system_prompt="Tell the grounded story", response_schema=dict, max_tokens=8192)
     body = post.call_args.kwargs["json"]
     assert body["model"] == "gpt-6-astra" and body["max_tokens"] == 8192
-    assert body["reasoning_effort"] == "none"
+    assert body["reasoning_effort"] == "low"
     assert body["response_format"] == {"type": "json_object"}
     assert all(isinstance(message["content"], str) for message in body["messages"])
     assert result.usage == {"total_tokens": 12} and result.raw_response is None
@@ -137,9 +137,8 @@ def test_two_stage_chapters_send_frames_only_to_observer(model_id):
         prov=storyteller, visual_observer=observer, frame_loader=frames)
     assert len(observer.calls) == result.multimodal_calls == 40
     assert all(len(batch) <= 4 for batch in observer.calls)
-    # Chapters 1-4 keep four cached-sized batches; the finale uses three
-    # slightly wider batches so its last passage has three ending beats.
-    assert result.text_storyteller_calls == len(storyteller.calls) == 19
+    assert result.text_storyteller_calls == len(storyteller.calls) == 5
+    assert all(call["max_tokens"] == 16384 and call["reasoning"] == {"effort": "low"} for call in storyteller.calls)
     assert not storyteller.visual_calls
     assert result.visual_understanding_strategy == "visual_notes_then_text_storyteller"
     assert result.visual_observer_model_id == observer.model and result.storytelling_provider == "agentrouter"
@@ -149,20 +148,20 @@ def test_two_stage_chapters_send_frames_only_to_observer(model_id):
         assert len(payload["visual_action_notes"]) == len(payload["frames"])
         require_text_only(json.dumps(payload))
         assert "never-read" not in json.dumps(payload)
-        assert len(payload["frames"]) <= (11 if payload["chapter_index"] == 5 else 8)
+        assert len(payload["frames"]) == 30
     assert {row["id"] for batch in storyteller.chapters for row in batch["transcript_segments"]} == set(range(len(transcript.segments)))
     starts = [min(ref.start_seconds for ref in beat.source_refs) for beat in result.beats]
     assert starts == sorted(starts)
 
 
-def test_visual_observation_has_one_bounded_transient_retry(monkeypatch):
+def test_visual_observation_has_one_bounded_overload_retry(monkeypatch):
     monkeypatch.setattr("app.production.narration_chapters.time.sleep", lambda seconds: None)
     class FlakyObserver(Observer):
         failures = 0
         def generate_multimodal(self, *args, **kwargs):
             if not self.failures:
                 self.failures += 1
-                raise LLMConnectionError("gemini", "Transport request failed")
+                raise LLMConnectionError("gemini", "Server error: 503")
             return super().generate_multimodal(*args, **kwargs)
     asset, transcript = story_evidence()
     observer = FlakyObserver()
@@ -192,7 +191,7 @@ def test_validated_visual_notes_survive_storyteller_failure_without_resending_fr
         prov=ChapterNarrationProvider(name="agentrouter", model="gpt-6.1-sol"), visual_observer=observer,
         frame_loader=frames, checkpoint_path=checkpoint)
     assert result.multimodal_calls == len(observer.calls) == 40
-    assert not checkpoint.exists()
+    assert json.loads(checkpoint.read_text())["complete"]
 
 
 @pytest.mark.parametrize("fault", ["missing", "timestamp", "media"])

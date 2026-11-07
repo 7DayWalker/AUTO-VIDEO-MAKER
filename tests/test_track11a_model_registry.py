@@ -159,13 +159,12 @@ def test_no_vision_payload_can_be_sent_to_the_cline_proxy_or_agentrouter(monkeyp
     assert not observer.calls and not post.called
 
 
-def test_deadline_failure_is_bounded_and_does_not_call_any_observer(monkeypatch):
+def test_previous_chapters_elapsed_time_cannot_starve_the_next_observer(monkeypatch):
     observer = make_observer("gemini", "gemini-3-flash-preview")
     install_observers(monkeypatch, [("gemini-3-flash-preview", observer)])
-    with pytest.raises(LLMConnectionError, match="deadline"):
-        observe_with_vision_failover(observer, frames(0, 300, 0)[:4], [], start=0, end=300,
-                                     continuity=[], deadline=time.monotonic() - 1)
-    assert not observer.calls
+    notes = observe_with_vision_failover(observer, frames(0, 300, 0)[:4], [], start=0, end=300,
+                                         continuity=[], deadline=time.monotonic() - 1)
+    assert len(notes) == 4 and len(observer.calls) == 1
 
 
 @pytest.mark.parametrize("notes", [[], [{"observer_model": None, "observer_provider": None}],

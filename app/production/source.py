@@ -9,7 +9,7 @@ from app.production.storage import load_production, production_source_dir, produ
 from app.transcription.diagnostics import media_error_reason
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm"}
 VIDEO_MIME_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".mkv": "video/x-matroska", ".webm": "video/webm"}
-MAX_SOURCE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+MAX_SOURCE_UPLOAD_BYTES = 16 * 1024 * 1024 * 1024
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -29,13 +29,22 @@ def _next_asset_id(production: Production, reserved=()) -> str:
             return cand
     raise RuntimeError("too many source assets")
 def _atomic_copy(src: Path, dst: Path) -> None:
+    import time
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_name(dst.name + f".tmp-{os.getpid()}")
+    # An incomplete copy must NEVER replace an accepted source/master. Unique
+    # temporaries also keep independent unit requests from sharing a temp name.
+    with tempfile.NamedTemporaryFile(dir=dst.parent, prefix=dst.name + ".tmp-", delete=False) as handle:
+        tmp = Path(handle.name)
     try:
         shutil.copyfile(src, tmp)
-        os.replace(tmp, dst)
-    except OSError:
-        shutil.move(str(tmp), str(dst))
+        for attempt in range(5):
+            try:
+                os.replace(tmp, dst)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(.1 * (attempt + 1))
     finally:
         try:
             tmp.unlink()
@@ -196,7 +205,7 @@ def register_uploaded_source(production_id: str, filename: str, stream, length: 
     if not isinstance(length, int) or isinstance(length, bool) or length <= 0:
         return 400, {"error": "INVALID_SOURCE", "message": "A non-empty upload with Content-Length is required."}
     if length > MAX_SOURCE_UPLOAD_BYTES:
-        return 413, {"error": "PAYLOAD_TOO_LARGE", "message": "Source upload limit is 2 GiB. Use a Core-local file path for larger media."}
+        return 413, {"error": "PAYLOAD_TOO_LARGE", "message": "Source upload limit is 16 GiB. Use a Core-local file path for larger media."}
     try:
         prod = load_production(production_id, root=root)
     except FileNotFoundError:
@@ -207,9 +216,12 @@ def register_uploaded_source(production_id: str, filename: str, stream, length: 
         return 400, {"error": "INVALID_REQUEST", "message": "Production identity does not match its directory."}
     source_dir = production_source_dir(production_id, root=root)
     source_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(source_dir).free < length + 64 * 1024 * 1024:
+        return 507, {"error": "INSUFFICIENT_STORAGE", "message": "Not enough disk space for this movie upload."}
     with tempfile.TemporaryDirectory(prefix=".upload-", dir=source_dir) as scratch:
         incoming = Path(scratch) / ("upload" + Path(filename).suffix.lower())
         remaining = length
+        digest = hashlib.sha256()
         try:
             with incoming.open("wb") as handle:
                 while remaining:
@@ -217,15 +229,17 @@ def register_uploaded_source(production_id: str, filename: str, stream, length: 
                     if not chunk or len(chunk) > remaining:
                         raise ValueError("truncated source upload")
                     handle.write(chunk)
+                    digest.update(chunk)
                     remaining -= len(chunk)
         except (OSError, ValueError):
             return 400, {"error": "INVALID_SOURCE", "message": "Source upload did not complete; no source was registered."}
         return _register_local_source(production_id, str(incoming), root=root,
-                                      original_filename=filename.strip(), source_kind="browser_upload")
+                                      original_filename=filename.strip(), source_kind="browser_upload",
+                                      uploaded_sha256=digest.hexdigest())
 
 
 def _register_local_source(production_id: str, source_path: str, *, root: Optional[Path]=None,
-                           original_filename: Optional[str]=None, source_kind: str="local_file"):
+                           original_filename=None, source_kind="local_file", uploaded_sha256=None):
     if not isinstance(source_path, str):
         return 400, {"error":"INVALID_SOURCE","message":"source_path must be text"}
     if "\x00" in source_path:
@@ -267,7 +281,12 @@ def _register_local_source(production_id: str, source_path: str, *, root: Option
     base = Path(root) if root is not None else Path(PRODUCTIONS_DIR)
     dst = base / production_id / rel_path
     try:
-        if p.resolve() == dst.resolve():
+        if uploaded_sha256 is not None:
+            # The verified upload lives on this same volume. Rename, don't make
+            # another multi-GB copy or hash the entire movie a second time.
+            os.replace(p, dst)
+            sha = uploaded_sha256
+        elif p.resolve() == dst.resolve():
             sha = sha256_file(dst)
         else:
             _atomic_copy(p, dst); sha = sha256_file(dst)

@@ -17,6 +17,7 @@ from playwright.sync_api import sync_playwright
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--production-id", required=True)
+    parser.add_argument("--preset", default="auto")
     parser.add_argument("--sandbox", action="store_true")
     parser.add_argument("--report-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -24,12 +25,12 @@ def main() -> int:
     report = {"checked_at": datetime.now().isoformat(), "production_id": args.production_id, "checks": []}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, channel="chrome")
-        for name, width, height in (("desktop", 1440, 1100), ("mobile", 430, 932)):
+        for name, width, height in (("desktop", 1440, 900), ("mobile", 430, 932)):
             context = browser.new_context(viewport={"width": width, "height": height}, reduced_motion="reduce")
             context.add_init_script("localStorage.setItem('avm-studio-pro',JSON.stringify({state:{launchModalSeen:true},version:2}));")
             context.add_init_script("sessionStorage.setItem('avm-summary:recap-intent'," + json.dumps(json.dumps({
                 "productionId": args.production_id, "summaryMode": "pro", "summarySelectionMode": "explicit",
-                "modelId": "gpt-6.1-sol", "recapLength": "auto", "customMinutes": "15",
+                "modelId": "gpt-6.1-sol", "recapLength": args.preset, "customMinutes": "15",
             })) + ");")
             page = context.new_page()
             errors = []
@@ -43,6 +44,9 @@ def main() -> int:
             page.locator("[data-summary-movie-state]").wait_for(timeout=20000)
             page.wait_for_function("!document.querySelector('.summary-protection-note')?.textContent.includes('Checking')")
             assert page.locator("#summary-production").input_value() == args.production_id
+            # Source/registry are independent reads. A loaded movie does not
+            # imply the slower capability catalogue has populated this select.
+            page.wait_for_function("document.querySelector('#summary-understanding-model')?.value === 'gpt-6.1-sol'", timeout=30000)
             assert page.locator("#summary-understanding-model").input_value() == "gpt-6.1-sol"
             assert "496.4 MB" in page.locator("[data-summary-movie-state]").inner_text()
             assert "Dialogue already saved" in page.locator("[data-summary-movie-state]").inner_text()
@@ -55,6 +59,21 @@ def main() -> int:
             assert not duplicate_ids
             sizing = page.locator(".summary-studio").evaluate("e => ({width:e.clientWidth, scrollWidth:e.scrollWidth})")
             assert sizing["scrollWidth"] <= sizing["width"] + 1, sizing
+            workspace = page.locator('[data-summary-workflow]').evaluate("""e => {
+              const config=e.querySelector('[data-summary-configuration]').getBoundingClientRect();
+              const cinema=e.querySelector('[data-summary-cinema]').getBoundingClientRect();
+              const button=e.querySelector('#summary-autopilot');
+              return {columns:getComputedStyle(e).gridTemplateColumns, config:{x:config.x,y:config.y,width:config.width},
+                cinema:{x:cinema.x,y:cinema.y,width:cinema.width}, buttonBottom:button.getBoundingClientRect().bottom,
+                gradient:getComputedStyle(button).backgroundImage};
+            }""")
+            assert "124, 58, 237" in workspace["gradient"] and "79, 70, 229" in workspace["gradient"]
+            if name == "desktop":
+                assert workspace["cinema"]["x"] > workspace["config"]["x"] + workspace["config"]["width"]
+                assert abs(workspace["cinema"]["y"] - workspace["config"]["y"]) <= 2
+                assert workspace["cinema"]["y"] < height / 2
+                assert workspace["buttonBottom"] <= height, "Primary CTA must be visible beside the monitor without scrolling"
+            assert page.locator('.summary-number').count() == 0
             status = page.locator("[data-summary-live-status]").inner_text()
             button = page.locator("#summary-autopilot").inner_text()
             preview = page.locator('video[aria-label="Narrated summary preview"]')
@@ -77,12 +96,16 @@ def main() -> int:
             assert not posts, "Movie inspection must not run generation or publishing"
             assert not errors
             report["checks"].append({"viewport": name, "size": sizing, "duplicate_ids": duplicate_ids,
+                                     "workspace": workspace,
                                      "button": button, "status": status, "read_only_posts": posts, "page_errors": errors,
                                      "advanced_collapsed": True, "legacy_controls_verified": True, "video_playback": playback})
             context.close()
         if args.sandbox:
             context = browser.new_context(viewport={"width": 1280, "height": 1000}, reduced_motion="reduce")
             context.add_init_script("localStorage.setItem('avm-studio-pro',JSON.stringify({state:{launchModalSeen:true},version:2}));")
+            # Opt into sandbox BEFORE mount so a running real project cannot
+            # capture/lock the test context during its initial evidence read.
+            context.add_init_script("sessionStorage.setItem('avm-summary:mock-mode','true');")
             page = context.new_page()
             page.goto("http://127.0.0.1:5173", wait_until="networkidle", timeout=45000)
             page.get_by_role("button", name="AI Summary", exact=True).click()

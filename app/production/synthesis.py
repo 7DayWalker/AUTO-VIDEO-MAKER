@@ -28,14 +28,15 @@ BROADCAST_VOCAL_CHAIN = (
     "acompressor=threshold=0.089:ratio=4:attack=3:release=100:knee=4:makeup=1"
 )
 BROADCAST_CHAIN_VERSION = "recap-broadcast-v1"
-TTS_CHUNK_TRIGGER_WORDS = 1800
+TTS_CHUNK_TRIGGER_WORDS = 450
 TTS_CHUNK_MAX_WORDS = 450
 TTS_CHUNK_MAX_BYTES = 6000
 # Edge can stream a 280-450-word chapter close to real time. The previous
 # 90-second cap cancelled valid feature-film speech at ~113s on the live movie.
-# Bound every request and the whole operation below K3's 30-minute deadline;
-# exceptionally long/slow runs still retain all validated chunks for resume.
+# Every request is bounded independently; even a four-hour-source recap may
+# outlive the browser's request. Validated chunks remain available to recovery.
 TTS_REQUEST_TIMEOUT_SECONDS = 240
+# Compatibility diagnostic only, NOT a global cancellation timer.
 TTS_SYNTHESIS_TIMEOUT_SECONDS = 1740
 
 
@@ -157,7 +158,6 @@ async def synthesize_recap_segments(artifact, provider, output_path, *, voice, r
             completed = saved["chunks"]
     except (OSError, ValueError, AttributeError):
         pass
-    deadline = time.monotonic() + TTS_SYNTHESIS_TIMEOUT_SECONDS
     paths, timings = [], []
     for index, chunk in enumerate(chunks, 1):
         path = cache / f"chunk_{index:04d}.wav"
@@ -170,12 +170,9 @@ async def synthesize_recap_segments(artifact, provider, output_path, *, voice, r
         raw = cache / f"chunk_{index:04d}.partial.mp3"
         pcm = cache / f"chunk_{index:04d}.partial.wav"
         if not resumed:
-            remaining = min(TTS_REQUEST_TIMEOUT_SECONDS, deadline - time.monotonic())
-            if remaining <= 0:
-                raise VoiceProviderError(provider.name, "Long recap TTS deadline reached; retry resumes validated chunks")
             try:
                 await asyncio.wait_for(provider.generate(text=chunk.text, output_path=raw, voice=voice,
-                    rate=rate, pitch=pitch, volume=volume), timeout=remaining)
+                    rate=rate, pitch=pitch, volume=volume), timeout=TTS_REQUEST_TIMEOUT_SECONDS)
                 validation = validate_audio_file(raw)
                 if not validation.valid:
                     raise ValueError(f"Recap TTS chunk {index} failed audio validation")

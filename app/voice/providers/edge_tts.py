@@ -82,6 +82,11 @@ class EdgeTTSProvider(BaseVoiceProvider):
 
         name = type(error).__name__.lower()
         module = type(error).__module__.lower()
+        if name == "noaudioreceived":
+            # Edge can close a valid synthesis without audio during transient
+            # service trouble. The same validated voice/text may succeed next
+            # time; do not discard earlier completed recap chunks.
+            return True
         transient_names = (
             "timeout",
             "connection",
@@ -145,7 +150,8 @@ class EdgeTTSProvider(BaseVoiceProvider):
                 error_msg = self._diagnostic(exc)
                 if "voice" in str(exc).lower() and "not found" in str(exc).lower():
                     raise VoiceNotFoundError(voice, self.name) from exc
-                if attempt >= total_attempts or not self._is_retryable(exc):
+                if (attempt >= total_attempts or not self._is_retryable(exc)
+                        or (type(exc).__name__ == "NoAudioReceived" and attempt >= 2)):
                     raise VoiceProviderError(
                         self.name,
                         f"Generation failed after {attempt}/{total_attempts} "

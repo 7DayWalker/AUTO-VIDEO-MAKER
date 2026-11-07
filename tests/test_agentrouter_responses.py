@@ -28,6 +28,23 @@ def completed(model="gpt-6.1-sol"):
     }
 
 
+def test_chapter_json_forces_low_reasoning_and_16k_on_first_call(monkeypatch):
+    from app.production.narration_real import _call_json
+    monkeypatch.setenv("AGENTROUTER_REASONING_EFFORT", "high")
+    response = Mock(status_code=200)
+    response.json.return_value = completed()
+    response.json.return_value["output"][1]["content"][0]["text"] = '{"beats":[]}'
+    post = Mock(return_value=response)
+    monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
+    provider = AgentRouterProvider(api_key="synthetic-key", timeout=7)
+    assert _call_json(provider, "Grounded text only", "Return JSON") == {"beats": []}
+    assert post.call_count == 1
+    assert post.call_args.kwargs["json"]["max_output_tokens"] == 16384
+    assert post.call_args.kwargs["json"]["reasoning"] == {"effort": "low"}
+    assert post.call_args.kwargs["timeout"] == 300
+    assert provider._timeout == 7
+
+
 @pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6-astra"])
 @pytest.mark.parametrize("base_url", [None, "https://agentrouter.org", "https://agentrouter.org/v1/"])
 def test_direct_responses_json_instructions_usage_and_exact_identity(monkeypatch, model, base_url):
@@ -45,7 +62,7 @@ def test_direct_responses_json_instructions_usage_and_exact_identity(monkeypatch
     assert sent["json"] == {
         "model": model, "input": [{"role": "user", "content": [{"type": "input_text", "text": "Return JSON from the supplied dialogue."}]}],
         "instructions": "Grounded text only.", "max_output_tokens": 128, "stream": False,
-        "reasoning": {"effort": "none"}, "text": {"format": {"type": "json_object"}},
+        "reasoning": {"effort": "low"}, "text": {"format": {"type": "json_object"}},
     }
     assert json.loads(result.content) == {"ok": True}
     assert result.model == model and result.provider == "agentrouter" and result.raw_response is None

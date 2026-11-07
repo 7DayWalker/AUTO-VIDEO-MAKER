@@ -121,7 +121,7 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
         out = out_dir / f"window_{window_idx:03d}_frame_{k:02d}_{ts:.1f}.jpg"
         try:
             runner.run(
-                ["-y", "-ss", f"{ts:.3f}", "-i", str(src), "-frames:v", "1",
+                ["-y", "-ss", f"{ts:.3f}", "-threads", "2", "-i", str(src), "-frames:v", "1",
                  "-vf", f"scale={PRO_FRAME_WIDTH}:-2", "-q:v", "5", str(out)],
                 f"Pro window {window_idx} frame {k} @ {ts:.1f}s",
             )
@@ -136,7 +136,7 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
         return [frame for frame in pool.map(extract, enumerate(stamps)) if frame is not None]
 
 
-def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None, recap_budget=None, deadline=None) -> NarrationArtifact:
+def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: SourceAsset, source_transcript: SourceTranscript, target_duration_seconds: float, *, summary_model_id: str, prov, root=None, recap_budget=None, deadline=None, minimum_cached_chapters=0) -> NarrationArtifact:
     from app.content.model_registry import get_model
     selected = get_model(summary_model_id)
     composite = selected.visual_observer_model_id is not None
@@ -183,7 +183,7 @@ def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: So
                 prov=prov, context_tokens=selected.capabilities.context_tokens, visual_observer=observer,
                 frame_loader=load_frames,
                 checkpoint_path=unit_plan_dir(production_id, unit_id, root=root) / "narration_chapters.partial.json",
-                deadline=deadline)
+                deadline=deadline, minimum_cached_chapters=minimum_cached_chapters)
             artifact.summary_understanding_model_id = summary_model_id
             return artifact
     dur = float(source_asset.duration)

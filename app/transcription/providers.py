@@ -47,15 +47,22 @@ class LocalWhisperProvider:
             from app.assembly.ffmpeg import probe_media
             if not probe_media(media_path).has_audio:
                 raise RuntimeError("SOURCE_AUDIO_MISSING: " + SOURCE_AUDIO_MISSING_MESSAGE)
-        try:
-            import whisper  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(f"STT_ENGINE_UNAVAILABLE: openai-whisper not installed ({exc})")
         model_name = os.getenv("AVM_WHISPER_MODEL", "tiny")
-        try:
-            model = whisper.load_model(model_name)
-        except Exception as exc:
-            raise RuntimeError(f"STT_ENGINE_UNAVAILABLE: cannot load whisper model '{model_name}' ({exc})")
+        from app.transcription.chunked import LONG_SOURCE_SECONDS, transcribe_in_chunks
+        self._model = None
+        self._model_name = model_name
+        if duration > LONG_SOURCE_SECONDS:
+            language, segments = transcribe_in_chunks(media_path, duration, model_name, self._transcribe_window)
+            return TranscriptionResult(language, segments, self.provider, model_name)
+        return self._transcribe_window(media_path, duration)
+
+    def _transcribe_window(self, media_path: Path, duration: float) -> TranscriptionResult:
+        if self._model is None:
+            try:
+                import whisper
+                self._model = whisper.load_model(self._model_name)
+            except Exception as exc:
+                raise RuntimeError("STT_ENGINE_UNAVAILABLE: cannot load local Whisper model (" + type(exc).__name__ + ")") from None
         # Whisper's audio loader shells out to `ffmpeg` on PATH.  On Windows AVM
         # resolves ffmpeg via FFMPEG_PATH / WinGet install; ensure it is on PATH
         # for the child process so whisper.load_audio can find it.
@@ -74,7 +81,7 @@ class LocalWhisperProvider:
                 if _dir not in os.environ.get("PATH", ""):
                     os.environ["PATH"] = _dir + os.pathsep + os.environ.get("PATH", "")
         try:
-            result = model.transcribe(str(media_path), verbose=False)
+            result = self._model.transcribe(str(media_path), verbose=False)
         except FileNotFoundError as exc:
             # Typically ffmpeg not on PATH for whisper.audio.load_audio
             raise RuntimeError(f"TRANSCRIPTION_FAILED: ffmpeg not found on PATH for Whisper audio decode ({exc})")
@@ -86,13 +93,13 @@ class LocalWhisperProvider:
             if not text:
                 continue
             start = float(s.get("start", 0))
-            end = float(s.get("end", 0))
+            end = min(float(duration), float(s.get("end", 0)))
             if not (0 <= start < end):
                 continue
             segs.append({"text": text, "start": start, "end": end})
         if not segs and (result.get("text") or "").strip():
             segs = [{"text": result["text"].strip(), "start": 0.0, "end": float(duration)}]
-        return TranscriptionResult(language=result.get("language"), segments=segs, provider=self.provider, provider_version=model_name)
+        return TranscriptionResult(language=result.get("language"), segments=segs, provider=self.provider, provider_version=self._model_name)
 
 # Truthful production default: local_whisper.  Mock requires explicit opt-in.
 # Overridable via AVM_TRANSCRIPTION_PROVIDER for operator configuration.

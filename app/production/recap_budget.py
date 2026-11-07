@@ -217,9 +217,14 @@ def requires_chapter_planning(source_duration, budget):
 
 
 def chapter_planning_timeout_seconds(budget: RecapBudget | None, *, composite: bool = False) -> int:
-    """Bound the whole operation, not each provider call, below K3's deadline."""
-    long_form = budget is not None and budget.target_duration_seconds >= 720
-    return (1740 if composite else 1140) if long_form else (840 if composite else 240)
+    """Independent socket budget for EVERY chapter call, never a job deadline.
+
+    Keep the public signature for callers/runtime diagnostics. A sixteen-chapter
+    movie may legitimately run for hours; previous chapters cannot consume the
+    next chapter's time. Durability and single-flight, not a global stopwatch,
+    bound recovery work.
+    """
+    return 300
 
 
 def timeline_sections(transcript, source_duration, allowed_ids=None):

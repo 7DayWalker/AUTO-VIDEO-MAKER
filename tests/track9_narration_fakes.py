@@ -94,14 +94,18 @@ class StubNarrationProvider(BaseLLMProvider):
     def is_available(self):
         return True
 
-    def generate(self, prompt, system_prompt=None, response_schema=None, temperature=0.7, max_tokens=4096):
+    def generate(self, prompt, system_prompt=None, response_schema=None, temperature=0.7, max_tokens=4096, reasoning=None):
         self.calls.append({"prompt": prompt, "system_prompt": system_prompt, "max_tokens": max_tokens})
+        if reasoning is not None:
+            self.calls[-1]["reasoning"] = reasoning
         if self.error is not None:
             raise self.error
         return LLMResponse(content=self.raw, provider=self.name, model=self.model)
 
     def generate_json(self, *args, **kwargs):
         self.json_calls += 1
+        if "reasoning" in kwargs:
+            return self.generate(*args, **kwargs)
         return super().generate_json(*args, **kwargs)
 
 

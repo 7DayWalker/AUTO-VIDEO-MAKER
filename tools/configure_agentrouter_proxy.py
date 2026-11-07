@@ -27,7 +27,7 @@ _MEDIA_GUARD = """const data = JSON.parse(body);
         }"""
 _ENVELOPE = """model: data.model,
           input: input,
-          ...(Number.isInteger(data.max_completion_tokens || data.max_tokens) ? { max_output_tokens: data.max_completion_tokens || data.max_tokens } : {}),
+          max_output_tokens: data.max_output_tokens || data.max_completion_tokens || data.max_tokens || 16384,
           ...(data.response_format && data.response_format.type === 'json_object' ? { text: { format: { type: 'json_object' } } } : {}),
           stream: isStream"""
 
@@ -51,13 +51,42 @@ def hardened_proxy_text(text):
         if len(re.findall(pattern, text)) != 1:
             raise ValueError("Proxy envelope anchor not recognized; no private content displayed")
         text = re.sub(pattern, lambda match: _ENVELOPE, text, count=1)
-    if "reasoning: { effort: data.reasoning_effort }" not in text:
+    # Upgrade older installations without displaying private proxy literals.
+    text = re.sub(r"\.\.\.\(Number\.isInteger\(data\.max_completion_tokens \|\| data\.max_tokens\) \? \{ max_output_tokens: data\.max_completion_tokens \|\| data\.max_tokens \} : \{\}\),",
+                  "max_output_tokens: data.max_output_tokens || data.max_completion_tokens || data.max_tokens || 16384,", text)
+    old_reasoning = r"\.\.\.\(\['(?:none', ')?low', 'medium', 'high'\]\.includes\(data\.reasoning_effort\) \? \{ reasoning: \{ effort: data\.reasoning_effort \} \} : \{\}\),"
+    reasoning = "reasoning: data.reasoning || { effort: data.reasoning_effort || 'low' },"
+    text = re.sub(old_reasoning, reasoning, text)
+    if reasoning not in text:
         anchor = "input: input,"
         if text.count(anchor) != 1:
             raise ValueError("Proxy reasoning anchor not recognized; no private content displayed")
-        text = text.replace(anchor, anchor + "\n          ...(['none', 'low', 'medium', 'high'].includes(data.reasoning_effort) ? { reasoning: { effort: data.reasoning_effort } } : {}),", 1)
-    text = text.replace("['low', 'medium', 'high'].includes(data.reasoning_effort)",
-                        "['none', 'low', 'medium', 'high'].includes(data.reasoning_effort)")
+        text = text.replace(anchor, anchor + "\n          " + reasoning, 1)
+    # Native /v1/responses is not translated: preserve its reasoning object and
+    # apply safe defaults only when absent. Other private proxy routes stay as-is.
+    anchor = "let payload = body;"
+    if anchor in text and "AVM_NATIVE_RESPONSES" not in text:
+        text = text.replace(anchor, anchor + """
+    // AVM_NATIVE_RESPONSES: no reasoning/token fields dropped in pass-through.
+    if (!isChat && /\\/responses(?:\\?|$)/.test(req.url) && body) {
+      try {
+        const native = JSON.parse(body);
+        native.max_output_tokens ??= 16384;
+        native.reasoning ??= { effort: 'low' };
+        payload = JSON.stringify(native);
+      } catch { res.writeHead(400); res.end(); return; }
+    }
+""", 1)
+    # This is a text JSON bridge, never a movie-upload proxy. Bound JSON RAM.
+    if "req.on('data', chunk => body += chunk);" in text:
+        text = text.replace("req.on('data', chunk => body += chunk);", """let bodyBytes = 0;
+  req.on('data', chunk => {
+    bodyBytes += chunk.length;
+    if (bodyBytes > 8 * 1024 * 1024) { res.writeHead(413); res.end(); req.destroy(); return; }
+    body += chunk;
+  });""", 1)
+    if "proxyReq.setTimeout(300000" not in text and "proxyReq.write(payload);" in text:
+        text = text.replace("proxyReq.write(payload);", "proxyReq.setTimeout(300000, () => proxyReq.destroy(new Error('Upstream socket timed out')));\n    proxyReq.write(payload);", 1)
     if "resp.status === 'incomplete'" not in text:
         pattern = r"finish_reason:\s*toolCalls\.length\s*>\s*0\s*\?\s*['\"]tool_calls['\"]\s*:\s*['\"]stop['\"]"
         if len(re.findall(pattern, text)) != 1:
@@ -91,7 +120,7 @@ def main():
     print("proxy_token_budget_preserved=" + str("max_output_tokens:" in modified))
     print("proxy_json_mode_preserved=" + str("format: { type: 'json_object' }" in modified))
     print("proxy_incomplete_output_detected=" + str("resp.status === 'incomplete'" in modified))
-    print("proxy_reasoning_effort_preserved=" + str("reasoning: { effort: data.reasoning_effort }" in modified))
+    print("proxy_reasoning_effort_preserved=" + str("reasoning: data.reasoning" in modified))
     print("proxy_changed=" + str(original != modified))
     return 0
 

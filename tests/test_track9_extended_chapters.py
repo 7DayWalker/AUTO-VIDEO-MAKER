@@ -48,7 +48,7 @@ def test_long_recap_uses_final_chapter_beats_full_transcript_and_rolling_context
     assert [b.order for b in artifact.beats] == list(range(1, len(artifact.beats) + 1))
     assert artifact.visual_frame_count == (150 if visual else 0)
     assert artifact.multimodal_calls == (5 if visual else 0)
-    assert all(call["max_tokens"] >= 4096 for call in provider.calls)
+    assert all(call["max_tokens"] == 16384 for call in provider.calls)
     save_narration_artifact(artifact, production_id=PID, unit_id=UID, root=tmp_path,
                             source_asset=asset, source_transcript=transcript)
     assert load_narration_artifact(PID, UID, root=tmp_path).model_dump() == artifact.model_dump()
@@ -85,7 +85,7 @@ def test_validated_chapters_resume_after_provider_failure_without_final_artifact
     artifact = build_chapter_plan(PID, UID, asset, transcript, budget=resolve_recap_budget(1800),
         prov=provider, frame_loader=frame_loader, context_tokens=128000, checkpoint_path=path)
     assert len(provider.calls) == 3 and artifact.multimodal_calls == 5
-    assert artifact.chapter_count == 5 and not path.exists()
+    assert artifact.chapter_count == 5 and json.loads(path.read_text())["complete"]
 
 
 @pytest.mark.parametrize("fault", [
@@ -117,7 +117,7 @@ def test_chapter_policy_and_dense_context_never_truncate_segments():
     assert all(row["text"] == transcript.segments[row["id"]].text for _, _, rows in windows for row in rows)
 
 
-def test_chapter_truncation_doubles_output_budget_without_salvaging_partial_beats():
+def test_chapter_truncation_retries_once_at_16k_without_salvaging_partial_beats():
     asset, transcript = story_evidence()
     class Truncated(ChapterNarrationProvider):
         def generate_multimodal(self, *args, **kwargs):
@@ -128,7 +128,7 @@ def test_chapter_truncation_doubles_output_budget_without_salvaging_partial_beat
     provider = Truncated()
     artifact = build_chapter_plan(PID, UID, asset, transcript, budget=resolve_recap_budget(1800),
         prov=provider, frame_loader=frame_loader, context_tokens=128000)
-    assert [call["max_tokens"] for call in provider.calls[:2]] == [4096, 8192]
+    assert [call["max_tokens"] for call in provider.calls[:2]] == [16384, 16384]
     assert artifact.chapter_count == 5 and artifact.multimodal_calls == 6
 
 
@@ -212,6 +212,7 @@ def _install_pro_pool(monkeypatch, providers):
     models = []
     for index, provider in enumerate(providers):
         mid = f"fixture-pro-{index}"
+        provider._name = provider._model = mid
         model = CanonicalModel(id=mid, display_name=mid, family="fixture", capabilities=ModelCapabilities(
             vision=True, multimodal=True, context_tokens=128000), bindings=(ProviderBinding(
             provider=mid, provider_model_id=mid, config_keys=(f"FIXTURE_PRO_{index}",)),), default_binding=mid)
@@ -244,7 +245,7 @@ def test_pro_auto_fails_over_only_to_eligible_vision_models_explicit_stays_locke
         assert artifact.summary_failover_used and artifact.understanding_method == "frame_sequence"
         assert artifact.summary_mode == "pro" and artifact.chapter_count == 5
         assert len(providers[1].calls) == 5
-    assert len(providers[0].calls) == 4  # Bounded fast-overload retries before route failover.
+    assert len(providers[0].calls) == 2  # At most one retry, including fast overloads.
 
 
 @pytest.mark.parametrize("duration", [480, 540, 599.8])
@@ -383,4 +384,4 @@ def test_epic_chapter_resume_does_not_discard_twelve_completed_chapters(tmp_path
     artifact = build_chapter_plan(PID, UID, asset, transcript, budget=budget, prov=provider,
                                   checkpoint_path=checkpoint, context_tokens=128000)
     assert artifact.chapter_count == 16 and len(provider.calls) == 4
-    assert not checkpoint.exists()
+    assert json.loads(checkpoint.read_text())["complete"]

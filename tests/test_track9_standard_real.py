@@ -534,8 +534,9 @@ def test_long_transcript_windows_preserve_all_text_ids_and_bounded_prompts(count
     recovered = {index: [] for index in range(count)}
     merges = 0
     for call in provider.calls:
-        assert len((call["system_prompt"] + call["prompt"]).encode("utf-8")) + call["max_tokens"] + 256 <= 32768
-        assert call["max_tokens"] == 8192
+        from app.production.token_budget import text_token_budget
+        assert text_token_budget(call["system_prompt"] + call["prompt"]) + call["max_tokens"] + 256 <= 32768
+        assert call["max_tokens"] == 16384
         evidence = json.loads(call["prompt"].split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
         if "candidate_plans" in evidence:
             merges += 1
@@ -553,7 +554,7 @@ def test_half_hour_movie_with_short_dialogue_is_compacted_without_dropping_any_s
     asset, transcript = standard_evidence(duration=1805)
     transcript.segments = [TranscriptSegment(text=f"Observed event {index}.", start=index * 4.9, end=(index + 1) * 4.9) for index in range(365)]
     provider = WindowNarrationProvider()
-    ai_grounded_plan(PID, UID, asset, transcript, target_duration_seconds=30, prov=provider)
+    ai_grounded_plan(PID, UID, asset, transcript, target_duration_seconds=30, prov=provider, context_tokens=128000)
     assert len(provider.calls) == 1
     evidence = json.loads(provider.calls[0]["prompt"].split("evidence:\n", 1)[1].split("\nRequired JSON schema:", 1)[0])
     assert [row["id"] for row in evidence["transcript_segments"]] == list(range(365))
@@ -605,13 +606,13 @@ def test_real_provider_adapters_invoke_native_json_http_for_arbitrary_narration(
         assert url.endswith("/models/gemini-3-flash-preview:generateContent")
         assert "key=" not in url and "synthetic-http-boundary-key" not in url
         assert payload["generationConfig"]["responseMimeType"] == "application/json"
-        assert payload["generationConfig"]["maxOutputTokens"] == 8192
+        assert payload["generationConfig"]["maxOutputTokens"] == 16384
         assert payload["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
     else:
         assert url.endswith("/chat/completions")
         assert payload["model"] == model
         assert payload["response_format"] == {"type": "json_object"}
-        assert payload["max_tokens"] == 8192
+        assert payload["max_tokens"] == 16384
     assert artifact.narration_text == " ".join(beat["narration_text"] for beat in standard_response()["beats"])
 
 

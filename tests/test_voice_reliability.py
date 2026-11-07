@@ -91,6 +91,27 @@ def test_edge_tts_retries_are_bounded_and_preserve_diagnostics(monkeypatch, tmp_
     assert "persistent provider outage" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
+def test_edge_empty_stream_has_only_one_retry(monkeypatch, tmp_path, persistent):
+    from edge_tts.exceptions import NoAudioReceived
+    provider = EdgeTTSProvider(max_retries=2, backoff_seconds=0)
+    provider._edge_tts = object()
+    calls = []
+    async def once(text, output, *args):
+        calls.append(text)
+        if persistent or len(calls) == 1:
+            raise NoAudioReceived("Synthetic empty stream")
+        output.write_bytes(b"audio")
+    monkeypatch.setattr(provider, "_generate_once", once)
+    request = provider.generate(text="Narration", output_path=tmp_path / "voice.mp3", voice="en-US-AndrewMultilingualNeural")
+    if persistent:
+        with pytest.raises(VoiceProviderError, match="NoAudioReceived"):
+            asyncio.run(request)
+    else:
+        asyncio.run(request)
+    assert len(calls) == 2
+
+
 def test_generator_rejects_invalid_provider_output(monkeypatch, tmp_path):
     provider = _SuccessfulProvider()
     generator = VoiceGenerator(provider=provider, output_dir=tmp_path)

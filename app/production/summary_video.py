@@ -193,7 +193,9 @@ def _extract_clip_range(source_path: Path, start: float, duration: float, output
     timing = (["-t", f"{duration:.8f}", "-i", str(source_path), "-t", f"{frame_count / frame_rate:.8f}",
                "-r", f"{frame_rate:.8f}", "-frames:v", str(frame_count)] if frame_count is not None else
               ["-i", str(source_path), "-t", f"{duration:.6f}"])
-    args=["-y","-ss",f"{start:.6f}",*timing, "-map", "0:v:0",
+    # Bound decoder threads too: output-only -threads does not limit input
+    # decode queues, especially when four high-resolution cuts run together.
+    args=["-y","-ss",f"{start:.6f}","-threads","2",*timing, "-map", "0:v:0",
         "-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p","-movflags","+faststart",
         *audio_args, "-threads", "2", str(output_path)]
     run_ffmpeg(args, f"extracting source clip [{start:.3f}, {start+duration:.3f})")
@@ -664,7 +666,10 @@ def assemble_narrated_summary(production_id, unit_id, root=None, *, narration_ar
             raise ValueError('Summary video does not closely match the measured narration duration')
         final_dest=summary_video_output_path(production_id, unit_id, root=root_p)
         final_dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(assembled_file, final_dest)
+        # Readers keep the previous playable master until the entire replacement
+        # is on disk. A disconnect/interrupted copy cannot expose a partial MP4.
+        from app.production.source import _atomic_copy
+        _atomic_copy(assembled_file, final_dest)
         dest_info=probe_media(final_dest)
         prod_dir=production_dir(production_id, root=root_p)
         try: rel_output=final_dest.relative_to(prod_dir).as_posix()

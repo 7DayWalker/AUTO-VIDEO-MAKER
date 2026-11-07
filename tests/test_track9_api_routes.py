@@ -69,7 +69,7 @@ def test_summary_runtime_proves_imports_inside_serving_process(monkeypatch, tmp_
         assert payload["process_id"] == os.getpid()
         assert payload["imports"] and all(payload["imports"].values())
         assert payload["chapter_planning_timeout_seconds"] == {
-            "feature_standard": 1140, "feature_pro_composite": 1740,
+            "feature_standard": 300, "feature_pro_composite": 300,
         }
         assert set(payload) == {"ok", "service", "process_id", "contract", "imports", "chapter_planning_timeout_seconds"}
     finally:

@@ -119,8 +119,8 @@ def test_seconds_precedence_custom_requires_target_and_chapter_model_limits():
         RecapBudget.model_validate({**budget.model_dump(), "max_beats": 221})
     with pytest.raises(ValidationError):
         RecapBudget.model_validate({**budget.model_dump(), "min_chapters": 17})
-    assert chapter_planning_timeout_seconds(budget) >= 600
-    assert chapter_planning_timeout_seconds(budget, composite=True) < 1800
+    assert chapter_planning_timeout_seconds(budget) == 300
+    assert chapter_planning_timeout_seconds(budget, composite=True) == 300
 
 
 def test_timeout_helper_is_an_explicit_shared_module_level_contract():
@@ -132,9 +132,9 @@ def test_timeout_helper_is_an_explicit_shared_module_level_contract():
         assert module.chapter_planning_timeout_seconds is chapter_planning_timeout_seconds
     for module in (narration_real, narration_pro):
         assert module.requires_chapter_planning is requires_chapter_planning
-    assert chapter_planning_timeout_seconds(None) == 240
-    assert chapter_planning_timeout_seconds(None, composite=True) == 840
+    assert chapter_planning_timeout_seconds(None) == 300
+    assert chapter_planning_timeout_seconds(None, composite=True) == 300
     movie = resolve_recap_budget(3742.174331)
     assert movie.target_duration_seconds == 810
-    assert chapter_planning_timeout_seconds(movie) == 1140
-    assert chapter_planning_timeout_seconds(movie, composite=True) == 1740
+    assert chapter_planning_timeout_seconds(movie) == 300
+    assert chapter_planning_timeout_seconds(movie, composite=True) == 300

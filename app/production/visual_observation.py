@@ -5,7 +5,6 @@ import json
 import re
 import time
 import os
-from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
@@ -13,7 +12,7 @@ from typing import Literal
 
 from app.content.providers.agentrouter import require_text_only
 from app.production.narration_real import NarrationModelOutputError
-from app.production.narration_real import standard_transient_failure_category
+from app.production.narration_real import standard_transient_failure_category, quarantine_vision_observer, observer_is_quarantined
 from app.content.exceptions import LLMConnectionError
 
 VISUAL_OBSERVATION_BATCH_SIZE = 4
@@ -72,14 +71,17 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
                     pass
             for attempt in range(3):
                 try:
+                    if observer_is_quarantined(prov.name, prov.model):
+                        raise LLMConnectionError(prov.name, "Visual observer quarantined for this process")
                     notes = observe_chapter_frames(prov, batch, dialogue, start=left, end=right,
                                                    continuity=continuity, on_request=on_request, deadline=deadline)
                     break
                 except Exception as exc:
                     from app.providers.fallback_policy import FailureCategory
                     category = standard_transient_failure_category(exc)
+                    quarantine_vision_observer(prov, exc)
                     if attempt == 2 or category not in {
-                        FailureCategory.NETWORK, FailureCategory.PROVIDER_5XX, FailureCategory.TIMEOUT,
+                        FailureCategory.PROVIDER_5XX,
                         FailureCategory.RESPONSE_MALFORMED,
                     }:
                         raise
@@ -87,8 +89,9 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
             if on_batch is not None:
                 on_batch(offset, notes)
             return [{**note, "frame_id": note["frame_id"] + offset} for note in notes]
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            result = [note for batch in pool.map(inspect, chunks) for note in batch]
+        # Probe sequentially: parallel queued requests would keep billing a
+        # dead route after its first capability/quota/network failure.
+        result = [note for chunk in chunks for note in inspect(chunk)]
         validate_visual_action_notes(result, frames)
         return result
     payload = {

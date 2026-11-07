@@ -67,6 +67,7 @@ MEDIA_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v"}
 _connect_running = {"platform": None}
 _summary_runs: dict[tuple[str, str, str], dict] = {}
 _summary_runs_lock = threading.Lock()
+_transcription_runs: dict[tuple[str, str, str], dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -2984,6 +2985,7 @@ def production_detail_payload(production_id: str):
             "execution": progress,
             "blocking_units": _blocking_units(unit, progress_by_id),
             "plan_exists": _plan_evidence(production_id, unit.unit_id)["exists"],
+            "summary_progress": _summary_progress_snapshot(production_id, unit.unit_id),
         })
     payload = {
         "production_id": production.production_id,
@@ -4361,21 +4363,63 @@ def summary_progress_payload(production_id: str, unit_id: str):
     _, error = _track9_check_unit(production_id, unit_id)
     if error:
         return error
+    return 200, _summary_progress_snapshot(production_id, unit_id)
+
+
+def _summary_progress_snapshot(production_id: str, unit_id: str):
+    """Only small JSON checkpoints/stat calls; no media probe or paid work."""
     key = (str(PRODUCTIONS_DIR.resolve()), production_id, unit_id)
     with _summary_runs_lock:
         run = dict(_summary_runs.get(key) or {"running": False, "active_action": None, "started_at": None})
+        transcribing = [dict(value) for source_key, value in _transcription_runs.items() if source_key[:2] == key[:2]]
+    if transcribing and not run["running"]:
+        run = transcribing[0]
     from app.production.storage import unit_plan_dir
     checkpoint = unit_plan_dir(production_id, unit_id, root=PRODUCTIONS_DIR) / "narration_chapters.partial.json"
     completed = None
+    total = None
+    updated = None
+    complete = False
     if checkpoint.is_file():
         try:
             data = json.loads(checkpoint.read_text(encoding="utf-8"))
             if isinstance(data.get("chapters"), list):
                 completed = sum(isinstance(chapter, dict) and isinstance(chapter.get("plan"), dict) for chapter in data["chapters"])
+                total = data.get("chapter_count")
+                # Old partial checkpoints retain the zero-based final observer.
+                if total is None and isinstance(data.get("pending_visual"), dict):
+                    total = max(completed, data["pending_visual"].get("chapter_index", -1) + 1)
+                updated = checkpoint.stat().st_mtime_ns
+                complete = data.get("complete") is True
         except (OSError, ValueError, AttributeError):
             pass  # Concurrent checkpoint writes/old shapes are not invented counts.
-    return 200, {"production_id": production_id, "unit_id": unit_id, **run,
-                 "chapters_completed": completed, "checkpoint_available": completed is not None}
+    transcript_completed = transcript_total = None
+    audio_completed = None
+    if run.get("active_action") == "synthesizing":
+        audio_checkpoints = list(checkpoint.parent.glob("narration_audio.tts_chunks/*/checkpoint.json"))
+        if audio_checkpoints:
+            try:
+                newest = max(audio_checkpoints, key=lambda path: path.stat().st_mtime_ns)
+                audio_completed = len(json.loads(newest.read_text(encoding="utf-8")).get("chunks", {}))
+                updated = max(updated or 0, newest.stat().st_mtime_ns)
+            except (OSError, ValueError, TypeError):
+                pass
+    source_dir = PRODUCTIONS_DIR / production_id / "source"
+    for chunk_path in source_dir.glob("*.transcription/transcript_chunks.json"):
+        try:
+            chunked = json.loads(chunk_path.read_text(encoding="utf-8"))
+            if chunked.get("complete") is not True or transcribing:
+                transcript_completed = len(chunked.get("chunks", {}))
+                transcript_total = chunked.get("chunk_count")
+                updated = max(updated or 0, chunk_path.stat().st_mtime_ns)
+        except (OSError, ValueError, TypeError):
+            pass
+    return {"production_id": production_id, "unit_id": unit_id, **run,
+            "chapters_completed": completed, "chapter_count": total,
+            "checkpoint_available": completed is not None, "narration_complete": complete,
+            "checkpoint_revision": str(updated) if updated else None,
+            "audio_chunks_completed": audio_completed,
+            "transcript_chunks_completed": transcript_completed, "transcript_chunk_count": transcript_total}
 
 
 def narration_get_payload(production_id: str, unit_id: str):
@@ -4430,7 +4474,16 @@ def transcribe_payload(production_id: str, body: dict, asset_id=None):
                 return 404, {"error": "SOURCE_NOT_FOUND", "message": "Register a real source or enable Mock / sandbox mode."}
             asset_id = selected.asset_id
     from app.transcription.transcribe import transcribe_source
-    status, payload = transcribe_source(production_id, asset_id, root=PRODUCTIONS_DIR, provider=provider, mock_mode=mock_mode)
+    key = (str(PRODUCTIONS_DIR.resolve()), production_id, asset_id)
+    with _summary_runs_lock:
+        if key in _transcription_runs:
+            return 409, {"error": "SUMMARY_ALREADY_RUNNING", "message": "Source transcription is already running; inspect saved progress."}
+        _transcription_runs[key] = {"running": True, "active_action": "transcribing", "started_at": datetime.now().isoformat()}
+    try:
+        status, payload = transcribe_source(production_id, asset_id, root=PRODUCTIONS_DIR, provider=provider, mock_mode=mock_mode)
+    finally:
+        with _summary_runs_lock:
+            _transcription_runs.pop(key, None)
     if status >= 400 and "message" in payload:
         payload = {**payload, "message": _browser_safe_diagnostic(payload["message"])}
     return status, payload
@@ -4447,6 +4500,9 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         return err
     if not isinstance(body, dict):
         body = {}
+    protected = body.get("minimum_cached_chapters", 0)
+    if isinstance(protected, bool) or not isinstance(protected, int) or not 0 <= protected <= 40:
+        return 400, {"error": "INVALID_REQUEST", "message": "minimum_cached_chapters must be an integer from 0 to 40"}
     summary_mode = str(body.get("summary_mode") or "standard").strip().lower()
     if summary_mode not in ("standard", "pro"):
         return 400, {"error": "INVALID_REQUEST", "message": "summary_mode must be standard or pro"}
@@ -4511,7 +4567,8 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         replacing = narration_artifact_path(production_id, unit_id, root=PRODUCTIONS_DIR).is_file()
         art = build_grounded_narration_plan(production_id, unit_id, sa, tr, target_duration_seconds=tds,
             target_length_preset=length_preset, canonical_model_id=explicit, summary_understanding_model_id=explicit,
-            summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR)
+            summary_understanding_mode=sel, summary_mode=summary_mode, mock_mode=mock_mode, root=PRODUCTIONS_DIR,
+            **({"minimum_cached_chapters": protected} if protected else {}))
         art.source_transcript_path = tr.transcript_path
         art.source_media_path = sa.stored_path
         from app.production.storage import save_narration_artifact
@@ -4770,17 +4827,17 @@ def _serve_summary_video_media(handler, production_id: str, unit_id: str):
         return handler._json(404, {"error": "SUMMARY_VIDEO_MEDIA_NOT_FOUND"})
     size=media.stat().st_size; rh=handler.headers.get("Range",""); s,e=0,size-1
     if rh:
-        if not rh.startswith("bytes="):
-            return handler._json(416, {"error": "INVALID_RANGE"})
-        v=rh[6:].split(",",1)[0].strip(); parts=v.split("-",1)
         try:
+            if not re.fullmatch(r"bytes=\d*-\d*", rh): raise ValueError
+            parts=rh[6:].split("-",1)
             if len(parts)!=2 or (not parts[0] and not parts[1]): raise ValueError
             if parts[0]: s=int(parts[0]); e=int(parts[1]) if parts[1] else size-1
             else: sl=int(parts[1]); s=max(0,size-sl); e=size-1
             if s<0 or s>=size or e<s: raise ValueError
             e=min(e,size-1)
         except Exception:
-            handler.send_response(416); handler.send_header("Content-Range", f"bytes */{size}"); handler.end_headers(); return
+            handler.send_response(416); handler.send_header("Content-Range", f"bytes */{size}")
+            handler.send_header("Content-Length", "0"); handler.end_headers(); return
     ln=e-s+1
     handler.send_response(206 if rh else 200)
     handler.send_header("Content-Type", MIME.get(media.suffix.lower(), "video/mp4"))
@@ -4788,16 +4845,30 @@ def _serve_summary_video_media(handler, production_id: str, unit_id: str):
     handler.send_header("Accept-Ranges", "bytes")
     if rh: handler.send_header("Content-Range", f"bytes {s}-{e}/{size}")
     handler.end_headers()
-    with media.open("rb") as fh:
-        fh.seek(s); rem=ln
-        while rem>0:
-            ch=fh.read(min(1024*256, rem))
-            if not ch: break
-            handler.wfile.write(ch); rem-=len(ch)
+    try:
+        with media.open("rb") as fh:
+            fh.seek(s); rem=ln
+            while rem>0:
+                ch=fh.read(min(1024*256, rem))
+                if not ch: break
+                handler.wfile.write(ch); rem-=len(ch)
+    except OSError as exc:
+        if not _is_client_disconnect(exc):
+            raise
+        # A seek cancels the preceding byte range. Never send a second response
+        # or produce an error/INFO traceback for that normal browser behavior.
 
 
 class AVMHandler(BaseHTTPRequestHandler):
     server_version = "AVMWeb/1.0"
+
+    def handle(self):
+        try:
+            super().handle()
+        except OSError as exc:
+            # BaseHTTPRequestHandler also flushes after do_GET returns.
+            if not _is_client_disconnect(exc):
+                raise
 
     # -- helpers ----------------------------------------------------------
     def _json(self, status: int, payload) -> None:
@@ -4917,6 +4988,9 @@ class AVMHandler(BaseHTTPRequestHandler):
     def _productions_post(self, path: str):
         upload = re.match(r"^/api/productions/([^/]+)/source/upload/?$", path)
         if upload:
+            if self.headers.get("Transfer-Encoding"):
+                self.close_connection = True
+                return self._json(411, {"error": "LENGTH_REQUIRED", "message": "Stream the browser File with its Content-Length; encoded/chunked bodies are not accepted."})
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/octet-stream":
                 return self._json(415, {"error": "INVALID_REQUEST", "message": "Source uploads require application/octet-stream."})
             try:
@@ -4927,7 +5001,7 @@ class AVMHandler(BaseHTTPRequestHandler):
 
             timeout = self.connection.gettimeout()
             try:
-                self.connection.settimeout(120)
+                self.connection.settimeout(300)  # Idle timeout, not total upload runtime.
                 status, payload = register_uploaded_source(
                     upload.group(1), unquote(self.headers.get("X-AVM-Filename", "")),
                     self.rfile, length, root=PRODUCTIONS_DIR,
@@ -5119,6 +5193,8 @@ class AVMHandler(BaseHTTPRequestHandler):
             return self._static(path)
         except Exception as exc:
             if _is_client_disconnect(exc):
+                if re.match(r"^/api/productions/[^/]+/units/[^/]+/summary-video/media/?$", path):
+                    return  # Byte-range seek cancellation is normal, including headers/flush.
                 # Normal browser disconnect during response write (polling
                 # navigation/close). Logged cleanly; never a 500 (the socket
                 # is gone) and never a misleading "GET failed" traceback.

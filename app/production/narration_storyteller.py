@@ -1,13 +1,10 @@
-"""Bounded parallel TEXT batches for slow reasoning-model chapter writers.
+"""One sequential 16K text completion per chapter, with one recovery round.
 
-Visual inspection is already complete. Each batch receives a disjoint portion
-of the chapter's timestamped notes and every overlapping dialogue segment. No
-final whole-chapter rewrite loses detail; validated beats are joined in order.
+Visual inspection is already complete. The first request receives the whole
+chapter. Only proven truncation permits two sequential disjoint recovery parts.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from copy import copy
 import json
 import logging
 import time
@@ -17,30 +14,40 @@ from app.content.providers.agentrouter import require_text_only
 from app.production.narration_real import (
     NarrationModelOutputError, _call_json, validate_storyteller_language, standard_transient_failure_category,
     validate_true_ending,
+    CHAPTER_OUTPUT_TOKENS, chapter_request_provider,
 )
 from app.production.recap_budget import validate_recap_depth
+from app.production.token_budget import text_token_budget
 
 logger = logging.getLogger(__name__)
 
 
 def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_budget, deadline,
-                              cached_batches=None, on_batch=None, context_tokens=None):
+                              cached_batches=None, on_batch=None, context_tokens=None,
+                              call_state=None, on_state=None):
     from app.production.narration_chapters import _ChapterPlan, _chapter_beats, _artifact, _share
 
-    # The last text window needs room for three distinct ending beats. Keep
-    # earlier chapter batching unchanged so cached completed writing survives.
-    required = payload.get("ending_anchor", {}).get("required_final_beats", 2)
-    count = max(1, min(4, local_budget.min_beats // max(2, required)))
+    # Persist claims BEFORE sending a paid request. A browser/server restart
+    # cannot reset the credit guard. A proven truncation alone permits a single
+    # recovery round of two halves (three calls total, no retries of the halves).
+    state = call_state if call_state is not None else {}
+    state.setdefault("calls", 0)
+    count = 2 if state.get("split") else 1
+    cache = cached_batches if cached_batches is not None else {}
+
+    def persist():
+        if on_state is not None:
+            on_state(state)
+
     start, end = payload["start_seconds"], payload["end_seconds"]
-    # Identity/plot continuity is read-only context for every parallel batch;
+    # Identity/plot continuity is read-only context for recovery parts;
     # only the local evidence IDs below are citable. This avoids each batch
     # rediscovering characters or retelling another batch's action.
     continuity_map = [{"timestamp_seconds": note["timestamp_seconds"], "action": note["action"]}
                       for note in payload["visual_action_notes"]]
 
     def write(index):
-        # Each worker owns its request timeout; do not race on a shared adapter.
-        provider = copy(prov) if hasattr(prov, "_timeout") else prov
+        provider = chapter_request_provider(prov)
         left = start + (end - start) * index / count
         right = start + (end - start) * (index + 1) / count
         rows = [{**row, "start_seconds": max(left, row["start_seconds"]),
@@ -62,11 +69,12 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
         evidence = {
             "chapter_index": payload["chapter_index"], "batch_index": index + 1,
             "start_seconds": left, "end_seconds": right,
-            "preferred_beat_count": budget.max_beats, "preferred_word_count": preferred_words,
+            "preferred_beat_count": (payload.get("preferred_beat_count", budget.max_beats) if count == 1 else budget.max_beats),
+            "preferred_word_count": preferred_words,
             "transcript_segments": rows, "visual_action_notes": notes,
             "frames": [frame for frame in payload["frames"] if frame["id"] in allowed_frames],
             "prior_chapter_summaries": payload["prior_chapter_summaries"],
-            "chapter_continuity_context_not_citable": continuity_map,
+            **({"chapter_continuity_context_not_citable": continuity_map} if count > 1 else {}),
             "previous_narration_tail": payload["previous_narration_tail"] if index == 0 else "",
             **({"repair_instructions": payload["repair_instructions"]} if payload.get("repair_instructions") else {}),
         }
@@ -89,28 +97,30 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                   + "Retained Pro notes describe a SCENE tied to its cited frames, not everything in each single image. "
                   + "Do not invent action for unavailable frames. "
                   + "Draft directly, without trying to hit exact per-sentence word counts.")
-        calls = 0
-        cached = (cached_batches or {}).get(str(index))
+        key = "whole" if count == 1 else f"split:{index}"
+        cached = cache.get(key)
         if not isinstance(cached, dict) or not isinstance(cached.get("plan"), dict):
             cached = None
-        output_failures = 0
-        for attempt in range(4):
-            if time.monotonic() >= deadline:
-                raise LLMConnectionError(prov.name, "Storyteller batch deadline exhausted")
+        for attempt in range(2 if count == 1 else 1):
             require_text_only(prompt)
-            max_tokens = 8192 if output_failures else 4096
-            if len((system + prompt).encode("utf-8")) + max_tokens + 256 > (context_tokens or 32768):
+            max_tokens = CHAPTER_OUTPUT_TOKENS
+            if text_token_budget(system + prompt) + max_tokens + 256 > (context_tokens or 32768):
                 raise NarrationModelOutputError("Storyteller batch exceeds its bounded context budget")
-            if hasattr(provider, "_timeout"):
-                provider._timeout = min(provider._timeout, max(.1, deadline - time.monotonic()))
             output_received = False
             try:
                 if cached is not None:
                     data = cached["plan"]
-                    calls = max(1, int(cached.get("calls", 1)))
+                    state["calls"] = max(state["calls"], int(cached.get("calls", 0)))
                     cached = None
                 else:
-                    calls += 1
+                    if state["calls"] >= (3 if count == 2 else 2) or (count == 2 and key in state.get("claimed_parts", [])):
+                        error = RuntimeError("Chapter credit guard reached; completed work is saved. No further paid request was sent.")
+                        error.category = "credit_limit"
+                        raise error
+                    state["calls"] += 1
+                    if count == 2:
+                        state.setdefault("claimed_parts", []).append(key)
+                    persist()
                     data = _call_json(provider, system, prompt, max_tokens=max_tokens)
                 output_received = True
                 plan = _ChapterPlan.model_validate(data)
@@ -121,7 +131,7 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                             raise NarrationModelOutputError("Storyteller batch cites evidence outside its supplied window")
                 # Coverage is validated again on the assembled chapter. Two-beat
                 # batches cannot satisfy a chapter's 40%-gap rule individually.
-                _, beats = _chapter_beats(data, asset, rows, frames, left, right, visual=True, offset=0, validate_coverage=False)
+                _, beats = _chapter_beats(data, asset, rows, frames, left, right, visual=True, offset=0, validate_coverage=count == 1)
                 artifact = _artifact("prd_storyteller_validation", "unit-001", asset, beats,
                                      budget.target_duration_seconds, plan.summary, "grounded")
                 try:
@@ -134,13 +144,14 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                 if anchor is not None:
                     validate_true_ending(beats, anchor, require_visual=True)
                 if on_batch is not None:
-                    on_batch(index, {"plan": plan.model_dump(), "calls": calls})
-                return plan, calls
+                    on_batch(key, {"plan": plan.model_dump(), "calls": state["calls"]})
+                return plan
             except (ValueError, LLMOutputTruncatedError) as exc:
                 if not output_received and isinstance(exc, ValueError) and not isinstance(exc, NarrationModelOutputError):
                     raise  # Local/provider misuse is not repaired as generated text.
-                output_failures += 1
-                if output_failures >= 2 or attempt == 3:
+                if isinstance(exc, LLMOutputTruncatedError):
+                    raise  # Only the top-level recovery may split a whole chapter.
+                if state["calls"] >= 2 or count == 2 or attempt == 1:
                     if isinstance(exc, NarrationModelOutputError):
                         raise
                     raise NarrationModelOutputError("Storyteller batch failed its output/word/citation validation") from None
@@ -155,15 +166,23 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                 # upstream bodies, prompts, headers or credential-bearing URLs.
                 logger.warning("Storyteller batch transport failed: chapter=%d batch=%d attempt=%d type=%s category=%s",
                                payload["chapter_index"], index + 1, attempt + 1, type(exc).__name__, category)
-                if (attempt == 3 or time.monotonic() >= deadline or category not in {
+                if (state["calls"] >= 2 or count == 2 or attempt == 1 or category not in {
                     FailureCategory.NETWORK, FailureCategory.TIMEOUT, FailureCategory.PROVIDER_5XX,
                     FailureCategory.PROVIDER_UNAVAILABLE,
                 }):
                     raise
-                time.sleep(min(2 ** attempt, max(0, deadline - time.monotonic())))
+                time.sleep(1)
         raise NarrationModelOutputError("Storyteller batch did not complete")
 
-    with ThreadPoolExecutor(max_workers=count) as pool:
-        results = list(pool.map(write, range(count)))
-    return {"summary": " ".join(plan.summary for plan, _ in results)[:600],
-            "beats": [beat.model_dump() for plan, _ in results for beat in plan.beats]}, sum(calls for _, calls in results)
+    try:
+        results = [write(index) for index in range(count)]
+    except LLMOutputTruncatedError:
+        if count != 1 or state["calls"] != 1:
+            raise
+        state["split"] = True
+        persist()
+        return write_storyteller_chapter(prov, system, payload, asset=asset, frames=frames,
+            local_budget=local_budget, deadline=deadline, cached_batches=cache, on_batch=on_batch,
+            context_tokens=context_tokens, call_state=state, on_state=on_state)
+    return {"summary": " ".join(plan.summary for plan in results)[:600],
+            "beats": [beat.model_dump() for plan in results for beat in plan.beats]}, state["calls"]
