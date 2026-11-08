@@ -88,3 +88,7 @@ diagnostics/kung_fu_*_live_*.json
 diagnostics/summary_resume_preservation_*.json
 diagnostics/summary-*-20261106.png
 diagnostics/summary_creator*_browser_*/
+# Recovery reports/screenshots stay local; no operator media/consent evidence in Git.
+diagnostics/dragon-queen-*.json
+diagnostics/publishing-recovery-ui-*/
+diagnostics/observer-contract-*.json

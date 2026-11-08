@@ -9,6 +9,7 @@ import requests
 from typing import Optional, Type
 from pydantic import BaseModel
 import logging
+import time
 
 from app.content.providers.base import BaseLLMProvider, LLMResponse
 from app.content.config import (
@@ -24,6 +25,10 @@ from app.content.exceptions import (
     LLMConnectionError,
     LLMModelUnavailableError,
     LLMOutputTruncatedError,
+    LLMInvalidRequestError,
+    LLMTimeoutError,
+    provider_diagnostics,
+    with_provider_diagnostics,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,35 @@ class GeminiProvider(BaseLLMProvider):
     @property
     def model(self) -> str:
         return self._model
+
+    def _raise_for_status(self, response):
+        """A 400 parameter error must never masquerade as missing vision."""
+        if response.status_code == 200:
+            return
+        detail = provider_diagnostics(response, secrets=(self._api_key,))
+        status = response.status_code
+        message = (detail["error_code"] + " " + detail["message"]).lower()
+        if status in (401, 403):
+            error = LLMAuthenticationError(self.name)
+        elif status == 402 or (status == 429 and any(word in message for word in ("quota", "billing", "daily limit"))):
+            error = LLMQuotaError(self.name)
+        elif status == 429:
+            retry = (getattr(response, "headers", {}) or {}).get("Retry-After")
+            error = LLMRateLimitError(self.name, int(retry) if str(retry).isdigit() else None)
+        elif status in (408, 504):
+            error = LLMTimeoutError(self.name, "Upstream request timed out")
+        elif status >= 500:
+            error = LLMConnectionError(self.name, f"Server error: {status}")
+            error.category = "provider_5xx"
+        elif status == 404 or (status == 400 and "model" in message and any(
+            marker in message for marker in ("model is not found", "model not found", "not supported for generatecontent", "model does not support")
+        )):
+            error = LLMModelUnavailableError()
+        elif status in (400, 413, 422):
+            error = LLMInvalidRequestError("Provider rejected the request parameters")
+        else:
+            error = LLMResponseError(f"HTTP {status}")
+        raise with_provider_diagnostics(error, detail)
     
     def generate(
         self,
@@ -121,33 +155,7 @@ class GeminiProvider(BaseLLMProvider):
                 timeout=self._timeout,
             )
             
-            # Handle HTTP errors
-            if response.status_code == 401 or response.status_code == 403:
-                raise LLMAuthenticationError(self.name)
-            elif response.status_code == 429:
-                # Rate limit or quota exceeded
-                error_data = response.json() if response.text else {}
-                error_msg = error_data.get("error", {}).get("message", "Rate limit exceeded")
-                if "quota" in error_msg.lower():
-                    raise LLMQuotaError(self.name)
-                raise LLMRateLimitError(self.name)
-            elif response.status_code >= 500:
-                raise LLMConnectionError(
-                    self.name,
-                    f"Server error: {response.status_code}"
-                )
-            elif response.status_code != 200:
-                error_data = response.json() if response.text else {}
-                error_msg = error_data.get("error", {}).get("message", response.text[:500])
-                if response.status_code == 404 or (
-                    response.status_code == 400 and "model" in error_msg.lower()
-                    and any(word in error_msg.lower() for word in ("not found", "not supported", "unsupported"))
-                ):
-                    raise LLMModelUnavailableError()
-                raise LLMResponseError(
-                    f"HTTP {response.status_code}",
-                    error_msg
-                )
+            self._raise_for_status(response)
             
             # Parse response
             data = response.json()
@@ -216,7 +224,7 @@ class GeminiProvider(BaseLLMProvider):
             )
             
         except requests.exceptions.Timeout:
-            raise LLMConnectionError(self.name, f"Request timed out after {self._timeout}s")
+            raise LLMTimeoutError(self.name, f"Request timed out after {self._timeout}s") from None
         except requests.exceptions.ConnectionError:
             raise LLMConnectionError(self.name, "Transport connection failed") from None
         except (LLMAuthenticationError, LLMQuotaError, LLMRateLimitError, 
@@ -301,18 +309,13 @@ class GeminiProvider(BaseLLMProvider):
         url = f"{self._base_url}/models/{self._model}:generateContent"
         import requests
         from app.content.exceptions import LLMAuthenticationError, LLMQuotaError, LLMRateLimitError, LLMResponseError, LLMConnectionError
+        payload_bytes = len(json.dumps(payload).encode("utf-8"))
+        started = time.monotonic()
+        logger.info("Gemini image request: model=%s frames=%d payload_bytes=%d timeout_s=%.1f",
+                    self._model, len(images or []), payload_bytes, self._timeout)
         try:
             resp = requests.post(url, headers={"Content-Type": "application/json", "x-goog-api-key": self._api_key}, json=payload, timeout=self._timeout)
-            if resp.status_code in (401, 403):
-                raise LLMAuthenticationError(self.name)
-            if resp.status_code == 429:
-                raise LLMRateLimitError(self.name)
-            if resp.status_code >= 500:
-                raise LLMConnectionError(self.name, f"Server error: {resp.status_code}")
-            if resp.status_code in (400, 404):
-                raise LLMModelUnavailableError()
-            if resp.status_code != 200:
-                raise LLMResponseError(f"HTTP {resp.status_code}")
+            self._raise_for_status(resp)
             data = resp.json()
             if (data.get("promptFeedback") or {}).get("blockReason"):
                 error = LLMResponseError("Prompt blocked by provider content policy")
@@ -339,9 +342,10 @@ class GeminiProvider(BaseLLMProvider):
             return LLMResponse(content=text, provider=self.name, model=self._model, usage=usage,
                                raw_response=data, metadata={"finish_reason": finish_reason,
                                "visual_analysis_method": "frame_based_visual_analysis" if images else "native_video_ingestion",
-                               "frame_count": len(images or [])})
+                                "frame_count": len(images or []), "payload_bytes": payload_bytes,
+                                "elapsed_seconds": round(time.monotonic() - started, 3), "timeout_seconds": self._timeout})
         except requests.exceptions.Timeout:
-            raise LLMConnectionError(self.name, "Multimodal request timed out") from None
+            raise LLMTimeoutError(self.name, f"Multimodal request timed out after {self._timeout}s") from None
         except requests.exceptions.ConnectionError:
             raise LLMConnectionError(self.name, "Multimodal transport connection failed") from None
         except (LLMAuthenticationError, LLMQuotaError, LLMRateLimitError, LLMResponseError, LLMConnectionError):

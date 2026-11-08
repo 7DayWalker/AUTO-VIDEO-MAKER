@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.config import CREDENTIALS_DIR
+from app.content.exceptions import safe_provider_text
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class YouTubePublisher:
         self.token_file = token_file
         self._youtube = youtube_client
         self.allow_interactive = allow_interactive
+        self.credential_reason = None
 
     # ------------------------------------------------------------------
     # Configuration
@@ -138,25 +140,26 @@ class YouTubePublisher:
 
         creds: Optional[Credentials] = None
         token_path = Path(self.token_file)
-        if token_path.exists():
+        if token_path.exists() and not getattr(self, "force_reauthorize", False):
             try:
                 creds = Credentials.from_authorized_user_file(str(token_path), YOUTUBE_SCOPES)
             except Exception as exc:
-                logger.warning("Could not load persisted YouTube token (%s); re-authorizing", exc)
+                logger.warning("Could not load persisted YouTube credentials (%s); re-authorizing", type(exc).__name__)
                 creds = None
 
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
             except Exception as exc:
-                logger.warning("YouTube token refresh failed (%s); re-authorizing", exc)
+                logger.warning("YouTube refresh failed (%s); re-authorizing explicitly", type(exc).__name__)
                 creds = None
 
         if not creds or not creds.valid:
             flow = InstalledAppFlow.from_client_secrets_file(
                 self.client_secrets_file, YOUTUBE_SCOPES
             )
-            creds = flow.run_local_server(port=0, prompt="consent")
+            creds = flow.run_local_server(port=0, prompt="consent", timeout_seconds=300,
+                                          authorization_prompt_message="Complete YouTube consent in the browser on this machine.")
             token_path.parent.mkdir(parents=True, exist_ok=True)
             token_path.write_text(creds.to_json(), encoding="utf-8")
             logger.info("Persisted YouTube OAuth token to %s", token_path)
@@ -165,6 +168,11 @@ class YouTubePublisher:
         return self._youtube
 
     def validate_stored_credentials(self) -> Optional[Any]:
+        from app.publishing.connections import _CREDENTIAL_LOCKS
+        with _CREDENTIAL_LOCKS["youtube"]:
+            return self._validate_stored_credentials()
+
+    def _validate_stored_credentials(self) -> Optional[Any]:
         """
         Load and refresh persisted credentials WITHOUT launching the
         interactive installed-app flow. Returns valid Google credentials or
@@ -173,7 +181,9 @@ class YouTubePublisher:
         Used by connection-status tooling so checking status can never open a
         browser; publishing still uses ``authenticate`` unchanged.
         """
+        self.credential_reason = None
         if not self.token_file or not Path(self.token_file).exists():
+            self.credential_reason = "NOT_CONNECTED"
             return None
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
@@ -183,7 +193,8 @@ class YouTubePublisher:
                 str(self.token_file), YOUTUBE_SCOPES
             )
         except Exception as exc:
-            logger.warning("Could not load persisted YouTube token (%s)", exc)
+            self.credential_reason = "CREDENTIALS_UNUSABLE"
+            logger.warning("Could not load persisted YouTube credentials (%s)", type(exc).__name__)
             return None
         if creds.expired and creds.refresh_token:
             try:
@@ -191,9 +202,11 @@ class YouTubePublisher:
                 Path(self.token_file).write_text(creds.to_json(), encoding="utf-8")
                 logger.info("Refreshed persisted YouTube OAuth token in place")
             except Exception as exc:
-                logger.warning("YouTube token refresh failed (%s)", exc)
+                self.credential_reason = "INVALID_GRANT" if "invalid_grant" in str(exc).lower() else "REFRESH_FAILED"
+                logger.warning("YouTube token refresh failed: reason=%s type=%s", self.credential_reason, type(exc).__name__)
                 return None
         if not creds.valid:
+            self.credential_reason = "CREDENTIALS_UNUSABLE"
             return None
         return creds
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import time
+import threading
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -177,6 +178,7 @@ class ModelEligibility:
 # ---------------------------------------------------------------------------
 
 _QUOTA_BLOCKERS: Dict[Tuple[str, str], Tuple[float, str]] = {}
+_QUOTA_BLOCKERS_LOCK = threading.RLock()
 
 
 def record_quota_blocker(
@@ -196,27 +198,29 @@ def record_quota_blocker(
         if retry_after_seconds and retry_after_seconds > 0
         else DEFAULT_BLOCKER_TTL_SECONDS
     )
-    _QUOTA_BLOCKERS[(provider.strip().lower(), provider_model_id.strip())] = (
-        time.time() + float(ttl),
-        str(detail)[:200],
-    )
+    with _QUOTA_BLOCKERS_LOCK:
+        _QUOTA_BLOCKERS[(provider.strip().lower(), provider_model_id.strip())] = (
+            time.time() + float(ttl), str(detail)[:200],
+        )
 
 
 def clear_quota_blockers() -> None:
     """Clear recorded blockers (used by tests and after credential changes)."""
-    _QUOTA_BLOCKERS.clear()
+    with _QUOTA_BLOCKERS_LOCK:
+        _QUOTA_BLOCKERS.clear()
 
 
 def _active_blocker(provider: str, provider_model_id: str) -> Optional[Tuple[float, str]]:
     key = (provider.strip().lower(), provider_model_id.strip())
-    entry = _QUOTA_BLOCKERS.get(key)
-    if entry is None:
-        return None
-    until, _detail = entry
-    if time.time() >= until:
-        _QUOTA_BLOCKERS.pop(key, None)
-        return None
-    return entry
+    with _QUOTA_BLOCKERS_LOCK:
+        entry = _QUOTA_BLOCKERS.get(key)
+        if entry is None:
+            return None
+        until, _detail = entry
+        if time.time() >= until:
+            _QUOTA_BLOCKERS.pop(key, None)
+            return None
+        return entry
 
 
 # ---------------------------------------------------------------------------

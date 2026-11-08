@@ -65,6 +65,8 @@ MEDIA_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v"}
 
 # Tracks an in-flight interactive connect so repeated POSTs don't stack flows.
 _connect_running = {"platform": None}
+_connect_lock = threading.RLock()
+_connect_operations = {}
 _summary_runs: dict[tuple[str, str, str], dict] = {}
 _summary_runs_lock = threading.Lock()
 _transcription_runs: dict[tuple[str, str, str], dict] = {}
@@ -79,25 +81,36 @@ def connections_payload() -> dict:
     from app.publishing.connections import _tiktok_status, _youtube_status
     from app.publishing.tiktok import TikTokPublisher
     from app.publishing.youtube import YouTubePublisher
+    from concurrent.futures import ThreadPoolExecutor
+    with _connect_lock:
+        operations = {platform: dict(_connect_operations.get(platform, {})) for platform in ("youtube", "tiktok")}
+    def read_status(platform):
+        if operations[platform].get("state") == "running":
+            return {"status": "CONNECTING", "detail": "Complete consent in the browser on the Core machine."}
+        try:
+            return (_youtube_status(YouTubePublisher.from_env(allow_interactive=False)) if platform == "youtube"
+                    else _tiktok_status(TikTokPublisher.from_env(allow_interactive=False)))
+        except Exception as exc:
+            logger.warning("Platform status failed: platform=%s type=%s", platform, type(exc).__name__)
+            return {"status": "ERROR", "detail": "Account connection could not be verified. Reconnect explicitly."}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        yt, tk = [dict(status) for status in pool.map(read_status, ("youtube", "tiktok"))]
 
     payload = {}
-    try:
-        yt = dict(_youtube_status(YouTubePublisher.from_env()))
-    except Exception as exc:
-        logger.warning("YouTube status failed: %s", exc)
-        yt = {"status": "ERROR"}
-    yt.pop("detail", None)
+    yt["detail"] = _sanitize_diagnostic_text(yt.get("detail")) if yt.get("detail") else None
+    yt["reconnect_required"] = yt.get("status") != "CONNECTED"
+    yt["reason_code"] = yt.get("reason_code") or ("NOT_CONNECTED" if yt.get("status") == "NOT CONNECTED" else "CREDENTIALS_UNUSABLE" if yt["reconnect_required"] else None)
     yt["sample"] = False
     payload["youtube"] = yt
 
-    try:
-        tk = dict(_tiktok_status(TikTokPublisher.from_env()))
-    except Exception as exc:
-        logger.warning("TikTok status failed: %s", exc)
-        tk = {"status": "ERROR"}
-    tk.pop("detail", None)
+    tk["detail"] = _sanitize_diagnostic_text(tk.get("detail")) if tk.get("detail") else None
+    tk["reconnect_required"] = tk.get("status") != "CONNECTED"
+    tk["reason_code"] = tk.get("reason_code") or ("NOT_CONNECTED" if tk.get("status") == "NOT CONNECTED" else "CREDENTIALS_UNUSABLE" if tk["reconnect_required"] else None)
     tk["sample"] = False
     payload["tiktok"] = tk
+    with _connect_lock:
+        for platform in ("youtube", "tiktok"):
+            payload[platform]["operation"] = dict(_connect_operations.get(platform, {})) or None
 
     payload["instagram"] = {"status": "COMING SOON", "sample": False}
     payload["facebook"] = {"status": "COMING SOON", "sample": False}
@@ -1064,21 +1077,41 @@ def _start_connect(platform: str):
 
     if platform not in ("youtube", "tiktok"):
         return 404, {"detail": "unknown platform"}
-    if not _connect_running["platform"]:
+    with _connect_lock:
+        active = _connect_running["platform"]
+        if active:
+            operation = dict(_connect_operations.get(active, {}))
+            return (202 if active == platform else 409), {
+                "platform": active, "operation": operation,
+                "detail": "Authorization already running; complete the existing consent flow before starting another.",
+            }
+        from uuid import uuid4
+        operation = {"id": uuid4().hex, "state": "running", "started_at": datetime.now().isoformat()}
+        _connect_operations[platform] = operation
+        _connect_running["platform"] = platform
         def runner():
+            code = 3
             try:
                 if platform == "youtube":
-                    conn.run_connect_youtube()
+                    code = conn.run_connect_youtube(force=True)
                 else:
-                    conn.run_connect_tiktok()
+                    code = conn.run_connect_tiktok(force=True)
+            except Exception as exc:
+                logger.warning("Explicit connect failed: platform=%s type=%s", platform, type(exc).__name__)
             finally:
-                _connect_running["platform"] = None
+                with _connect_lock:
+                    operation.update(state="completed" if code == 0 else "failed", completed_at=datetime.now().isoformat())
+                    _connect_running["platform"] = None
+                if code == 0:
+                    import sys
+                    from app.publishing.completion import retry_authorized_completions_after_connect
+                    retry_authorized_completions_after_connect(sys.modules[__name__], platform)
 
-        _connect_running["platform"] = platform
         threading.Thread(target=runner, daemon=True).start()
     return 202, {
         "detail": "authorization flow started; a browser window will open on this machine",
         "platform": platform,
+        "operation": dict(operation),
     }
 
 
@@ -1332,7 +1365,18 @@ def _publishing_project_complete(project_id: str) -> bool:
         return False
 
 
-def _publication_status_payload(project_id: str, platform: str):
+def _publishing_master_fingerprint(project_id: str) -> str:
+    """Fresh identity of the confined canonical master, never a sidecar preview."""
+    from app.publishing.reconciliation import compute_file_fingerprint
+    directory = _publishing_project_directory(project_id)
+    manifest = _load_manifest(directory) or {}
+    media, reason = _safe_project_path(directory, manifest.get("final_video_path"))
+    if media is None or reason is not None:
+        raise ValueError("Canonical master is unavailable; inspect the selected unit before publishing")
+    return compute_file_fingerprint(media)[0]
+
+
+def _publication_status_payload(project_id: str, platform: str, *, inspection_only=False):
     """Stored evidence plus optional existing-ID reconciliation; never submits.
 
     Reconciliation may persist fresh verification evidence. It is serialized
@@ -1354,6 +1398,7 @@ def _publication_status_payload(project_id: str, platform: str):
     record = current(project_id)
     note = None
     report = None
+    publisher = None
     try:
         publisher = factory()
         connected = connectivity(publisher)
@@ -1361,7 +1406,7 @@ def _publication_status_payload(project_id: str, platform: str):
         connected = False
         note = f"Connection check unavailable: {_sanitize_diagnostic_text(exc)}"
     state = _enum_value(getattr(record, "state", None))
-    if connected and getattr(record, identity_field, None) and state not in (
+    if not inspection_only and connected and getattr(record, identity_field, None) and state not in (
         "VERIFIED", "VERIFIED_SANDBOX_PRIVATE", "FAILED", "UNKNOWN_RECONCILIATION_REQUIRED",
     ):
         if _publish_lock.acquire(blocking=False):
@@ -1381,9 +1426,13 @@ def _publication_status_payload(project_id: str, platform: str):
     payload = _publication_payload(record, platform)
     if report is not None and _enum_value(report.state) == payload["state"]:
         payload["verdict"] = _enum_value(report.verdict)
+    if not connected:
+        note = note or "Reconnect required: stored credentials are unusable or the account is unverified."
     payload.update({
         "project_id": detail.get("directory_id") or project_id,
         "connected": connected,
+        "reconnect_required": not connected,
+        "reason_code": getattr(publisher, "credential_reason", None) if not connected else None,
         "can_publish": bool(
             connected and payload["state"] in (None, "NOT_STARTED", "PREPARED")
             and not (payload["video_id"] or payload["publish_id"] or payload["post_id"])
@@ -1392,7 +1441,72 @@ def _publication_status_payload(project_id: str, platform: str):
         ),
         "note": note,
     })
+    if inspection_only and payload["can_publish"]:
+        try:
+            payload["file_fingerprint"] = _publishing_master_fingerprint(project_id)
+        except (OSError, ValueError) as exc:
+            payload.update(can_publish=False, note=_sanitize_diagnostic_text(exc))
     return 200, _sanitize_publishing_payload(payload)
+
+
+def publication_readiness_payload(project_id: str, platform: str, *, privacy=None):
+    """Readiness never prepares/promotes/uploads or persists publication state.
+
+    Credential refresh may rotate credentials in their existing private storage;
+    official creator/account queries are read-only even when they use HTTP POST.
+    """
+    if platform not in ("youtube", "tiktok"):
+        return 400, {"error": "PUBLISH_PLATFORM_NOT_SUPPORTED"}
+    status, payload = _publication_status_payload(project_id, platform, inspection_only=True)
+    if status != 200:
+        return status, payload
+    payload["inspection_only"] = True
+    payload["checked_at"] = datetime.now().isoformat()
+    if not payload.get("can_publish"):
+        return status, payload
+    try:
+        from app.publishing.connections import _youtube_status, _tiktok_status
+        if platform == "youtube":
+            publisher = _new_youtube_publisher()
+            account = _youtube_status(publisher)
+            from app.publishing.reconciliation import build_youtube_metadata
+            from app.orchestrator.models import ProjectManifest
+            directory = _publishing_project_directory(project_id)
+            manifest = ProjectManifest.from_dict(_load_manifest(directory))
+            build_youtube_metadata(manifest, directory, privacy_status=privacy or "unlisted")
+        else:
+            publisher = _new_publisher()
+            account = _tiktok_status(publisher)
+            creator = publisher.get_creator_info()
+            if not isinstance(creator, dict) or not creator.get("privacy_level_options"):
+                raise ValueError("TikTok creator capabilities could not be verified; no upload is permitted")
+            wanted = privacy or "SELF_ONLY"
+            if wanted not in creator["privacy_level_options"]:
+                raise ValueError("Selected TikTok privacy is not permitted for this account")
+            payload["allowed_privacy_levels"] = creator["privacy_level_options"]
+            maximum = creator.get("max_video_post_duration_sec")
+            detail = project_detail(project_id)
+            duration = ((detail or {}).get("artifacts") or {}).get("final_video", {}).get("duration")
+            if not isinstance(duration, (int, float)):
+                from app.assembly.ffmpeg import probe_media
+                duration = probe_media(media_path_for(project_id)).duration
+            if isinstance(maximum, (int, float)) and isinstance(duration, (int, float)) and duration > maximum:
+                raise ValueError("Master video exceeds this TikTok account's permitted duration")
+            from app.publishing.tiktok_reconciliation import build_tiktok_metadata
+            from app.orchestrator.models import ProjectManifest
+            directory = _publishing_project_directory(project_id)
+            build_tiktok_metadata(ProjectManifest.from_dict(_load_manifest(directory)), directory, privacy_level=wanted)
+        payload["account"] = account.get("account")
+        payload["account_id"] = account.get("account_id")
+        if account.get("status") != "CONNECTED":
+            payload.update(can_publish=False, connected=False, reconnect_required=True,
+                           reason_code=account.get("reason_code") or "ACCOUNT_UNVERIFIED", note=account.get("detail"))
+    except Exception as exc:
+        payload.update(can_publish=False, reason_code="PREFLIGHT_UNAVAILABLE", note=_sanitize_diagnostic_text(exc))
+        if type(exc).__name__ in {"TikTokAuthError", "PermissionError"} or getattr(publisher, "credential_reason", None):
+            payload.update(connected=False, reconnect_required=True,
+                           reason_code=getattr(publisher, "credential_reason", None) or "REAUTHORIZE_REQUIRED")
+    return status, _sanitize_publishing_payload(payload)
 
 
 def tiktok_status_payload(project_id: str):
@@ -1446,168 +1560,23 @@ def _publishing_exception_payload(project_id: str, platform: str, exc: Exception
         "detail": _sanitize_diagnostic_text(exc),
         "note": "Inspect durable publication evidence before any further action; never retry blindly.",
     })
+    if error == "AUTH_FAILED":
+        payload.update(connected=False, reconnect_required=True, reason_code="REAUTHORIZE_REQUIRED")
     return status, _sanitize_publishing_payload(payload)
 
 
 def tiktok_publish_now(project_id: str, privacy_level=None):
-    """
-    Explicitly requested publish. Runs the EXISTING sequence synchronously
-    (acceptable for the local single-user demo): offline reconcile pre-check
-    → prepare → creator capability check → submit → verify. All durability
-    and duplicate protection belong to the existing modules; this wrapper
-    refuses rather than retries.
-    """
-    if not _publish_lock.acquire(blocking=False):
-        return 409, {
-            "error": "PUBLISH_ALREADY_RUNNING",
-            "detail": "another publishing operation is already in progress; "
-                      "the durable state machine prevents duplicates either way",
-        }
-    try:
-        detail = project_detail(project_id)
-        if detail is None:
-            return 404, {"detail": "project not found"}
-
-        publisher = _new_publisher()
-        if not _tiktok_connected(publisher):
-            stored = _current_record(project_id)
-            payload = _record_payload(stored)
-            payload.update({
-                "error": "TIKTOK_NOT_CONNECTED",
-                "detail": "TikTok is not connected on this machine; connect via "
-                          "Platforms first. Nothing was uploaded.",
-            })
-            return 409, _sanitize_publishing_payload(payload)
-
-        # Offline pre-check through authoritative reconciliation (no network).
-        report = _reconcile(project_id, publisher=None)
-        verdict = report.verdict.value
-        stored = _current_record(project_id)
-        if verdict == "PUBLICATION_VERIFIED":
-            payload = _record_payload(_current_record(project_id))
-            payload.update({
-                "published_already": True,
-                "verdict": verdict,
-                "detail": "Already published and verified; no second submission.",
-            })
-            return 200, payload
-        if verdict == "PUBLICATION_UNKNOWN_RECONCILIATION_REQUIRED":
-            return 409, _sanitize_publishing_payload({
-                "error": "UNKNOWN_RECONCILIATION_REQUIRED",
-                "detail": "A previous submission may have reached TikTok without "
-                          "a durable identity. Blind retry is forbidden; manual "
-                          "reconciliation required.",
-                "reasons": report.reasons,
-                "state": _enum_value(getattr(stored, "state", None)), "verdict": verdict,
-            })
-        if verdict == "PUBLICATION_FAILED":
-            return 409, _sanitize_publishing_payload({
-                "error": "PREVIOUS_FAILURE",
-                "detail": "A previous publication failed; inspect the manifest "
-                          "before any new attempt.",
-                "reasons": report.reasons,
-                "state": _enum_value(getattr(stored, "state", None)), "verdict": verdict,
-            })
-        if stored and (stored.tiktok_publish_id or stored.tiktok_post_id):
-            payload = _record_payload(stored)
-            payload.update({
-                "error": "EXISTING_PUBLICATION_ID",
-                "detail": "A durable TikTok identity already exists; inspect status, do not submit again.",
-            })
-            return 409, payload
-
-        # Existing eligibility gate + artifact fingerprint binding.
-        record = _prepare(project_id, privacy_level=privacy_level)
-
-        # Creator capability check — mirrors the existing operator flow.
-        try:
-            creator = publisher.get_creator_info() or {}
-            options = creator.get("privacy_level_options") or []
-            wanted = record.tiktok_metadata.privacy_level
-            if options and wanted not in options:
-                return 409, _sanitize_publishing_payload({
-                    "error": "PRIVACY_LEVEL_NOT_PERMITTED",
-                    "detail": f"Privacy level {wanted} is not permitted for this "
-                              f"account {options}. Nothing was submitted.",
-                    "allowed_privacy_levels": options,
-                })
-        except Exception as exc:
-            if type(exc).__name__ == "TikTokAuthError":
-                raise
-            logger.info("Creator capability check unavailable: %s", _sanitize_diagnostic_text(exc))
-
-        # Existing submit (duplicate protection inside) then existing verify.
-        record = _submit(project_id, publisher)
-        record = _verify(project_id, publisher)
-
-        payload = _record_payload(record)
-        payload["detail"] = (
-            "Published and verified from official platform APIs"
-            if record.state.value == "VERIFIED"
-            else f"Submission handled by the durable state machine; current state: {record.state.value}"
-        )
-        return 200, payload
-
-    except Exception as exc:
-        logger.warning("TikTok publish failed: %s", _sanitize_diagnostic_text(exc))
-        return _publishing_exception_payload(project_id, "tiktok", exc)
-    finally:
-        _publish_lock.release()
+    """Thin compatibility bridge to the shared manual/completion service."""
+    import sys
+    from app.publishing.service import publish_project
+    return publish_project(sys.modules[__name__], project_id, "tiktok", privacy=privacy_level)
 
 
 def youtube_publish_now(project_id: str, privacy_status=None):
-    """Explicit manual upload through the existing YouTube publication engine."""
-    if not _publish_lock.acquire(blocking=False):
-        return 409, {"error": "PUBLISH_ALREADY_RUNNING", "detail": "Another publishing operation is active."}
-    try:
-        if project_detail(project_id) is None:
-            return 404, {"detail": "project not found"}
-        publisher = _new_youtube_publisher()
-        if not _youtube_connected(publisher):
-            payload = _publication_payload(_current_youtube_record(project_id), "youtube")
-            payload.update({
-                "error": "YOUTUBE_NOT_CONNECTED",
-                "detail": "Connect YouTube through Platforms first. Nothing was uploaded.",
-            })
-            return 409, payload
-        report = _youtube_reconcile(project_id, publisher=None)
-        stored = _current_youtube_record(project_id)
-        payload = _publication_payload(stored, "youtube")
-        payload["verdict"] = _enum_value(report.verdict)
-        if payload["verdict"] == "PUBLICATION_VERIFIED":
-            payload.update({"published_already": True, "detail": "Already verified; no second upload."})
-            return 200, payload
-        if payload["verdict"] in ("PUBLICATION_FAILED", "PUBLICATION_UNKNOWN_RECONCILIATION_REQUIRED"):
-            payload.update({
-                "error": "PREVIOUS_FAILURE" if payload["verdict"] == "PUBLICATION_FAILED" else "UNKNOWN_RECONCILIATION_REQUIRED",
-                "detail": "Inspect and explicitly reconcile the previous publication; blind retry is forbidden.",
-                "reasons": report.reasons,
-            })
-            return 409, _sanitize_publishing_payload(payload)
-        if payload["video_id"]:
-            payload.update({
-                "error": "EXISTING_PUBLICATION_ID",
-                "detail": "An existing YouTube video identity is durable; inspect status instead of uploading.",
-            })
-            return 409, payload
-        _youtube_prepare(project_id, privacy_status=privacy_status)
-        _youtube_submit(project_id, publisher)
-        record = _youtube_verify(project_id, publisher)
-        final_report = _youtube_reconcile(project_id, publisher=publisher)
-        record = _current_youtube_record(project_id) or record
-        payload = _publication_payload(record, "youtube")
-        payload["verdict"] = _enum_value(final_report.verdict)
-        payload["detail"] = (
-            "Published and verified from official platform APIs"
-            if _publication_outcome(payload) == "verified"
-            else "Upload handled by the existing engine; inspect the durable state and verdict."
-        )
-        return 200, _sanitize_publishing_payload(payload)
-    except Exception as exc:
-        logger.warning("YouTube publish failed: %s", _sanitize_diagnostic_text(exc))
-        return _publishing_exception_payload(project_id, "youtube", exc)
-    finally:
-        _publish_lock.release()
+    """Thin compatibility bridge to the shared manual/completion service."""
+    import sys
+    from app.publishing.service import publish_project
+    return publish_project(sys.modules[__name__], project_id, "youtube", privacy=privacy_status)
 
 
 # ---------------------------------------------------------------------------
@@ -1838,6 +1807,11 @@ def _production_executor(production_id: str):
         "productions_root": PRODUCTIONS_DIR,
         "projects_root": PROJECTS_DIR,
     }
+    def completed(production_id, unit_id):
+        import sys
+        from app.publishing.completion import schedule_completion
+        schedule_completion(sys.modules[__name__], production_id, unit_id)
+    kwargs["on_unit_complete"] = completed
     if base_config is not None:
         kwargs["base_config"] = base_config
         kwargs["planner_factory"] = planner_factory
@@ -2646,6 +2620,8 @@ def _manifest_payload(manifest, project_id: str | None = None) -> dict:
         if final_video["state"] != "AVAILABLE":
             facts = {key: None for key in facts}
         final_video.update(facts)
+        handoff = manifest.source_summary_handoff
+        final_video["file_fingerprint"] = handoff.file_fingerprint if handoff and final_video["available"] else None
     return {
         "project_id": safe_project_id,
         "topic": manifest.topic,
@@ -4162,6 +4138,25 @@ def _unit_has_summary(production_id: str, unit_id: str) -> bool:
         return False
 
 
+def completion_publish_payload(production_id: str, unit_id: str, body=None):
+    _, error = _track9_check_unit(production_id, unit_id)
+    if error:
+        return error
+    from app.publishing.completion import completion_status, configure_completion, schedule_completion
+    import sys
+    try:
+        if body is None:
+            return 200, completion_status(production_id, unit_id, root=PRODUCTIONS_DIR)
+        record = configure_completion(sys.modules[__name__], production_id, unit_id, body)
+        if body.get("enabled") is True:
+            schedule_completion(sys.modules[__name__], production_id, unit_id)
+        return 200, _sanitize_publishing_payload(record)
+    except BlockingIOError:
+        return 409, {"error": "PUBLISH_ALREADY_RUNNING", "message": "Publishing consent/dispatch is active; inspect status."}
+    except (ValueError, FileNotFoundError) as exc:
+        return 400, {"error": "INVALID_PUBLISH_CONSENT", "message": _sanitize_diagnostic_text(exc)}
+
+
 def unit_publish_payload(production_id: str, unit_id: str, body: dict):
     """Sanitize every unit-publishing response, including early refusals."""
     status, payload = _unit_publish_payload(production_id, unit_id, body)
@@ -4250,9 +4245,25 @@ def _unit_publish_payload(production_id: str, unit_id: str, body: dict):
             "message": "Unit is COMPLETED but has no bound execution project.",
         }
 
+    expected_project = body.get("expected_project_id")
+    if expected_project is not None and expected_project != project_id:
+        return 409, {"error": "PROJECT_BINDING_CHANGED", "message": "The selected unit's canonical binding changed. Inspect Export again; nothing was uploaded."}
+    guards = {}
+    for name, argument in (("expected_file_fingerprint", "expected_fingerprint"), ("expected_account_id", "expected_account_id")):
+        value = body.get(name)
+        if value is not None:
+            if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                return 400, {"error": "INVALID_PUBLISH_IDENTITY", "message": "Invalid exact-master/account identity"}
+            guards[argument] = value
+
     results = {}
     for platform in platforms:
-        if platform == "youtube":
+        if guards:
+            import sys
+            from app.publishing.service import publish_project
+            status, result = publish_project(sys.modules[__name__], project_id, platform,
+                privacy=body.get("privacy_status" if platform == "youtube" else "privacy_level"), **guards)
+        elif platform == "youtube":
             status, result = youtube_publish_now(project_id, privacy_status=body.get("privacy_status"))
         else:
             status, result = tiktok_publish_now(project_id, privacy_level=body.get("privacy_level"))
@@ -4577,6 +4588,10 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
         return 404, {"error": "SOURCE_NOT_FOUND", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
     except ValueError as exc:
         msg=_browser_safe_diagnostic(exc); lo=msg.lower()
+        from app.production.narration_real import NarrationModelOutputError
+        if isinstance(exc, NarrationModelOutputError):
+            return 503, {"error": "NARRATION_OUTPUT_REJECTED", "message": msg, "resumable": True,
+                         "failure_category": "response_malformed"}
         if "unknown canonical" in lo or "unknown summary" in lo or "unknown selection_mode" in lo:
             return 400, {"error": "INVALID_REQUEST", "message": msg}
         if "not multimodal" in lo or "cannot satisfy" in lo:
@@ -4590,6 +4605,15 @@ def narration_build_payload(production_id: str, unit_id: str, body: dict):
             return 503, {"error": "NARRATION_PROVIDER_TEMPORARILY_UNAVAILABLE", "message": _browser_safe_diagnostic(exc)}
         return 422, {"error": "MODEL_NOT_ELIGIBLE", "message": _browser_safe_diagnostic(exc)}
     except Exception as exc:
+        from app.content.exceptions import LLMProviderError
+        from app.providers.fallback_policy import classify_provider_failure
+        if isinstance(exc, LLMProviderError):
+            category = classify_provider_failure(exc)
+            if category in {"invalid_request", "content_moderation", "credential_class", "configuration"}:
+                return 400, {"error": "NARRATION_REQUEST_REJECTED", "message": _browser_safe_diagnostic(exc),
+                             "failure_category": category, "resumable": False}
+            return 503, {"error": "NARRATION_PROVIDER_TEMPORARILY_UNAVAILABLE", "message": _browser_safe_diagnostic(exc),
+                         "failure_category": category, "resumable": True}
         return 500, {"error": "NARRATION_BUILD_FAILED", "message": f"{exc.__class__.__name__}: {_browser_safe_diagnostic(exc)}"}
     d=art.model_dump(); d["media_url"]=f"/api/productions/{production_id}/units/{unit_id}/narration"; return (200 if replacing else 201), d
 
@@ -4791,6 +4815,10 @@ def summary_video_build_payload(production_id: str, unit_id: str, body: dict):
             return status, {**promotion, "summary_video": {**data, **_summary_video_status(production_id, unit_id)}}
         data["bound_project"] = promotion["bound_project"]
     data.update(_summary_video_status(production_id, unit_id))
+    if not mock_mode:
+        from app.publishing.completion import schedule_completion
+        import sys
+        schedule_completion(sys.modules[__name__], production_id, unit_id)
     return 201, data
 
 
@@ -4909,6 +4937,10 @@ class AVMHandler(BaseHTTPRequestHandler):
 
     # -- Phase 11 production routes (thin Command Center surface) ---------
     def _productions_get(self, path: str):
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/auto-publish/?$", path)
+        if match:
+            status, payload = completion_publish_payload(match.group(1), match.group(2))
+            return self._json(status, payload)
         match = re.match(r"^/api/productions/?$", path)
         if match:
             status, payload = productions_index_payload()
@@ -4986,6 +5018,11 @@ class AVMHandler(BaseHTTPRequestHandler):
         return self._json(404, {"detail": "not found"})
 
     def _productions_post(self, path: str):
+        match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/auto-publish/?$", path)
+        if match:
+            body = self._request_json_body()
+            status, payload = completion_publish_payload(match.group(1), match.group(2), body)
+            return self._json(status, payload)
         upload = re.match(r"^/api/productions/([^/]+)/source/upload/?$", path)
         if upload:
             if self.headers.get("Transfer-Encoding"):
@@ -5142,6 +5179,15 @@ class AVMHandler(BaseHTTPRequestHandler):
                 return self._json(200 if runtime["ok"] else 503, runtime)
             if path == "/api/connections":
                 return self._json(200, connections_payload())
+            match = re.match(r"^/api/platforms/(youtube|tiktok)/connection-operation$", path)
+            if match:
+                with _connect_lock:
+                    operation = dict(_connect_operations.get(match.group(1), {}))
+                return self._json(200, operation or {"state": "not_started"})
+            match = re.match(r"^/api/projects/([^/]+)/publish/(youtube|tiktok)/readiness$", path)
+            if match:
+                status, payload = publication_readiness_payload(match.group(1), match.group(2))
+                return self._json(status, payload)
             if path == "/api/capabilities":
                 # Phase 2C: read-only local configuration readiness. Exact
                 # path only — it never addresses a production or project.
@@ -5486,12 +5532,15 @@ def main() -> int:
     )
     port = DEFAULT_PORT
     server = ThreadingHTTPServer(("127.0.0.1", port), AVMHandler)
+    from app.publishing.completion import recover_completions
+    import sys
+    threading.Thread(target=recover_completions, args=(sys.modules[__name__],), daemon=True).start()
     url = f"http://127.0.0.1:{port}"
     print("=" * 60)
     print("AUTO Video Maker — Web Experience")
     print(f"  UI + local API : {url}")
     print("  Data           : real manifests when present, labelled demo otherwise")
-    print("  Publishing     : via existing produce.py flows (never automatic)")
+    print("  Publishing     : explicit manual commands or durable opt-in completion consent (default off)")
     print("=" * 60)
     try:
         server.serve_forever()

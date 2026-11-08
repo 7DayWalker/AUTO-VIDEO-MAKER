@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--model-id", default="gpt-6.1-sol")
     parser.add_argument("--minimum-cached-chapters", type=int, required=True)
     parser.add_argument("--full", action="store_true")
+    parser.add_argument("--split-truncated-chapter", action="store_true",
+                        help="Explicitly recover an exhausted unfinished Pro chapter as two bounded text parts; never reset stored call counts")
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     if args.report.exists():
@@ -63,6 +65,17 @@ def main():
     status, progress = http(unit + "/summary-progress")
     if status != 200 or progress.get("running") is not False:
         raise RuntimeError("Core already running or unavailable; no duplicate command was sent")
+    if args.split_truncated_chapter:
+        pending = original.get("pending_story") or {}
+        state = pending.get("request_state") or {}
+        if (args.mode != "pro" or state.get("calls") != 2 or pending.get("chapter_index") != len(protected)
+                or pending.get("batches") or not (original.get("pending_visual") or {}).get("visual_action_notes")):
+            raise ValueError("Only an exhausted unfinished Pro chapter with saved visual evidence can select split recovery")
+        from app.production.narration_chapters import _write_checkpoint
+        state["split"] = True
+        _write_checkpoint(checkpoint, original)
+        report["explicit_split_recovery"] = True
+        persist()
     status, existing = http(unit + "/narration")
     matches = (status == 200 and existing.get("summary_mode") == args.mode
         and existing.get("target_length_preset") == args.preset

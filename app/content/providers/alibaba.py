@@ -43,6 +43,9 @@ from app.content.exceptions import (
     LLMResponseError,
     LLMModelUnavailableError,
     LLMOutputTruncatedError,
+    LLMTimeoutError,
+    provider_diagnostics,
+    with_provider_diagnostics,
 )
 from app.content.providers.base import BaseLLMProvider, LLMResponse
 from app.providers.fallback_policy import (
@@ -385,9 +388,9 @@ class AlibabaProvider(BaseLLMProvider):
                 url, headers=headers, json=payload, timeout=self._timeout
             )
         except requests.exceptions.Timeout:
-            raise AlibabaConnectionError(self.name, "request timed out")
-        except requests.exceptions.ConnectionError as exc:
-            raise AlibabaConnectionError(self.name, str(exc))
+            raise LLMTimeoutError(self.name, f"Request timed out after {self._timeout}s") from None
+        except requests.exceptions.ConnectionError:
+            raise AlibabaConnectionError(self.name, "Transport connection failed") from None
 
         if response.status_code == 200:
             try:
@@ -398,22 +401,19 @@ class AlibabaProvider(BaseLLMProvider):
         self._raise_for_status(response)
 
     def _raise_for_status(self, response: Any) -> None:
+        try:
+            self._raise_http_error(response)
+        except LLMProviderError as exc:
+            raise with_provider_diagnostics(exc, provider_diagnostics(response, secrets=(self._api_key,))) from None
+
+    def _raise_http_error(self, response: Any) -> None:
         """Map DashScope HTTP/error-code semantics to AVM exceptions.
 
         The mapping is deterministic and never includes the credential.
         """
         status = response.status_code
-        code = ""
-        message = ""
-        try:
-            body = response.json()
-            error = body.get("error") or {}
-            code = str(error.get("code") or "")
-            message = str(error.get("message") or "")
-            if not message:
-                message = str(body)[:200]
-        except ValueError:
-            message = (response.text or "")[:200]
+        detail = provider_diagnostics(response, secrets=(self._api_key,))
+        code, message = detail["error_code"], detail["message"]
 
         lowered = f"{code} {message}".lower()
         flat = lowered.replace("_", "").replace(".", "")
@@ -421,12 +421,12 @@ class AlibabaProvider(BaseLLMProvider):
         if status == 404 or any(marker in flat for marker in ("modelnotfound", "invalidmodel", "modelnotsupported")):
             raise LLMModelUnavailableError()
 
-        if status == 401 or (status == 403 and "invalidapikey" in flat):
+        if status == 401 or (status == 403 and "quota" not in flat):
             raise AlibabaAuthenticationError(self.name)
         if status == 429 or "throttling" in flat or "ratelimit" in flat:
             retry_after = response.headers.get("Retry-After")
             raise AlibabaRateLimitError(
-                self.name, int(retry_after) if retry_after else None
+                self.name, int(retry_after) if str(retry_after).isdigit() else None
             )
         if (
             "arrearage" in flat
@@ -440,6 +440,8 @@ class AlibabaProvider(BaseLLMProvider):
                 "content was rejected by provider policy",
                 _trim_key(message),
             )
+        if status in (408, 504):
+            raise LLMTimeoutError(self.name, "Upstream request timed out")
         if status >= 500 or code.lower() in (
             "systemerror",
             "internalerror",
@@ -541,6 +543,9 @@ class AlibabaProvider(BaseLLMProvider):
         if response_schema is not None:
             payload["response_format"] = {"type": "json_object"}
         self.last_request_kind = "multimodal"
+        payload_bytes = len(json.dumps(payload).encode("utf-8"))
+        logger.info("Alibaba image request: model=%s frames=%d payload_bytes=%d timeout_s=%.1f",
+                    self._vision_model, len(images or []), payload_bytes, self._timeout)
         started = time.monotonic()
         data = self._post_chat(payload)
         self.last_latency_ms = int((time.monotonic() - started) * 1000)
@@ -562,6 +567,7 @@ class AlibabaProvider(BaseLLMProvider):
         usage = _normalize_usage(data.get("usage"))
         return LLMResponse(content=content, provider=self.name, model=self._vision_model, usage=usage,
                            metadata={"finish_reason": finish_reason, "frame_count": len(images or []),
+                                     "payload_bytes": payload_bytes, "timeout_seconds": self._timeout,
                                      "visual_analysis_method": "frame_based_visual_analysis"})
 
     def generate_json(

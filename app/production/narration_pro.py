@@ -97,7 +97,7 @@ def _window_frame_timestamps(ws, we, count):
     return stamps
 
 
-def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, window_idx: int, *, frame_count=None):
+def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, window_idx: int, *, frame_count=None, timestamps=None):
     """Extract TIMESTAMPED frames spanning the bounded window [ws, we].
 
     Returns ``[(timestamp_seconds, path), ...]``. Timestamps are real source
@@ -107,7 +107,9 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
         return []
     span = max(0.0, float(we) - float(ws))
     count = max(1, int(frame_count or PRO_FRAMES_PER_WINDOW))
-    if span <= 0:
+    if timestamps is not None:
+        stamps = list(timestamps)
+    elif span <= 0:
         stamps = [float(ws)]
     else:
         # Interior sampling: avoids the exact boundary frames, which are often
@@ -116,6 +118,13 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
 
     from app.assembly.ffmpeg import get_ffmpeg_runner
     runner = get_ffmpeg_runner()
+    # Preserve the historical two-argument injected runner seam. Real runners
+    # and timeout-aware doubles get the short extraction timeout; never retry a
+    # TypeError after a job starts (that could execute extraction twice).
+    import inspect
+    parameters = inspect.signature(runner.run).parameters.values()
+    timeout_options = {"timeout": 30} if any(parameter.name == "timeout" or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                                            for parameter in parameters) else {}
     def extract(item):
         k, ts = item
         out = out_dir / f"window_{window_idx:03d}_frame_{k:02d}_{ts:.1f}.jpg"
@@ -124,6 +133,7 @@ def _extract_window_frames(src: Path, ws: float, we: float, out_dir: Path, windo
                 ["-y", "-ss", f"{ts:.3f}", "-threads", "2", "-i", str(src), "-frames:v", "1",
                  "-vf", f"scale={PRO_FRAME_WIDTH}:-2", "-q:v", "5", str(out)],
                 f"Pro window {window_idx} frame {k} @ {ts:.1f}s",
+                **timeout_options,
             )
         except Exception:
             return None
@@ -146,19 +156,10 @@ def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: So
         from app.production.storage import unit_plan_dir
         observer = None
         if composite:
-            from app.content.capability_router import configured_visual_observer_routes
-            from app.content.provider_registry import create_provider
-            from app.production.narration_real import admitted_visual_observer
-            observer_routes = configured_visual_observer_routes(selected)
-            for route in observer_routes:
-                candidate = create_provider(route.provider, route.provider_model_id)
-                if candidate.is_available() and admitted_visual_observer(candidate):
-                    observer = candidate
-                    break
-            if observer is None:
-                raise ValueError("Summary Pro visual observer is not configured; no transcript-only downgrade")
-            if hasattr(observer, "_timeout"):
-                observer._timeout = min(observer._timeout, 45)
+            # Dependency marker only: live adapters are resolved AFTER cache reads.
+            # This also permits fully cached evidence without current credentials.
+            from types import SimpleNamespace
+            observer = SimpleNamespace(model=None, resolve_on_missing=True)
         src = _src_arg(source_asset, production_id, root=root)
         if not src.is_file():
             raise FileNotFoundError("Summary Pro requires the registered source video")
@@ -174,6 +175,17 @@ def build_pro_multimodal_plan(production_id: str, unit_id: str, source_asset: So
                         production_id=production_id, unit_id=unit_id)
                     if notes is not None:
                         return cached_frames
+                    from app.production.visual_cache import CACHE_FILENAME, load_partial_frame_observations
+                    retained = load_partial_frame_observations(
+                        unit_plan_dir(production_id, unit_id, root=root) / CACHE_FILENAME,
+                        source_asset, source_transcript, cached_frames, start=start, end=end)
+                    missing = [ts for ts in stamps if ts not in retained]
+                    if retained:
+                        extracted = dict(_extract_window_frames(src, start, end, Path(scratch), index,
+                                                               frame_count=expected, timestamps=missing))
+                        if len(extracted) != len(missing):
+                            raise ValueError("Summary Pro could not extract every missing frame; saved visual evidence is retained")
+                        return [(ts, "retained-observation-no-image-io" if ts in retained else extracted[ts]) for ts in stamps]
                 frames = _extract_window_frames(src, start, end, Path(scratch), index, frame_count=expected)
                 if len(frames) != expected:
                     raise ValueError("Summary Pro could not extract every chapter frame; no partial visual plan was saved")

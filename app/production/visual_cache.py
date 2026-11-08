@@ -104,34 +104,43 @@ def save_frame_observations(path, asset, transcript, frames, notes, *, start, en
 
 def load_frame_observations(path, asset, transcript, frames, *, start, end):
     """Map source timestamps to current local frame IDs, never invent captions."""
-    with _lock(path):
-        data = _read(path, visual_source_identity(asset, transcript))
-    stored = {}
-    for chapter in data["chapters"]:
-        if not isinstance(chapter, dict):
-            continue
-        for raw in chapter.get("frame_observations", []):
-            try:
-                note = _ActionNote.model_validate(raw)
-            except ValueError:
-                continue
-            if start <= note.timestamp_seconds <= end:
-                stamp = round(note.timestamp_seconds, 3)
-                previous = stored.get(stamp)
-                if previous is None or note.evidence_kind == "live_frame":
-                    stored[stamp] = note
+    stored = load_partial_frame_observations(path, asset, transcript, frames, start=start, end=end)
     result = []
     for index, (stamp, _) in enumerate(frames):
         note = stored.get(round(float(stamp), 3))
         if note is None:
             return None
-        result.append(note.model_copy(update={"frame_id": index, "timestamp_seconds": float(stamp)}).model_dump())
+        result.append({**note, "frame_id": index, "timestamp_seconds": float(stamp)})
     cited = [n["timestamp_seconds"] for n in result if n["citable"]]
     if not cited or min(cited) > start + (end - start) * .15 or max(cited) < end - (end - start) * .15:
         return None
     if any(right - left > (end - start) * .4 for left, right in zip(cited, cited[1:])):
         return None
     return result
+
+
+def load_partial_frame_observations(path, asset, transcript, frames, *, start, end):
+    """Validated timestamp coverage survives interruption or batch-size changes."""
+    from app.content.providers.agentrouter import require_text_only
+    with _lock(path):
+        data = _read(path, visual_source_identity(asset, transcript))
+    stored = {}
+    allowed = {round(float(ts), 3) for ts, _ in frames}
+    for chapter in data["chapters"]:
+        if not isinstance(chapter, dict):
+            continue
+        for raw in chapter.get("frame_observations", []):
+            try:
+                note = _ActionNote.model_validate(raw)
+                require_text_only(json.dumps(note.model_dump(), ensure_ascii=False))
+            except ValueError:
+                continue
+            if start <= note.timestamp_seconds <= end and round(note.timestamp_seconds, 3) in allowed:
+                stamp = round(note.timestamp_seconds, 3)
+                previous = stored.get(stamp)
+                if previous is None or note.evidence_kind == "live_frame":
+                    stored[stamp] = note
+    return {stamp: note.model_dump() for stamp, note in stored.items()}
 
 
 def hydrate_prior_pro(path, prior_path, asset, transcript, frames, *, start, end, production_id, unit_id):

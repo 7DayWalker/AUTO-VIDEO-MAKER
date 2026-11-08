@@ -4,6 +4,47 @@ AUTO Video Maker - Content Engine Exceptions
 Structured exceptions for content generation and planning.
 """
 
+import re
+
+
+def safe_provider_text(value, *, secrets=(), limit=500):
+    """Bounded upstream diagnostics, never credentials, URLs or payload bytes."""
+    text = str(value or "")
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), "<secret-omitted>")
+    text = re.sub(r"(?:https?|wss?)://[^\s\"'<>]+", "<url-omitted>", text, flags=re.I)
+    text = re.sub(r"(?:Bearer\s+|sk-)[A-Za-z0-9._~-]+", "<secret-omitted>", text, flags=re.I)
+    text = re.sub(r'''(?i)((?:["']?)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|password)(?:["']?)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)''', r"\1<secret-omitted>", text)
+    text = re.sub(r"[A-Za-z0-9+/=_-]{100,}", "<payload-omitted>", text)
+    return re.sub(r"[\r\n\x00-\x1f]+", " ", text)[:limit]
+
+
+def provider_diagnostics(response, *, secrets=()):
+    """Allow-list error fields only; successful bodies are never diagnostics."""
+    try:
+        body = response.json()
+        body = body if isinstance(body, dict) else {}
+    except (ValueError, TypeError, AttributeError):
+        body = {}
+    error = body.get("error") or {}
+    error = error if isinstance(error, dict) else {"code": error}
+    headers = getattr(response, "headers", {}) or {}
+    return {
+        "http_status": getattr(response, "status_code", None),
+        "error_code": safe_provider_text(error.get("status") or error.get("code") or body.get("code"), secrets=secrets, limit=100),
+        "request_id": safe_provider_text(body.get("request_id") or headers.get("x-request-id") or headers.get("x-goog-request-id"), secrets=secrets, limit=100),
+        "message": safe_provider_text(error.get("message") or body.get("message") or "Upstream request rejected", secrets=secrets),
+    }
+
+
+def with_provider_diagnostics(exc, diagnostics):
+    """Keep legacy exception types while attaching safe structured evidence."""
+    exc.diagnostics = diagnostics
+    exc.status_code = diagnostics.get("http_status")
+    exc.args = (str(exc) + "; " + "; ".join(f"{key}={value}" for key, value in diagnostics.items() if value not in (None, "")),)
+    return exc
+
 
 class ContentError(Exception):
     """Base exception for all content-related errors."""
@@ -106,6 +147,12 @@ class LLMModelUnavailableError(LLMResponseError):
         super().__init__("The provider does not support the requested model or operation")
 
 
+class LLMInvalidRequestError(LLMResponseError):
+    """A rejected wire parameter is not proof a model lacks image capability."""
+
+    category = "invalid_request"
+
+
 class LLMConnectionError(LLMProviderError):
     """Raised when connection to LLM provider fails."""
     
@@ -116,6 +163,10 @@ class LLMConnectionError(LLMProviderError):
         if details:
             msg += f": {details}"
         super().__init__(msg)
+
+
+class LLMTimeoutError(LLMConnectionError):
+    category = "timeout"
 
 
 class RetryExhaustedError(ContentError):

@@ -16,7 +16,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
+from typing import Literal
 
 
 class PublicationState(str, Enum):
@@ -444,3 +445,62 @@ class TikTokAuthError(PublishingError):
 
 def utc_now_iso() -> str:
     return datetime.now().isoformat()
+
+
+class CompletionPublishTarget(BaseModel):
+    """Consent binds account and privacy, never an OAuth token or upload URL."""
+
+    model_config = ConfigDict(extra="forbid")
+    platform: Literal["youtube", "tiktok"]
+    account_id: str = Field(min_length=1, max_length=200)
+    privacy: str
+    metadata_policy: Literal["validated_project_metadata_v1"] = "validated_project_metadata_v1"
+
+    @model_validator(mode="after")
+    def valid_privacy(self):
+        allowed = VALID_PRIVACY_STATUSES if self.platform == "youtube" else TIKTOK_PRIVACY_LEVELS
+        if self.privacy not in allowed:
+            raise ValueError("Invalid privacy for selected platform")
+        return self
+
+
+class CompletionPublishIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool = False
+    production_id: str
+    unit_id: str
+    generation_revision: str
+    consent_revision: StrictInt = Field(ge=1)
+    consent_at: str
+    targets: List[CompletionPublishTarget] = Field(default_factory=list, max_length=2)
+    promote_summary: StrictBool = False
+    recipe: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def explicit_targets(self):
+        if self.enabled and not self.targets:
+            raise ValueError("Auto-Publish requires explicit destinations")
+        if len({target.platform for target in self.targets}) != len(self.targets):
+            raise ValueError("Duplicate destinations are not permitted")
+        return self
+
+
+class CompletionDispatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: Literal["armed", "disabled", "waiting_completion", "dispatching", "finished", "attention", "stale"] = "armed"
+    project_id: Optional[str] = None
+    file_fingerprint: Optional[str] = None
+    metadata_fingerprints: Dict[str, str] = Field(default_factory=dict)
+    claims: Dict[str, str] = Field(default_factory=dict)
+    claim_consents: Dict[str, int] = Field(default_factory=dict)
+    outcomes: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    reason: Optional[str] = None
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class CompletionPublication(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: Literal[1] = 1
+    intent: CompletionPublishIntent
+    dispatch: CompletionDispatch = Field(default_factory=CompletionDispatch)
+    consent_history: List[Dict[str, Any]] = Field(default_factory=list)

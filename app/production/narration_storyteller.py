@@ -124,6 +124,12 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
             "previous_narration_tail": payload["previous_narration_tail"] if index == 0 else "",
             **({"repair_instructions": payload["repair_instructions"]} if payload.get("repair_instructions") else {}),
         }
+        if count > 1 and visual:
+            # Recovery halves need evidence, not cache provenance/schema bloat.
+            # The original notes remain authoritative for validation/storage.
+            evidence["visual_action_notes"] = [{key: note[key] for key in (
+                "frame_id", "timestamp_seconds", "action", "evidence_kind", "citable", "credits_only") if key in note}
+                for note in notes]
         if index == 0 and payload.get("cold_open_instruction"):
             evidence["cold_open_instruction"] = payload["cold_open_instruction"]
         anchor = None
@@ -143,6 +149,8 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                   + "Retained Pro notes describe a SCENE tied to its cited frames, not everything in each single image. "
                   + "Do not invent action for unavailable frames. "
                   + "Draft directly, without trying to hit exact per-sentence word counts.")
+        if visual:
+            prompt += "\nEach beat must remain a developed paragraph: at least 20 total spoken words and two complete sentences, normally 26-36 words. A short closing beat still needs grounded detail; do not use one-line blurbs."
         if not visual:
             prompt = compact_dialogue_prompt(evidence, budget)
         key = "whole" if count == 1 else f"split:{index}"
@@ -168,7 +176,10 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                     if count == 2:
                         state.setdefault("claimed_parts", []).append(key)
                     persist()
-                    data = _call_json(provider, system, prompt, max_tokens=max_tokens)
+                    call_system = (COMPACT_STORYTELLER_SYSTEM + " Every beat must cite supplied frame_ids; "
+                        "blend visible actions with relevant dialogue. Stills do not prove unseen action. "
+                        "Reserve the final beats for the supplied ending anchor and latest narrative scene, never credits.") if visual and count > 1 else system
+                    data = _call_json(provider, call_system, prompt, max_tokens=max_tokens)
                 output_received = True
                 if not visual:
                     from app.production.narration_chapters import normalize_standard_chapter
@@ -203,6 +214,11 @@ def write_storyteller_chapter(prov, system, payload, *, asset, frames, local_bud
                 if not output_received and isinstance(exc, ValueError) and not isinstance(exc, NarrationModelOutputError):
                     raise  # Local/provider misuse is not repaired as generated text.
                 if state["calls"] >= 2 or count == 2 or attempt == 1:
+                    if visual and count == 1 and isinstance(exc, LLMOutputTruncatedError):
+                        # Persist the bounded recovery shape for the NEXT explicit
+                        # Resume. Never buy a third completion in this invocation.
+                        state["split"] = True
+                        persist()
                     if isinstance(exc, (NarrationModelOutputError, LLMOutputTruncatedError)):
                         raise
                     raise NarrationModelOutputError("Storyteller batch failed its output/word/citation validation") from None

@@ -123,6 +123,7 @@ class TikTokPublisher:
         self.token_file = token_file
         self._session = session if session is not None else requests.Session()
         self.allow_interactive = allow_interactive
+        self.credential_reason = None
 
     # ------------------------------------------------------------------
     # Configuration
@@ -235,6 +236,11 @@ class TikTokPublisher:
                 )
             return token
 
+        if getattr(self, "force_reauthorize", False):
+            result = self._run_authorization_flow()
+            self.force_reauthorize = False  # Account lookup must not launch consent again.
+            return result
+
         token = self._load_token()
         if token and not self._token_expired(token):
             return token
@@ -260,9 +266,11 @@ class TikTokPublisher:
                 timeout=30,
             )
         except Exception as exc:
-            logger.warning("TikTok token refresh request failed: %s", exc)
+            self.credential_reason = "REFRESH_FAILED"
+            logger.warning("TikTok token refresh request failed: %s", type(exc).__name__)
             return None
         if response.status_code != 200:
+            self.credential_reason = "REAUTHORIZE_REQUIRED"
             logger.warning(
                 "TikTok token refresh rejected (HTTP %s); re-authorization required",
                 response.status_code,
@@ -326,7 +334,6 @@ class TikTokPublisher:
         thread.start()
         try:
             print("Opening browser for TikTok authorization:")
-            print(auth_url)
             webbrowser.open(auth_url)
             deadline = time.time() + 300
             while "code" not in captured and "error" not in captured:
@@ -384,6 +391,11 @@ class TikTokPublisher:
         return payload
 
     def validate_stored_token(self) -> Optional[Dict[str, Any]]:
+        from app.publishing.connections import _CREDENTIAL_LOCKS
+        with _CREDENTIAL_LOCKS["tiktok"]:
+            return self._validate_stored_token()
+
+    def _validate_stored_token(self) -> Optional[Dict[str, Any]]:
         """
         Return a valid access-token record using ONLY persisted storage and
         the refresh grant — never launches the interactive authorization
@@ -392,12 +404,15 @@ class TikTokPublisher:
         Used by connection-status tooling so a status check can never open a
         browser or otherwise surprise the operator.
         """
+        self.credential_reason = None
         token = self._load_token()
         if not token:
+            self.credential_reason = "CREDENTIALS_UNUSABLE" if self.token_path.exists() else "NOT_CONNECTED"
             return None
         if self._token_expired(token):
             refresh_token = token.get("refresh_token")
             if not refresh_token:
+                self.credential_reason = "REAUTHORIZE_REQUIRED"
                 return None
             refreshed = self._refresh_token(refresh_token)
             if refreshed is None:

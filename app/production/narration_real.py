@@ -12,6 +12,7 @@ import logging
 import math
 import re
 import threading
+import time
 from copy import copy
 from contextvars import ContextVar
 from functools import wraps
@@ -75,18 +76,63 @@ def chapter_attempt_state(saved, request_id):
 
 
 def quarantine_vision_observer(provider, exc):
-    """A dead observer is tried once per process, not once per chapter/batch."""
+    """Suppress failed routes, not the operator's next explicit Resume."""
     from app.providers.fallback_policy import FailureCategory
     category = standard_transient_failure_category(exc)
     if category in {FailureCategory.CAPABILITY, FailureCategory.QUOTA, FailureCategory.NETWORK,
                     FailureCategory.TIMEOUT, FailureCategory.AUTHENTICATION, FailureCategory.RATE_LIMIT}:
         with _VISION_QUARANTINE_LOCK:
-            _VISION_QUARANTINE[(provider.name, provider.model)] = category
+            key = (provider.name, provider.model)
+            previous = _VISION_QUARANTINE.get(key, {})
+            failures = previous.get("failures", 0) + 1 if isinstance(previous, dict) else 1
+            transient = category in {FailureCategory.NETWORK, FailureCategory.TIMEOUT}
+            retry_after = getattr(exc, "retry_after", None)
+            ttl = min(120, 15 * 2 ** min(failures - 1, 3)) if transient else 300
+            if type(retry_after) in (int, float) and retry_after > 0:
+                ttl = max(ttl, retry_after)
+            _VISION_QUARANTINE[key] = {
+                "category": category, "until": time.monotonic() + ttl,
+                "request_id": _NARRATION_REQUEST_ID.get(), "failures": failures,
+                "probing": False, "owner": None,
+            }
+
+
+def _observer_blocked(state):
+    if not isinstance(state, dict):
+        return bool(state)  # Compatibility with legacy/test-installed blockers.
+    request_id = _NARRATION_REQUEST_ID.get()
+    if state.get("probing"):
+        return state.get("owner") != (request_id or threading.get_ident())
+    fresh_resume = (request_id is not None and request_id != state.get("request_id")
+                    and state.get("category") in {"network", "timeout"})
+    return not fresh_resume and time.monotonic() < state["until"]
 
 
 def observer_is_quarantined(provider, model):
     with _VISION_QUARANTINE_LOCK:
-        return (provider, model) in _VISION_QUARANTINE
+        return _observer_blocked(_VISION_QUARANTINE.get((provider, model)))
+
+
+def claim_vision_observer(provider, model):
+    """Only one half-open probe can own a recovering route at a time."""
+    with _VISION_QUARANTINE_LOCK:
+        state = _VISION_QUARANTINE.get((provider, model))
+        if _observer_blocked(state) or (isinstance(state, dict) and state.get("probing")):
+            return False
+        if isinstance(state, dict):
+            state.update(probing=True, owner=_NARRATION_REQUEST_ID.get() or threading.get_ident())
+        return True
+
+
+def release_vision_observer(provider, model, *, succeeded=False):
+    with _VISION_QUARANTINE_LOCK:
+        key = (provider, model)
+        if succeeded:
+            _VISION_QUARANTINE.pop(key, None)
+        elif isinstance(_VISION_QUARANTINE.get(key), dict):
+            state = _VISION_QUARANTINE[key]
+            if state.get("owner") in (None, _NARRATION_REQUEST_ID.get() or threading.get_ident()):
+                state.update(probing=False, owner=None)
 
 
 def chapter_request_provider(prov):
@@ -314,15 +360,15 @@ def observe_with_vision_failover(primary, frames, rows, *, start, end, continuit
     )
     from app.content.provider_registry import create_provider
     from app.providers.fallback_policy import FailureCategory
-    if not admitted_visual_observer(primary):
+    if primary is not None and not admitted_visual_observer(primary):
         raise ValueError("Stage 1 requires an admitted image observer; text gateways are forbidden")
-    primary_key = (primary.name, primary.model)
+    primary_key = (primary.name, primary.model) if primary is not None else None
     candidates = [(route.canonical_model_id, (route.provider, route.provider_model_id),
                    primary if (route.provider, route.provider_model_id) == primary_key else None)
                   for route in configured_visual_observer_routes()]
     # An explicitly supplied/resolved observer (including an offline test double)
     # retains its own tier, never leapfrogging stronger configured routes.
-    if primary_key not in [key for _, key, _ in candidates] and not _active_blocker(*primary_key):
+    if primary_key is not None and primary_key not in [key for _, key, _ in candidates] and not _active_blocker(*primary_key):
         candidates.append((observer_canonical_model_id(*primary_key), primary_key, primary))
     priority = visual_observer_priority_ids()
     candidates.sort(key=lambda entry: priority.index(entry[0]) if entry[0] in priority else -1)
@@ -335,7 +381,7 @@ def observe_with_vision_failover(primary, frames, rows, *, start, end, continuit
 
     last_error = None
     for _, key, instance in candidates:
-        if observer_is_quarantined(*key):
+        if not claim_vision_observer(*key):
             continue
         provider = None
         try:
@@ -346,9 +392,11 @@ def observe_with_vision_failover(primary, frames, rows, *, start, end, continuit
                 from copy import copy
                 provider = copy(provider)
                 provider._timeout = min(provider._timeout, 45)
-            return observe_chapter_frames(provider, frames, rows, start=start, end=end, continuity=continuity,
+            notes = observe_chapter_frames(provider, frames, rows, start=start, end=end, continuity=continuity,
                 cached_batches=batch_cache, on_batch=retain_batch, on_request=on_request,
                 deadline=time.monotonic() + 300)
+            release_vision_observer(*key, succeeded=True)
+            return notes
         except Exception as exc:
             category = standard_transient_failure_category(exc)
             if category is None:
@@ -359,12 +407,16 @@ def observe_with_vision_failover(primary, frames, rows, *, start, end, continuit
                 retry_after = getattr(exc, "retry_after", None)
                 retry_after = retry_after if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) else None
                 record_quota_blocker(*key, "Stage 1 observer " + category, retry_after_seconds=retry_after)
-            logger.warning("Visual observer route failed: provider=%s model=%s category=%s",
-                           key[0], key[1], category)
+            logger.warning("Visual observer route failed: provider=%s model=%s category=%s diagnostics=%s",
+                           key[0], key[1], category, json.dumps(getattr(exc, "diagnostics", {}), ensure_ascii=True))
             last_error = exc
+        finally:
+            release_vision_observer(*key)
     if last_error is not None:
         raise last_error
-    raise RuntimeError("No configured image observer can supply missing visual evidence")
+    error = LLMConnectionError("vision", "Image observers are cooling down or require quota/auth/capability recovery; saved visual evidence is retained. Explicit Resume can retry transient failures.")
+    error.category = "provider_unavailable"
+    raise error
 
 
 class SummaryStandardTemporarilyUnavailableError(RuntimeError):

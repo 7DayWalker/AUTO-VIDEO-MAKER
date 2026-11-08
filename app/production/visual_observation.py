@@ -6,6 +6,8 @@ import re
 import time
 import os
 from copy import copy
+from pathlib import Path
+import logging
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from typing import Literal
@@ -16,6 +18,9 @@ from app.production.narration_real import standard_transient_failure_category, q
 from app.content.exceptions import LLMConnectionError
 
 VISUAL_OBSERVATION_BATCH_SIZE = 4
+VISUAL_OBSERVATION_MAX_FRAMES = 8
+VISUAL_OBSERVATION_MAX_BYTES = 2 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class _ActionNote(BaseModel):
@@ -44,7 +49,7 @@ class _VisualActionNotes(BaseModel):
 
 
 def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached_batches=None, on_batch=None,
-                           on_request=None, deadline=None):
+                           on_request=None, deadline=None, _single_batch=False):
     """Only the observer receives images; returned notes contain no paths/bytes."""
     if getattr(prov, "name", None) not in {"gemini", "alibaba", "openrouter"} or not prov.supports_multimodal():
         raise ValueError("Visual observation requires an admitted image-capable provider")
@@ -54,43 +59,74 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
         raise ValueError("Visual observation batch size must be an integer from 1 to 32") from None
     if not 1 <= batch_size <= 32:
         raise ValueError("Visual observation batch size must be an integer from 1 to 32")
-    if len(frames) > batch_size:
-        chunks = [(offset, frames[offset:offset + batch_size])
-                  for offset in range(0, len(frames), batch_size)]
+    batch_size = min(batch_size, VISUAL_OBSERVATION_MAX_FRAMES)
+    if not _single_batch:
+        # Timestamp-addressed reuse is independent of both old and new batches.
+        retained = {}
+        for notes in (cached_batches or {}).values():
+            if not isinstance(notes, list):
+                continue
+            for raw in notes:
+                try:
+                    note = _ActionNote.model_validate(raw)
+                    require_text_only(json.dumps(note.model_dump(), ensure_ascii=False))
+                    retained[round(note.timestamp_seconds, 3)] = note.model_dump()
+                except (ValueError, TypeError):
+                    continue
+        chunks, current, current_bytes = [], [], 0
+        for index, frame in enumerate(frames):
+            if round(float(frame[0]), 3) in retained:
+                if current:
+                    chunks.append(current)
+                    current, current_bytes = [], 0
+                chunks.append([(index, frame)])
+                continue
+            try:
+                size = Path(frame[1]).stat().st_size
+            except (OSError, TypeError, ValueError):
+                size = 0  # Test doubles own synthetic frames; real adapters validate.
+            if size > VISUAL_OBSERVATION_MAX_BYTES:
+                raise ValueError("Visual frame exceeds the lightweight observer request limit")
+            if current and (len(current) >= batch_size or current_bytes + size > VISUAL_OBSERVATION_MAX_BYTES):
+                chunks.append(current)
+                current, current_bytes = [], 0
+            current.append((index, frame))
+            current_bytes += size
+        if current:
+            chunks.append(current)
         def inspect(chunk):
-            offset, batch = chunk
+            offset, _ = chunk[0]
+            batch = [frame for _, frame in chunk]
             left = start if offset == 0 else (frames[offset - 1][0] + batch[0][0]) / 2
             right = end if offset + len(batch) == len(frames) else (batch[-1][0] + frames[offset + len(batch)][0]) / 2
             dialogue = [row for row in rows if row["start_seconds"] < right and row["end_seconds"] > left]
-            cached = (cached_batches or {}).get(str(offset))
-            if cached is not None:
-                try:
-                    validate_visual_action_notes(cached, batch)
-                    return [{**note, "frame_id": note["frame_id"] + offset} for note in cached]
-                except ValueError:
-                    pass
+            cached = [retained.get(round(float(ts), 3)) for ts, _ in batch]
+            if all(note is not None for note in cached):
+                cached = [{**note, "frame_id": i} for i, note in enumerate(cached)]
+                validate_visual_action_notes(cached, batch)
+                return [{**note, "frame_id": note["frame_id"] + offset} for note in cached]
             for attempt in range(3):
                 try:
                     if observer_is_quarantined(prov.name, prov.model):
                         raise LLMConnectionError(prov.name, "Visual observer quarantined for this process")
                     notes = observe_chapter_frames(prov, batch, dialogue, start=left, end=right,
-                                                   continuity=continuity, on_request=on_request, deadline=deadline)
+                                                   continuity=continuity, on_request=on_request, deadline=time.monotonic() + 45,
+                                                   _single_batch=True)
                     break
                 except Exception as exc:
                     from app.providers.fallback_policy import FailureCategory
                     category = standard_transient_failure_category(exc)
-                    quarantine_vision_observer(prov, exc)
                     if attempt == 2 or category not in {
                         FailureCategory.PROVIDER_5XX,
                         FailureCategory.RESPONSE_MALFORMED,
                     }:
+                        quarantine_vision_observer(prov, exc)
                         raise
                     time.sleep(2 ** attempt)
             if on_batch is not None:
                 on_batch(offset, notes)
             return [{**note, "frame_id": note["frame_id"] + offset} for note in notes]
-        # Probe sequentially: parallel queued requests would keep billing a
-        # dead route after its first capability/quota/network failure.
+        # Sequential calls have fresh socket budgets, never a movie countdown.
         result = [note for chunk in chunks for note in inspect(chunk)]
         validate_visual_action_notes(result, frames)
         return result
@@ -108,6 +144,9 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
             provider._timeout = min(provider._timeout, remaining)
     if on_request is not None:
         on_request()
+    max_tokens = min(4096, max(1024, len(frames) * 256 + 512))
+    logger.info("Visual observation request: provider=%s model=%s frames=%d max_tokens=%d timeout_s=%.1f",
+                prov.name, prov.model, len(frames), max_tokens, getattr(provider, "_timeout", 45))
     response = provider.generate_multimodal(
         "Observe these chronological chapter frames. Return rich Visual Action Notes as JSON.\n"
         + json.dumps(payload, ensure_ascii=False) + "\nSchema:\n"
@@ -126,7 +165,7 @@ def observe_chapter_frames(prov, frames, rows, *, start, end, continuity, cached
             "only observations with frame_id, timestamp_seconds, action and optional credits_only; no captions, narration script, image "
             "paths, URLs, image data or base64."
         ),
-        images=frames, video=None, response_schema=_VisualActionNotes, temperature=.15, max_tokens=8192,
+        images=frames, video=None, response_schema=_VisualActionNotes, temperature=.15, max_tokens=max_tokens,
     )
     if getattr(response, "model", prov.model) != prov.model:
         raise NarrationModelOutputError("Visual observer response does not match the requested model")

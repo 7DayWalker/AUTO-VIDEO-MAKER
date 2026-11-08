@@ -562,6 +562,7 @@ class ProductionExecutor:
         planner_factory: Optional[Callable[[], ScenePlanner]] = None,
         orchestrator_factory: Optional[Callable[[OrchestratorConfig], object]] = None,
         reconcile: Optional[Callable[..., object]] = None,
+        on_unit_complete: Optional[Callable[[str, str], object]] = None,
     ) -> None:
         from app.orchestrator.pipeline import ORCHESTRATOR_OUTPUT_DIR, ProductionOrchestrator
         from app.orchestrator.reconciliation import reconcile_project
@@ -575,6 +576,7 @@ class ProductionExecutor:
         self._planner_factory = planner_factory or self._default_planner
         self._orchestrator_factory = orchestrator_factory or ProductionOrchestrator
         self._reconcile = reconcile or reconcile_project
+        self._on_unit_complete = on_unit_complete
 
     def _default_planner(self) -> ScenePlanner:
         return create_scene_planner(mock_mode=self.base_config.mock_mode)
@@ -1361,11 +1363,24 @@ class ProductionExecutor:
             raise ValueError(f"unit {unit_id!r} is not part of {production.production_id}")
 
         attempted: set[str] = set()
+        notified: set[str] = set()
+        def notify(completed_unit_id):
+            if completed_unit_id not in notified:
+                notified.add(completed_unit_id)
+                self._notify_unit_complete(completed_unit_id)
         while True:
             report = self.derive_progress()
             if report.complete:
+                if self._on_unit_complete is not None and not self.base_config.mock_mode:
+                    for completed in report.units:
+                        if unit_id is None or completed.unit_id == unit_id:
+                            notify(completed.unit_id)
                 return report
             progress_by_id = {item.unit_id: item for item in report.units}
+            if unit_id and progress_by_id[unit_id].state == UnitExecutionState.COMPLETED:
+                if self._on_unit_complete is not None and not self.base_config.mock_mode:
+                    notify(unit_id)
+                return report
             bindings = self.discover_bindings(production)
             candidates: List[ProductionUnit] = []
             for unit in sorted(production.units, key=lambda item: item.ordinal):
@@ -1407,6 +1422,18 @@ class ProductionExecutor:
             attempted.add(unit.unit_id)
             self._orchestrator_factory(config).run()
             # Re-derive from disk; never trust process-local completion state.
+            if self._on_unit_complete is not None and not config.mock_mode:
+                progress = next(item for item in self.derive_progress().units if item.unit_id == unit.unit_id)
+                if progress.state == UnitExecutionState.COMPLETED:
+                    notify(unit.unit_id)
+
+    def _notify_unit_complete(self, unit_id):
+        """Injected post-completion hook cannot invalidate successful generation."""
+        try:
+            self._on_unit_complete(self.production_id, unit_id)
+        except Exception as exc:
+            logger.warning("Post-completion inspection failed: production=%s unit=%s type=%s",
+                           self.production_id, unit_id, type(exc).__name__)
 
 
 __all__ = [
