@@ -4,12 +4,13 @@ from __future__ import annotations
 import hashlib
 import threading
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from app.production.storage import commit_repurpose_batch, production_revision_lock
 from app.repurpose.cache import load_evidence, sources_payload
 from app.repurpose.models import BatchRequest, RenderRequest, RepurposeError, timestamp
-from app.repurpose.planner import plan_once, planner_provider
+from app.repurpose.planner import MAX_INPUT_TOKENS, PLANNER_TIMEOUT_SECONDS, plan_once, planner_provider
 from app.repurpose.storage import atomic_json, batch_dir, content_hash, load_job, load_plan, load_render, save_job, unit_dir
 
 _WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="repurpose")
@@ -30,6 +31,9 @@ def readiness():
     return {"implemented": True, "status": "ready" if configured else "not_configured", "configured": configured,
         "configuration_only": True,
         "model_id": "gpt-6.1-sol", "api_style": api_style, "upstream_api_style": "responses", "max_output_tokens": 16384,
+        "planner_input_token_limit": MAX_INPUT_TOKENS, "planner_timeout_seconds": PLANNER_TIMEOUT_SECONDS,
+        "planner_wire_schema": "compact-v1",
+        "planner_streaming": True,
         "reasoning": {"effort": "low"}, "modes": ["narrated", "raw_highlight"],
         "framing_presets": ["cinema_canvas", "center_crop"], "count_bounds": [3, 10],
         "duration_bounds": [30, 60], "source_duration_bounds": [60, 14400],
@@ -96,16 +100,28 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
         with _GUARD:
             _ACTIVE.add(_key(production_id, batch_id, root))
     def work():
+        started = time.monotonic()
         try:
+            def prompt_ready(metrics):
+                job["planner_prompt"] = metrics
+                save_job(production_id, batch_id, job, root)
             def dispatch():
                 job["llm_calls"] = 1  # Marker precedes the ONLY provider dispatch.
                 job["planner_transport"] = {"api_style": getattr(chosen_provider, "_api_style", None),
-                    "max_output_tokens": 16384, "reasoning_effort": "low"}
+                    "max_output_tokens": 16384, "reasoning_effort": "low",
+                    "timeout_seconds": getattr(chosen_provider, "_timeout", PLANNER_TIMEOUT_SECONDS)}
+                job["planner_transport"]["stream"] = getattr(chosen_provider, "streaming", False)
                 save_job(production_id, batch_id, job, root)
             def received(response):
                 atomic_json(directory / "planner_response.json", {"model": response.model, "content": response.content})
                 job["llm_successful_calls"] = 1
-            plan = plan_once(evidence, request, batch_id, provider=chosen_provider, on_response=received, on_dispatch=dispatch)
+                job["planner_response_characters"] = len(response.content)
+                job["planner_elapsed_seconds"] = round(time.monotonic()-started, 3)
+                usage = getattr(response, "usage", None)
+                if isinstance(usage, dict):
+                    job["planner_usage"] = usage
+            plan = plan_once(evidence, request, batch_id, provider=chosen_provider, on_response=received,
+                on_dispatch=dispatch, on_prompt=prompt_ready)
             atomic_json(directory / "candidate.json", plan)
             plan = commit_repurpose_batch(plan, root=root)
             job.update(status="planned", plan_hash=content_hash(plan), updated_at=timestamp(),
@@ -126,6 +142,7 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
                 prefix = "One-call planner outcome uncertain: " if uncertain else "One-call planner rejected: "
                 job["error"]["message"] = prefix + detail.get("message", "Inspect upstream diagnostics") + ". No request was retried."
         finally:
+            job["planner_elapsed_seconds"] = round(time.monotonic()-started, 3)
             save_job(production_id, batch_id, job, root)
             with _GUARD:
                 _ACTIVE.discard(_key(production_id, batch_id, root))
