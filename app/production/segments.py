@@ -40,6 +40,16 @@ def _context(pid, aid, root):
 
 
 def save_segments(production_id, asset_id, body, *, root: Optional[Path] = None):
+    from app.production.storage import production_revision_lock
+
+    pid, aid, error = _identity(production_id, asset_id)
+    if error:
+        return error
+    with production_revision_lock(pid, root):
+        return _save_segments_locked(pid, aid, body, root=root)
+
+
+def _save_segments_locked(production_id, asset_id, body, *, root=None):
     pid, aid, error = _identity(production_id, asset_id)
     if error: return error
     if not isinstance(body, dict) or not isinstance(body.get("segments"), list):
@@ -50,6 +60,9 @@ def save_segments(production_id, asset_id, body, *, root: Optional[Path] = None)
         return 400, {"error": "INVALID_SEGMENT", "message": "filesystem paths are not accepted"}
     asset, transcript, error = _context(pid, aid, root)
     if error: return error
+    production = load_production(pid, root=root)
+    if any(unit.repurpose_plan_reference and unit.source_lineage and unit.source_lineage.asset_id == aid for unit in production.units):
+        return 409, {"error": "REPURPOSE_SEGMENTS_PROTECTED", "message": "Existing short units pin these source segment identities; use another asset for replacement selections."}
     allowed = {"start_seconds", "end_seconds", "title", "premise", "transcript_segment_ids"}
     output = []
     for i, raw in enumerate(items):

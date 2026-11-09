@@ -817,6 +817,22 @@ class PlanReference(BaseModel):
         return self
 
 
+class RepurposePlanReference(BaseModel):
+    """Immutable short-edit intent reference, never render/job state."""
+
+    model_config = ConfigDict(extra="forbid")
+    batch_id: str = Field(pattern=r"^rpb-[a-f0-9]{24}$")
+    clip_index: int = Field(ge=0, le=9)
+    plan_path: str
+    plan_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def relative_plan(self):
+        if not _is_relative_path(self.plan_path):
+            raise ValueError("Repurpose plan_path must be production-relative")
+        return self
+
+
 class ProductionUnit(BaseModel):
     """The NEUTRAL workload primitive: intent for ONE video output (A1/A6).
 
@@ -860,6 +876,7 @@ class ProductionUnit(BaseModel):
     dependencies: List[str] = Field(default_factory=list)
     source_lineage: Optional["SourceLineage"] = Field(default=None)
     plan_reference: Optional[PlanReference] = None
+    repurpose_plan_reference: Optional[RepurposePlanReference] = None
 
     @model_validator(mode="after")
     def _validate_unit(self) -> "ProductionUnit":

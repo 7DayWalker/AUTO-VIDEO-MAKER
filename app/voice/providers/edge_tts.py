@@ -115,7 +115,29 @@ class EdgeTTSProvider(BaseVoiceProvider):
             pitch=pitch,
             volume=volume,
         )
-        await communicate.save(str(output_path))
+        timing_path = output_path.with_suffix(output_path.suffix + ".timing.json")
+        # Opt-in is per output, so existing provider signatures and behavior stay
+        # unchanged. The short renderer writes this marker before synthesis.
+        if output_path.with_suffix(output_path.suffix + ".capture-timing").exists():
+            import json
+            import os
+
+            communicate = self._edge_tts.Communicate(text=text, voice=voice, rate=rate,
+                pitch=pitch, volume=volume, boundary="WordBoundary")
+            boundaries = []
+            with output_path.open("wb") as audio:
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        audio.write(chunk["data"])
+                    elif chunk["type"] in {"WordBoundary", "SentenceBoundary"}:
+                        boundaries.append({"text": chunk["text"], "start": chunk["offset"] / 10_000_000,
+                            "end": (chunk["offset"] + chunk["duration"]) / 10_000_000,
+                            "kind": chunk["type"]})
+            temporary = timing_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"voice": voice, "rate": rate, "boundaries": boundaries}, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, timing_path)
+        else:
+            await communicate.save(str(output_path))
 
     async def generate(
         self,

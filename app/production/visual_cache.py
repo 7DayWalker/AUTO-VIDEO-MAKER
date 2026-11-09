@@ -55,6 +55,31 @@ def cache_source_conflicts(path, asset, transcript):
         return False
 
 
+def load_cached_visual_evidence(path, asset, transcript):
+    """Read citable source-bound notes without extracting frames or hydrating caches.
+
+    Duplicate chapter coverage is reduced by timestamp and evidence priority.
+    A changed source/transcript is rejected, never silently re-observed.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return []
+    if cache_source_conflicts(path, asset, transcript):
+        raise ValueError("Visual cache source/transcript identity changed")
+    data = _read(path, visual_source_identity(asset, transcript))
+    retained = {}
+    priority = {"unavailable": 0, "prior_pro_scene": 1, "live_frame": 2}
+    for chapter in data["chapters"]:
+        for raw in chapter.get("frame_observations", []):
+            note = _ActionNote.model_validate(raw)
+            if not note.citable or note.credits_only or note.timestamp_seconds > asset.duration:
+                continue
+            key = round(note.timestamp_seconds, 3)
+            if key not in retained or priority[note.evidence_kind] > priority[retained[key].evidence_kind]:
+                retained[key] = note
+    return [retained[key].model_dump(mode="json") for key in sorted(retained)]
+
+
 def _atomic_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

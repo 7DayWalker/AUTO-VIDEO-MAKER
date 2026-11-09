@@ -40,6 +40,10 @@ class MockProvider:
 class LocalWhisperProvider:
     provider = "local_whisper"
     provider_version = "whisper-base"
+    def __init__(self, *, word_timestamps=None):
+        self.word_timestamps = (os.getenv("AVM_WHISPER_WORD_TIMESTAMPS", "0") == "1"
+                                if word_timestamps is None else bool(word_timestamps))
+
     def transcribe(self, media_path: Path, duration: float) -> TranscriptionResult:
         # Reject silent real media before importing/loading a Whisper model.
         # MockProvider never reaches this probe or an audio extraction process.
@@ -52,7 +56,8 @@ class LocalWhisperProvider:
         self._model = None
         self._model_name = model_name
         if duration > LONG_SOURCE_SECONDS:
-            language, segments = transcribe_in_chunks(media_path, duration, model_name, self._transcribe_window)
+            language, segments = transcribe_in_chunks(media_path, duration, model_name, self._transcribe_window,
+                word_timestamps=self.word_timestamps)
             return TranscriptionResult(language, segments, self.provider, model_name)
         return self._transcribe_window(media_path, duration)
 
@@ -81,7 +86,10 @@ class LocalWhisperProvider:
                 if _dir not in os.environ.get("PATH", ""):
                     os.environ["PATH"] = _dir + os.pathsep + os.environ.get("PATH", "")
         try:
-            result = self._model.transcribe(str(media_path), verbose=False)
+            options = {"verbose": False}
+            if self.word_timestamps:
+                options["word_timestamps"] = True
+            result = self._model.transcribe(str(media_path), **options)
         except FileNotFoundError as exc:
             # Typically ffmpeg not on PATH for whisper.audio.load_audio
             raise RuntimeError(f"TRANSCRIPTION_FAILED: ffmpeg not found on PATH for Whisper audio decode ({exc})")
@@ -96,7 +104,12 @@ class LocalWhisperProvider:
             end = min(float(duration), float(s.get("end", 0)))
             if not (0 <= start < end):
                 continue
-            segs.append({"text": text, "start": start, "end": end})
+            row = {"text": text, "start": start, "end": end}
+            if self.word_timestamps and s.get("words"):
+                row["words"] = [{"word": w.get("word", ""), "start": max(start, float(w["start"])),
+                    "end": min(end, float(w["end"]))} for w in s["words"]
+                    if float(w["end"]) > float(w["start"]) and float(w["start"]) < end and float(w["end"]) > start]
+            segs.append(row)
         if not segs and (result.get("text") or "").strip():
             segs = [{"text": result["text"].strip(), "start": 0.0, "end": float(duration)}]
         return TranscriptionResult(language=result.get("language"), segments=segs, provider=self.provider, provider_version=self._model_name)

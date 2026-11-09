@@ -188,6 +188,7 @@ class FFmpegRunner:
         args: List[str],
         description: str = "FFmpeg command",
         timeout: Optional[int] = None,
+        cwd: Optional[Path] = None,
     ) -> subprocess.CompletedProcess:
         """
         Execute an FFmpeg command.
@@ -218,6 +219,7 @@ class FFmpegRunner:
                 capture_output=True,
                 text=True,
                 timeout=timeout or self.timeout,
+                cwd=str(cwd) if cwd is not None else None,
             )
             
             if result.returncode != 0:
@@ -442,6 +444,8 @@ def probe_media(path: Path) -> MediaInfo:
     return get_ffmpeg_runner().probe(path)
 
 
-def run_ffmpeg(args: List[str], description: str = "FFmpeg command") -> subprocess.CompletedProcess:
+def run_ffmpeg(args: List[str], description: str = "FFmpeg command", *, cwd: Optional[Path] = None, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
     """Run an FFmpeg command."""
-    return get_ffmpeg_runner().run(args, description)
+    if cwd is None and timeout is None:
+        return get_ffmpeg_runner().run(args, description)
+    return get_ffmpeg_runner().run(args, description, timeout=timeout, cwd=cwd)

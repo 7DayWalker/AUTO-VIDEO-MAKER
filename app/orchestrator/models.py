@@ -244,7 +244,7 @@ class ProductionBinding(BaseModel):
     # Additive import lineage. Directory identity is relative to projects_root,
     # never an absolute workstation path. Legacy engine bindings omit both.
     execution_dir: Optional[str] = None
-    handoff_kind: Optional[Literal["narrated_summary"]] = None
+    handoff_kind: Optional[Literal["narrated_summary", "repurpose_short"]] = None
 
 
 class SourceSummaryHandoff(BaseModel):
@@ -294,6 +294,41 @@ class SourceSummaryHandoff(BaseModel):
         return value
 
 
+class SourceRepurposeHandoff(BaseModel):
+    """Immutable short-edit acceptance; platform state remains in publications."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    handoff_kind: Literal["repurpose_short"] = "repurpose_short"
+    production_id: str
+    unit_id: str
+    batch_id: str = Field(pattern=r"^rpb-[a-f0-9]{24}$")
+    source_asset_id: str = Field(pattern=r"^src-\d{3}$")
+    plan_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    file_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    file_size: int = Field(gt=0)
+    snapshot_dir: str
+    artifact_hashes: Dict[str, str]
+    promoted_at: str
+
+    @field_validator("snapshot_dir")
+    @classmethod
+    def safe_snapshot(cls, value):
+        import re
+        if not re.fullmatch(r"repurpose_handoff/[a-f0-9]{16}", value):
+            raise ValueError("Short snapshot must be a safe project-relative package")
+        return value
+
+    @field_validator("artifact_hashes")
+    @classmethod
+    def snapshots(cls, value):
+        import re
+        expected = {"repurpose_plan.json", "render.json", "source_asset.json", "transcript.json",
+                    "evidence.json", "captions.ass", "caption_timing.json"}
+        if set(value) != expected or any(not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in value.values()):
+            raise ValueError("Short handoff requires complete evidence snapshot hashes")
+        return value
+
+
 class ProjectManifest(BaseModel):
     """
     Unified project manifest for tracking pipeline state.
@@ -309,6 +344,7 @@ class ProjectManifest(BaseModel):
     # Explicit Track 9 -> canonical project import. None for every standard
     # execution; it must never be inferred from a filename or COMPLETE flag.
     source_summary_handoff: Optional[SourceSummaryHandoff] = None
+    source_repurpose_handoff: Optional[SourceRepurposeHandoff] = None
     # G3: the PRODUCTION ROUTE Core compiled for this unit's execution
     # (route-compilation evidence).  Distinct from the plan binding above,
     # from scene provider provenance, from media/engine configuration, and

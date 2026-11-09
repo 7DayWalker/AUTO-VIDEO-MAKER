@@ -372,6 +372,10 @@ def _final_audio_required(manifest: ProjectManifest) -> bool:
       ``native_plus_narration``-> an audio stream is required.
     """
     policy = _effective_audio_policy(manifest)
+    if manifest.source_repurpose_handoff is not None:
+        # A raw imported short has no generated-scene checkpoints. Its own
+        # acceptance contract always requires the source-audio stream.
+        return True
     if policy == AudioPolicy.NONE:
         return False
     if policy == AudioPolicy.NATIVE_ONLY:
@@ -711,22 +715,28 @@ def reconcile_project(
         or (manifest.production_binding is not None
             and manifest.production_binding.handoff_kind == "narrated_summary")
     )
-    if summary_handoff:
-        from app.production.summary_handoff import validate_source_summary_handoff
+    short_handoff = bool(manifest.source_repurpose_handoff is not None or (
+        manifest.production_binding is not None and manifest.production_binding.handoff_kind == "repurpose_short"))
+    imported_handoff = summary_handoff or short_handoff
+    if imported_handoff:
+        if short_handoff:
+            from app.repurpose.handoff import validate_repurpose_handoff as validate_import
+        else:
+            from app.production.summary_handoff import validate_source_summary_handoff as validate_import
 
         try:
-            validate_source_summary_handoff(manifest, project_dir)
+            validate_import(manifest, project_dir)
         except Exception as exc:
             content.update({"status": ArtifactStatus.INVALID.value, "error": str(exc)})
         voice = {
             "status": ArtifactStatus.NOT_REQUIRED.value,
-            "reason": "Engine voice generation/timing not run; Track 9 narration is baked into the imported master.",
-            "source_summary_handoff": True,
+            "reason": "Engine voice generation/timing not run; audio is baked into the imported master.",
+            "source_summary_handoff": summary_handoff, "source_repurpose_handoff": short_handoff,
         }
         scenes = {
             "status": ArtifactStatus.NOT_REQUIRED.value, "items": [],
             "reason": "Engine scene generation not run; the accepted master is an assembled grounded source edit.",
-            "source_summary_handoff": True,
+            "source_summary_handoff": summary_handoff, "source_repurpose_handoff": short_handoff,
         }
     else:
         voice = _voice_evidence(manifest, project_dir, len(plan.scenes) if plan else 0)
@@ -759,7 +769,7 @@ def reconcile_project(
             ArtifactStatus.NOT_REQUIRED.value,
         }
         and (scenes.get("status") == ArtifactStatus.VALID.value
-             or (summary_handoff and scenes.get("status") == ArtifactStatus.NOT_REQUIRED.value))
+            or (imported_handoff and scenes.get("status") == ArtifactStatus.NOT_REQUIRED.value))
         and captions.get("status") in {ArtifactStatus.VALID.value, ArtifactStatus.NOT_REQUIRED.value}
         and assembly.get("status") == ArtifactStatus.VALID.value
     )

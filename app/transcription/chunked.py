@@ -28,11 +28,20 @@ def _segments(raw, start, end):
                 or left < start or right > end + 1e-6 or right <= left
                 or (result and left < result[-1]["start"])):
             raise ValueError("Transcription chunk timestamps/text are invalid")
-        result.append({"text": text.strip(), "start": left, "end": min(end, right)})
+        row = {"text": text.strip(), "start": left, "end": min(end, right)}
+        if segment.get("words"):
+            words = []
+            for word in segment["words"]:
+                a, b = float(word["start"]), float(word["end"])
+                if not math.isfinite(a) or not math.isfinite(b) or a < left or b > right + 1e-6 or b <= a:
+                    raise ValueError("Transcription word timestamps are invalid")
+                words.append({"word": word.get("word", word.get("text", "")), "start": a, "end": min(end, b)})
+            row["words"] = words
+        result.append(row)
     return result
 
 
-def transcribe_in_chunks(media_path, duration, model_name, transcribe_window):
+def transcribe_in_chunks(media_path, duration, model_name, transcribe_window, *, word_timestamps=False):
     """At most twelve minutes of PCM reaches Whisper; completed text is atomic.
 
     ``transcribe_window`` loads the model lazily. Fully cached media needs no
@@ -46,9 +55,12 @@ def transcribe_in_chunks(media_path, duration, model_name, transcribe_window):
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("Source duration must be finite and positive")
     stat = path.stat()
-    identity = hashlib.sha256(json.dumps({"version": 1, "path": str(path.resolve()),
+    identity_fields = {"version": 1, "path": str(path.resolve()),
         "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "duration": duration,
-        "model": model_name, "chunk_seconds": AUDIO_CHUNK_SECONDS}, sort_keys=True).encode()).hexdigest()
+        "model": model_name, "chunk_seconds": AUDIO_CHUNK_SECONDS}
+    if word_timestamps:
+        identity_fields["word_timestamps"] = True
+    identity = hashlib.sha256(json.dumps(identity_fields, sort_keys=True).encode()).hexdigest()
     checkpoint = transcript_chunks_path(path)
     saved = {}
     try:
@@ -95,7 +107,10 @@ def transcribe_in_chunks(media_path, duration, model_name, transcribe_window):
                     "extracting a bounded twelve-minute Whisper window", timeout=300)
                 result = transcribe_window(audio, end - start)
             shifted = [{"text": row["text"], "start": start + row["start"],
-                        "end": min(end, start + row["end"])} for row in result.segments]
+                        "end": min(end, start + row["end"]),
+                        **({"words": [{"word": w.get("word", w.get("text", "")), "start": start + w["start"],
+                            "end": min(end, start + w["end"])} for w in row["words"]]} if row.get("words") else {})}
+                       for row in result.segments]
             chunk_segments = _segments(shifted, start, end)
             entry = {"start": start, "end": end, "segments": chunk_segments, "language": result.language}
         completed[str(index)] = entry

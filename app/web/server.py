@@ -572,6 +572,7 @@ def capabilities_payload():
         # a wire model id, and never ranks or prices a model.
         "models": _canonical_models_projection(),
         "ai_summary": _ai_summary_projection(),  # Track 9: understanding model projection; never exposes provider/wire/quota
+        "repurpose": __import__("app.repurpose.service", fromlist=["readiness"]).readiness(),
         "production_routes": {
             "note": (
                 "Presentation projection of the configuration facts above; "
@@ -991,17 +992,17 @@ def _artifact_payload(manifest, project_id: str | None = None) -> dict:
         "voice_audio": _artifact_state(
             project_dir, artifact_type="Voice audio", raw_path=manifest.voice_audio_path,
             failed=_stage_failed(manifest, "voice"), media=True,
-            applicable=manifest.source_summary_handoff is None,
+            applicable=manifest.source_summary_handoff is None and manifest.source_repurpose_handoff is None,
         ),
         "voice_timing": _artifact_state(
             project_dir, artifact_type="Voice timing", raw_path=manifest.voice_timing_path,
             failed=_stage_failed(manifest, "voice"),
-            applicable=manifest.source_summary_handoff is None,
+            applicable=manifest.source_summary_handoff is None and manifest.source_repurpose_handoff is None,
         ),
         "scene_manifest": _artifact_state(
             project_dir, artifact_type="Scene manifest", raw_path=manifest.scene_manifest_path,
             failed=_stage_failed(manifest, "scenes"),
-            applicable=manifest.source_summary_handoff is None,
+            applicable=manifest.source_summary_handoff is None and manifest.source_repurpose_handoff is None,
         ),
         "captions": _artifact_state(
             project_dir, artifact_type="Captions", raw_path=manifest.captions_path,
@@ -2620,7 +2621,7 @@ def _manifest_payload(manifest, project_id: str | None = None) -> dict:
         if final_video["state"] != "AVAILABLE":
             facts = {key: None for key in facts}
         final_video.update(facts)
-        handoff = manifest.source_summary_handoff
+        handoff = manifest.source_summary_handoff or manifest.source_repurpose_handoff
         final_video["file_fingerprint"] = handoff.file_fingerprint if handoff and final_video["available"] else None
     return {
         "project_id": safe_project_id,
@@ -2644,6 +2645,7 @@ def _manifest_payload(manifest, project_id: str | None = None) -> dict:
         ),
         "production_binding": data.get("production_binding"),
         "source_summary_handoff": data.get("source_summary_handoff"),
+        "source_repurpose_handoff": data.get("source_repurpose_handoff"),
         # G3: the route Core COMPILED for this unit (route-compilation
         # evidence, written once at project initialization).  This is a route
         # fact only: it is not scene provider/model provenance, not media
@@ -3068,6 +3070,8 @@ def unit_detail_payload(production_id: str, unit_id: str):
         "summary_video": _summary_video_status(
             production_id, unit_id, bound=bound, inspect_binding=False,
         ),
+        **({"repurpose_video": repurpose_video_status(production_id, unit_id, bound=bound)}
+           if unit.repurpose_plan_reference is not None else {}),
         "scene_checkpoint_rows": (
             _scene_checkpoint_rows(
                 bound.manifest.scene_checkpoints, bound.directory_id
@@ -4887,6 +4891,128 @@ def _serve_summary_video_media(handler, production_id: str, unit_id: str):
         # or produce an error/INFO traceback for that normal browser behavior.
 
 
+def _repurpose_call(action):
+    from pydantic import ValidationError
+    from app.repurpose.models import RepurposeError
+
+    try:
+        return 200, _redact_secrets(action())
+    except RepurposeError as exc:
+        return exc.status, {"error": exc.code, "message": str(exc)}
+    except ValidationError:
+        return 400, {"error": "INVALID_REPURPOSE_REQUEST", "message": "Repurpose request fields failed validation."}
+    except FileNotFoundError:
+        return 404, {"error": "REPURPOSE_ARTIFACT_NOT_FOUND"}
+    except (ValueError, OSError) as exc:
+        return 422, {"error": "REPURPOSE_ARTIFACT_INVALID", "message": _browser_safe_diagnostic(exc)}
+
+
+def repurpose_video_status(production_id, unit_id, *, bound=None):
+    from app.repurpose.storage import load_render, unit_dir
+
+    status = {"production_id": production_id, "unit_id": unit_id, "rendered": False, "promoted": False,
+        "bound_project_id": None, "promotion_required": False,
+        "promote_url": f"/api/productions/{production_id}/units/{unit_id}/repurpose-video/promote"}
+    if not re.fullmatch(r"unit-short-\d{3}", unit_id):
+        return None
+    try:
+        artifact = load_render(production_id, unit_id, root=PRODUCTIONS_DIR)
+        media = unit_dir(production_id, unit_id, PRODUCTIONS_DIR)/"short.mp4"
+        status.update(rendered=media.is_file(), promotion_required=media.is_file(),
+            plan_hash=artifact.plan_hash, file_fingerprint=artifact.file_fingerprint,
+            duration_seconds=artifact.duration_seconds, mode=artifact.mode,
+            media_url=f"/api/productions/{production_id}/units/{unit_id}/repurpose-video/media")
+    except FileNotFoundError:
+        pass
+    except Exception:
+        status["promotion_error"] = "SHORT_RENDER_INVALID"
+    if bound and bound.manifest.source_repurpose_handoff:
+        handoff = bound.manifest.source_repurpose_handoff
+        status.update(promoted=True, promotion_required=False, bound_project_id=bound.directory_id,
+            handoff_kind="repurpose_short", media_matches_promoted=status.get("file_fingerprint") == handoff.file_fingerprint)
+    return status
+
+
+def repurpose_promote_payload(production_id, unit_id, body):
+    from app.repurpose.handoff import promote_short
+    from app.repurpose.models import RepurposeError
+
+    def promote():
+        if (not isinstance(body, dict) or body.get("confirm") is not True
+                or set(body)-{"confirm", "expected_plan_hash", "expected_file_fingerprint"}
+                or any(not re.fullmatch(r"[a-f0-9]{64}", body.get(k, ""))
+                       for k in ("expected_plan_hash", "expected_file_fingerprint"))):
+            raise RepurposeError("CONFIRMATION_REQUIRED", "Confirm the exact short plan and media fingerprints", 400)
+        directory, manifest, created = promote_short(production_id, unit_id, root=PRODUCTIONS_DIR,
+            projects_root=PROJECTS_DIR, expected_plan_hash=body["expected_plan_hash"],
+            expected_file_fingerprint=body["expected_file_fingerprint"])
+        bound = type("BoundShort", (), {"manifest": manifest, "directory_id": directory.name})()
+        return {"production_id": production_id, "unit_id": unit_id, "promoted": True, "created": created,
+            "project_id": directory.name, "bound_project": _manifest_payload(manifest, directory.name),
+            "repurpose_video": repurpose_video_status(production_id, unit_id, bound=bound)}
+    return _repurpose_call(promote)
+
+
+def _serve_repurpose_media(handler, production_id, unit_id, *, head=False):
+    from app.production.storage import compute_content_hash
+    from app.repurpose.storage import load_render, load_unit_plan, unit_dir
+    from app.repurpose.models import RepurposeError
+
+    def resolve():
+        load_unit_plan(production_id, unit_id, PRODUCTIONS_DIR)
+        artifact = load_render(production_id, unit_id, PRODUCTIONS_DIR)
+        media = unit_dir(production_id, unit_id, PRODUCTIONS_DIR)/"short.mp4"
+        if not media.is_file() or media.stat().st_size != artifact.file_size or compute_content_hash(media) != artifact.file_fingerprint:
+            raise RepurposeError("SHORT_MEDIA_CHANGED", "Short preview media failed its fingerprint", 422)
+        return media
+    try:
+        media = resolve()
+    except Exception as exc:
+        status, payload = _repurpose_call(lambda: (_ for _ in ()).throw(exc))
+        if head:
+            handler.send_response(status); handler.send_header("Content-Length", "0"); handler.end_headers()
+            return
+        return handler._json(status, payload)
+    size = media.stat().st_size
+    start, end = 0, size-1
+    rh = handler.headers.get("Range", "")
+    if rh:
+        try:
+            if not re.fullmatch(r"bytes=\d*-\d*", rh):
+                raise ValueError
+            a, b = rh[6:].split("-")
+            if not a and (not b or int(b) <= 0):
+                raise ValueError
+            start, end = (int(a), int(b) if b else size-1) if a else (max(0, size-int(b)), size-1)
+            if start < 0 or start >= size or end < start:
+                raise ValueError
+            end = min(size-1, end)
+        except ValueError:
+            handler.send_response(416); handler.send_header("Content-Range", f"bytes */{size}")
+            handler.send_header("Content-Length", "0"); handler.end_headers(); return
+    handler.send_response(206 if rh else 200)
+    for key, value in {"Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Length": str(end-start+1),
+                       "Cache-Control": "no-store"}.items():
+        handler.send_header(key, value)
+    if rh:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+    handler.end_headers()
+    if not head:
+        try:
+            with media.open("rb") as stream:
+                stream.seek(start)
+                remaining = end-start+1
+                while remaining:
+                    chunk = stream.read(min(256*1024, remaining))
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except OSError as exc:
+            if not _is_client_disconnect(exc):
+                raise
+
+
 class AVMHandler(BaseHTTPRequestHandler):
     server_version = "AVMWeb/1.0"
 
@@ -4937,6 +5063,19 @@ class AVMHandler(BaseHTTPRequestHandler):
 
     # -- Phase 11 production routes (thin Command Center surface) ---------
     def _productions_get(self, path: str):
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/sources/?", path)
+        if match:
+            from app.repurpose.cache import sources_payload
+            status, payload = _repurpose_call(lambda: sources_payload(match.group(1), root=PRODUCTIONS_DIR))
+            return self._json(status, payload)
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/batches/(rpb-[a-f0-9]{24})/?", path)
+        if match:
+            from app.repurpose.service import batch_status
+            status, payload = _repurpose_call(lambda: batch_status(match.group(1), match.group(2), root=PRODUCTIONS_DIR))
+            return self._json(status, payload)
+        match = re.fullmatch(r"/api/productions/([^/]+)/units/([^/]+)/repurpose-video/media/?", path)
+        if match:
+            return _serve_repurpose_media(self, match.group(1), match.group(2))
         match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/auto-publish/?$", path)
         if match:
             status, payload = completion_publish_payload(match.group(1), match.group(2))
@@ -5018,6 +5157,32 @@ class AVMHandler(BaseHTTPRequestHandler):
         return self._json(404, {"detail": "not found"})
 
     def _productions_post(self, path: str):
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/batches/(rpb-[a-f0-9]{24})/recover/?", path)
+        if match:
+            from app.repurpose.service import recover_batch
+            body = self._request_json_body()
+            if body != {"confirm": True} or body.get("confirm") is not True:
+                return self._json(400, {"error": "CONFIRMATION_REQUIRED"})
+            status, payload = _repurpose_call(lambda: recover_batch(match.group(1), match.group(2), root=PRODUCTIONS_DIR))
+            return self._json(status, payload)
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/batches/?", path)
+        if match:
+            from app.repurpose.service import create_batch
+            body = self._request_json_body()
+            status, payload = _repurpose_call(lambda: create_batch(match.group(1), body, root=PRODUCTIONS_DIR))
+            return self._json(202 if status == 200 and payload.get("status") == "planning" else status, payload)
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/batches/(rpb-[a-f0-9]{24})/render/?", path)
+        if match:
+            from app.repurpose.service import render_batch
+            body = self._request_json_body()
+            status, payload = _repurpose_call(lambda: render_batch(match.group(1), match.group(2), body, root=PRODUCTIONS_DIR))
+            return self._json(202 if status == 200 and payload.get("status") == "rendering" else status, payload)
+        match = re.fullmatch(r"/api/productions/([^/]+)/units/([^/]+)/repurpose-video/promote/?", path)
+        if match:
+            status, payload = repurpose_promote_payload(match.group(1), match.group(2), self._request_json_body())
+            return self._json(status, payload)
+        if "/repurpose" in path:
+            return self._json(405, {"error": "METHOD_NOT_ALLOWED"})
         match = re.match(r"^/api/productions/([^/]+)/units/([^/]+)/auto-publish/?$", path)
         if match:
             body = self._request_json_body()
@@ -5169,6 +5334,15 @@ class AVMHandler(BaseHTTPRequestHandler):
         return self._json(status, payload)
 
     # -- routing ----------------------------------------------------------
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+        match = re.fullmatch(r"/api/productions/([^/]+)/units/([^/]+)/repurpose-video/media/?", path)
+        if match:
+            return _serve_repurpose_media(self, match.group(1), match.group(2), head=True)
+        self.send_response(405)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         path = urlparse(self.path).path
         try:

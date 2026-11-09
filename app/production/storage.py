@@ -30,6 +30,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -51,6 +54,59 @@ _UNITS_DIR = "units"
 _PLAN_DIR = "plan"
 _SOURCE_DIR = "source"
 _SOURCE_META = "source.json"
+_REVISION_LOCKS = {}
+_REVISION_LOCKS_GUARD = threading.Lock()
+_REVISION_DEPTH = threading.local()
+
+
+@contextmanager
+def production_revision_lock(production_id, root=None):
+    """Reentrant thread + OS file lock shared by intent and repurpose writers."""
+    directory = production_dir(production_id, root).resolve()
+    key = str(directory)
+    with _REVISION_LOCKS_GUARD:
+        lock = _REVISION_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        depths = getattr(_REVISION_DEPTH, "paths", {})
+        if depths.get(key):
+            depths[key] += 1
+            try:
+                yield
+            finally:
+                depths[key] -= 1
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / ".intent.lock").open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("Production intent writer is busy") from None
+                        time.sleep(.05)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            depths[key] = 1
+            _REVISION_DEPTH.paths = depths
+            try:
+                yield
+            finally:
+                depths.pop(key, None)
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +497,11 @@ def save_new_production(
 
 
 def save_revision(revised: Production, *, root: Optional[Path] = None) -> Path:
+    with production_revision_lock(revised.production_id, root):
+        return _save_revision_locked(revised, root=root)
+
+
+def _save_revision_locked(revised: Production, *, root: Optional[Path] = None) -> Path:
     """Persist a NEW plan_version of an existing production.
 
     Guarantees:
@@ -479,3 +540,84 @@ def save_revision(revised: Production, *, root: Optional[Path] = None) -> Path:
     target = current_path(revised.production_id, root)
     _atomic_write(target, _serialize(revised))
     return target
+
+
+def commit_repurpose_batch(plan, *, root=None):
+    """Persist every short and disjoint cut in ONE canonical intent revision.
+
+    Plan precedes intent. Restart recovery reuses its assigned identities without
+    asking a provider again; no existing unit or accepted project is replaced.
+    """
+    from app.production.models import ProductionUnit, RepurposePlanReference, SourceLineage
+    from app.repurpose.storage import atomic_json, batch_dir, content_hash, load_plan, read_json
+
+    with production_revision_lock(plan.production_id, root):
+        production = load_production(plan.production_id, root=root)
+        existing = [u for u in production.units if u.repurpose_plan_reference
+                    and u.repurpose_plan_reference.batch_id == plan.batch_id]
+        path = batch_dir(plan.production_id, plan.batch_id, root) / "plan.json"
+        if path.is_file():
+            plan = load_plan(plan.production_id, plan.batch_id, root)
+        if existing:
+            if len(existing) != len(plan.clips) or any(u.repurpose_plan_reference.plan_hash != content_hash(plan) for u in existing):
+                raise ValueError("Partial or conflicting repurpose intent revision")
+            return plan
+        asset = next((a for a in production.source_assets or [] if a.asset_id == plan.request.source_asset_id), None)
+        if asset is None or asset.sha256 != plan.source_sha256:
+            raise ValueError("Repurpose source ownership changed")
+        segment_path = segments_path_for(production.production_id, asset.asset_id, root)
+        old = read_json(segment_path) if segment_path.is_file() else {"asset_id": asset.asset_id, "segments": []}
+        segment_rows = old.get("segments", []) if isinstance(old, dict) else []
+        used_segments = {s["segment_id"] for s in segment_rows}
+        used_segments.update(s for u in production.units if u.source_lineage and u.source_lineage.asset_id == asset.asset_id
+                             for s in u.source_lineage.source_segment_ids)
+        used_units = {u.unit_id for u in production.units}
+        for clip in plan.clips:
+            if clip.unit_id is None:
+                number = next((i for i in range(1, 1000) if f"unit-short-{i:03d}" not in used_units), None)
+                if number is None:
+                    raise ValueError("Short unit namespace exhausted")
+                clip.unit_id = f"unit-short-{number:03d}"
+            if clip.unit_id in used_units:
+                raise ValueError("Short unit identity is already occupied")
+            used_units.add(clip.unit_id)
+            for cut in clip.cuts:
+                if cut.source_segment_id is None:
+                    number = next((i for i in range(1, 1000) if f"seg-{i:03d}" not in used_segments), None)
+                    if number is None:
+                        raise ValueError("Source segment namespace exhausted")
+                    cut.source_segment_id = f"seg-{number:03d}"
+                used_segments.add(cut.source_segment_id)
+                if not any(s["segment_id"] == cut.source_segment_id for s in segment_rows):
+                    segment_rows.append(SourceSegment(segment_id=cut.source_segment_id, asset_id=asset.asset_id,
+                        start_seconds=cut.start_seconds, end_seconds=cut.end_seconds, title=clip.title,
+                        transcript_segment_ids=cut.transcript_segment_ids).model_dump(mode="json"))
+        atomic_json(path, plan)
+        digest = content_hash(plan)
+        units, lineages = list(production.units), list(production.source_lineage or [])
+        ordinal = max(u.ordinal for u in units)
+        for index, clip in enumerate(plan.clips):
+            lineage = SourceLineage(unit_id=clip.unit_id, asset_id=asset.asset_id,
+                source_path=asset.stored_path, source_segment_ids=[c.source_segment_id for c in clip.cuts])
+            units.append(ProductionUnit(unit_id=clip.unit_id, ordinal=ordinal + index + 1,
+                unit_type="repurpose_short", title=clip.title, premise=clip.rationale,
+                content_intent={"hook": clip.hook, "output_intent": "youtube_shorts", "repurpose_mode": plan.request.mode},
+                source_lineage=lineage, repurpose_plan_reference=RepurposePlanReference(batch_id=plan.batch_id,
+                    clip_index=index, plan_path=f"repurpose/batches/{plan.batch_id}/plan.json", plan_hash=digest)))
+            lineages.append(lineage)
+        atomic_json(segment_path, {**old, "production_id": production.production_id,
+            "asset_id": asset.asset_id, "segments_path": f"source/{asset.asset_id}.segments.json", "segments": segment_rows})
+        revised = production.model_copy(update={"units": units, "source_lineage": lineages,
+            "plan_version": production.plan_version + 1, "revised_at": datetime.now().isoformat()})
+        snapshot = version_path(production.production_id, production.plan_version, root)
+        if snapshot.is_file():
+            # Interrupted batch commit may have already snapshotted current
+            # intent. Recover ONLY byte-identical prior intent, not a conflict.
+            if snapshot.read_text(encoding="utf-8") != _serialize(production):
+                raise ValueError("Repurpose revision snapshot conflicts with current intent")
+            assert_valid_production(revised)
+            _write_unit_plan_dirs(revised, root)
+            _atomic_write(current_path(production.production_id, root), _serialize(revised))
+        else:
+            save_revision(revised, root=root)
+        return plan
