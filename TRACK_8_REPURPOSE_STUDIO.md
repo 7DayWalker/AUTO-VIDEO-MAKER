@@ -96,3 +96,25 @@ Full Core hermetic run: **2,628 passed, 1 skipped**, zero external network
 attempts. K3: **234 passed**, production build passed (existing bundle-size
 warning). Headless desktop/mobile checks passed both the live blocked state and
 synthetic preview/Export flow with no JS errors or real publishing writes.
+
+## Surgical transport correction — 2026-11-09
+
+`AgentRouterProvider(..., use_responses_api=True)` now selects the direct
+`https://agentrouter.org/v1/responses` endpoint BEFORE dispatch when the configured
+base URL is loopback. Default callers still use the supported local Chat bridge;
+direct HTTPS configurations still use native Responses. Repurpose uses this
+explicit constructor option rather than mutating `_api_style`. The configured
+credential and existing public client header are reused without exposing them.
+No endpoint probes, automatic fallback, retries, or model substitutions occur.
+
+The user separately authorized one new Dragon Queen batch with request ID
+`track8-dragon-direct-responses-v2`, batch `rpb-c72c41bb924ad93a24c745bf`.
+The direct Responses dispatch was also rejected with `LLMModelUnavailableError`
+(the adapter's HTTP 400/404 rejection family). Its persisted counters remain
+LLM=1, upload=0, STT=0, vision=0. No response or plan was retained, and no short
+units, rendered MP4s, or promotions were produced. The previous failed batch
+was not rewritten, and no further live request was made. This corrects the
+loopback path mismatch but does not establish current upstream availability.
+
+Focused transport and Repurpose regressions passed **129 tests**, with zero
+external network attempts. K3 source files were not modified by this correction.

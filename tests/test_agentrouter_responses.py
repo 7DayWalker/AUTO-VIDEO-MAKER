@@ -141,6 +141,22 @@ def test_unsafe_endpoint_configuration_is_rejected_without_network_or_secret_ech
     assert "synthetic-private-credential" not in str(error.value) and not post.called
 
 
+def test_explicit_native_responses_does_not_change_default_loopback_transport(monkeypatch):
+    default = AgentRouterProvider(api_key="synthetic-only", base_url="http://127.0.0.1:8318")
+    native = AgentRouterProvider(api_key="synthetic-only", base_url="http://127.0.0.1:8318", use_responses_api=True)
+    assert default._api_style == "chat_completions" and default._base_url == "http://127.0.0.1:8318/v1"
+    assert native._api_style == "responses" and native._base_url == "https://agentrouter.org/v1"
+
+
+@pytest.mark.parametrize("flag", ["true", 1, {}, []])
+def test_explicit_transport_flag_is_strict_and_never_dispatches(monkeypatch, flag):
+    post = Mock()
+    monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
+    with pytest.raises(ValueError, match="boolean"):
+        AgentRouterProvider(api_key="synthetic-only", use_responses_api=flag)
+    assert not post.called
+
+
 @pytest.mark.parametrize("model", ["claude-opus-5.5", "gpt-4o", "whisper-1", "tts-1", "gpt-image-1"])
 def test_unverified_models_and_operations_are_not_enabled_by_key_presence(monkeypatch, model):
     post = Mock()

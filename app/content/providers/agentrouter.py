@@ -58,7 +58,9 @@ def _normalize_usage(raw, *, responses=False):
 
 
 class AgentRouterProvider(BaseLLMProvider):
-    def __init__(self, api_key=None, base_url=None, model=None, timeout=None):
+    def __init__(self, api_key=None, base_url=None, model=None, timeout=None, *, use_responses_api=None):
+        if use_responses_api is not None and type(use_responses_api) is not bool:
+            raise ValueError("AgentRouter Responses selection must be a boolean")
         self._api_key = os.getenv("AGENTROUTER_API_KEY", "") if api_key is None else api_key
         configured_url = base_url or os.getenv("AGENTROUTER_BASE_URL") or DEFAULT_AGENTROUTER_BASE_URL
         if not isinstance(configured_url, str):
@@ -89,6 +91,15 @@ class AgentRouterProvider(BaseLLMProvider):
         # Only these endpoint/transport pairs passed account-tier verification.
         # No speculative Messages/remote Chat readiness is advertised.
         self._api_style = "chat_completions" if loopback else "responses"
+        if use_responses_api is True and loopback:
+            # The operator's loopback bridge serves Chat locally and translates
+            # it to Responses upstream; it does NOT serve /v1/responses itself.
+            # Native Responses is selected BEFORE dispatch, never by probing,
+            # retrying a local 404, or changing existing summary callers.
+            self._base_url = DEFAULT_AGENTROUTER_BASE_URL
+            self._api_style = "responses"
+        elif use_responses_api is False and not loopback:
+            raise ValueError("AgentRouter Chat transport requires a loopback bridge")
         self._reasoning_effort = os.getenv("AGENTROUTER_REASONING_EFFORT", "low")
         if self._reasoning_effort not in {"none", "low", "medium", "high"}:
             raise ValueError("Invalid AgentRouter reasoning effort configuration")

@@ -12,11 +12,9 @@ MAX_INPUT_TOKENS = 90000
 
 
 def planner_provider():
-    provider = AgentRouterProvider(model=MODEL_ID)
-    # Repurpose explicitly uses Responses, including a locally configured bridge.
-    # The shared adapter otherwise selects chat for loopback; do not change its
-    # existing summary behavior or make a speculative endpoint fallback.
-    provider._api_style = "responses"
+    # Explicit native Responses bypasses a Chat-only loopback bridge without
+    # probing/retrying it. Default summary transport selection stays unchanged.
+    provider = AgentRouterProvider(model=MODEL_ID, use_responses_api=True)
     if not provider.is_available():
         raise RepurposeError("PLANNER_NOT_CONFIGURED", "Sol planner credentials are not configured", 503)
     return provider
