@@ -133,3 +133,39 @@ def test_interrupted_revision_snapshot_recovers_once(tmp_path, monkeypatch):
     restored = recover_batch(PID, job["batch_id"], root=tmp_path)
     assert restored["status"] == "planned" and load_production(PID, root=tmp_path).plan_version == 2
     assert len(provider.calls) == 1
+
+
+def test_rejected_planner_persists_sanitized_http_diagnostics_once(tmp_path):
+    from app.content.exceptions import LLMInvalidRequestError, with_provider_diagnostics
+
+    evidence = source_fixture(tmp_path)
+    error = with_provider_diagnostics(LLMInvalidRequestError("Rejected parameters"), {
+        "http_status": 400, "error_code": "unsupported_parameter", "message": "Unsupported field temperature",
+        "request_id": "fixture-request", "api_style": "chat_completions", "transport": "local_proxy"})
+    provider = FakePlanner(error=error)
+    body = request_fixture(evidence).model_dump(mode="json")
+    job = create_batch(PID, body, root=tmp_path, background=False, provider=provider)
+    assert job["status"] == "failed" and job["llm_calls"] == 1
+    assert job["error"]["diagnostics"]["http_status"] == 400
+    assert "Unsupported field temperature" in job["error"]["message"]
+    assert job["error"]["diagnostics"]["error_code"] == "unsupported_parameter"
+    create_batch(PID, body, root=tmp_path, background=False, provider=provider)
+    assert len(provider.calls) == 1
+
+
+def test_timeout_retains_uncertain_status_and_no_successful_response(tmp_path):
+    from app.content.exceptions import LLMConnectionError, with_provider_diagnostics
+
+    evidence = source_fixture(tmp_path)
+    error = LLMConnectionError("agentrouter", "Request timed out")
+    error.category = "timeout"
+    with_provider_diagnostics(error, {"http_status": None, "error_code": "REQUEST_TIMEOUT",
+        "message": "No complete response before timeout", "timeout_seconds": 300,
+        "api_style": "chat_completions", "transport": "local_proxy"})
+    provider = FakePlanner(error=error)
+    body = request_fixture(evidence).model_dump(mode="json")
+    job = create_batch(PID, body, root=tmp_path, background=False, provider=provider)
+    assert job["status"] == "uncertain" and job["llm_calls"] == 1 and job["llm_successful_calls"] == 0
+    assert job["error"]["category"] == "timeout" and job["error"]["diagnostics"]["timeout_seconds"] == 300
+    create_batch(PID, body, root=tmp_path, background=False, provider=provider)
+    assert len(provider.calls) == 1

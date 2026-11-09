@@ -118,3 +118,33 @@ loopback path mismatch but does not establish current upstream availability.
 
 Focused transport and Repurpose regressions passed **129 tests**, with zero
 external network attempts. K3 source files were not modified by this correction.
+
+## Working Summary transport and safe diagnostics — 2026-11-09
+
+Repurpose now constructs `AgentRouterProvider(model="gpt-6.1-sol")` with no
+transport override, then calls `generate_json` with the same temperature 0.35,
+16,384-token output budget and low reasoning contract used by Summary. Configured
+loopback uses `/v1/chat/completions`; direct HTTPS uses `/v1/responses`. The
+loopback bridge owns upstream Responses translation. There are no endpoint
+probes, automatic retries, repairs or model substitutions.
+
+AgentRouter HTTP rejections now retain the shared Gemini-style sanitized
+diagnostics (status, code, message and request ID), plus transport/style.
+Parameter errors at 400/413/422 use `LLMInvalidRequestError`; 404 or explicitly
+identified missing/unsupported models retain `LLMModelUnavailableError`.
+Keys, bearer credentials, URLs and payload-shaped strings are redacted. Timeout
+diagnostics explicitly report no HTTP status and uncertain upstream outcome.
+Batch failures persist these safe diagnostics instead of discarding the reason.
+
+The separately authorized Summary-bridge request `track8-dragon-summary-bridge-v3`
+created batch `rpb-910728e2d3e7e87cb78068ad`. This ONE invocation selected the
+configured loopback Chat bridge, but returned no complete response before the
+300-second client limit. The batch is `uncertain` with LLM=1 dispatch,
+upload=0, STT=0, vision=0. No response/plan/short units/media/promotions exist,
+and no second request or fallback was issued. Retained-result inspection found
+no recoverable response. The new attempt did not return an HTTP 400 to diagnose.
+The later timeout-persistence improvement applies to subsequent requests; this
+original uncertain batch is preserved without rewriting its history.
+
+The final focused AgentRouter/Repurpose/Gemini-diagnostic regressions passed
+**161 tests**, with zero external network attempts. K3 was untouched.

@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from app.content.exceptions import LLMConnectionError, LLMModelUnavailableError, LLMOutputTruncatedError, LLMResponseError
+from app.content.exceptions import LLMConnectionError, LLMInvalidRequestError, LLMModelUnavailableError, LLMOutputTruncatedError, LLMResponseError
 from app.content.providers.agentrouter import AgentRouterProvider
 
 
@@ -180,3 +180,37 @@ def test_direct_timeout_does_not_leak_transport_details(monkeypatch):
     with pytest.raises(LLMConnectionError) as error:
         AgentRouterProvider(api_key="synthetic-key").generate("Text only")
     assert error.value.category == "timeout" and "synthetic-private-credential" not in str(error.value)
+    assert error.value.diagnostics["http_status"] is None
+    assert error.value.diagnostics["error_code"] == "REQUEST_TIMEOUT"
+    assert error.value.diagnostics["timeout_seconds"] == 300
+
+
+@pytest.mark.parametrize("base", ["https://agentrouter.org/v1", "http://127.0.0.1:8318/v1"])
+def test_http_400_parameter_reason_is_preserved_and_secret_safe(monkeypatch, base):
+    credential = "synthetic-private-credential"
+    response = Mock(status_code=400, headers={"x-request-id": "request-fixture"})
+    response.json.return_value = {"error": {"code": "unsupported_parameter",
+        "message": f"Unsupported field temperature. Authorization: Bearer {credential}; https://private.invalid/endpoint"}}
+    post = Mock(return_value=response)
+    monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
+    with pytest.raises(LLMInvalidRequestError) as caught:
+        AgentRouterProvider(api_key=credential, base_url=base).generate_json("Grounded text", max_tokens=16384, reasoning={"effort": "low"})
+    assert post.call_count == 1
+    error = caught.value
+    assert error.status_code == 400 and error.diagnostics["error_code"] == "unsupported_parameter"
+    assert "Unsupported field temperature" in error.diagnostics["message"]
+    assert credential not in str(error) and credential not in str(error.diagnostics)
+    assert "private.invalid" not in str(error) and error.diagnostics["request_id"] == "request-fixture"
+
+
+@pytest.mark.parametrize("status,code,message", [(404, "model_not_found", "Model not found"),
+    (400, "model_not_found", "Model not found")])
+def test_model_rejection_keeps_classification_and_diagnostics(monkeypatch, status, code, message):
+    response = Mock(status_code=status, headers={})
+    response.json.return_value = {"error": {"code": code, "message": message}}
+    post = Mock(return_value=response)
+    monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
+    with pytest.raises(LLMModelUnavailableError) as caught:
+        AgentRouterProvider(api_key="synthetic-only").generate("Text")
+    assert post.call_count == 1 and caught.value.status_code == status
+    assert caught.value.diagnostics["message"] == message

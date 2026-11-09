@@ -20,14 +20,16 @@ logger = logging.getLogger(__name__)
 
 def readiness():
     configured = False
+    api_style = None
     try:
-        planner_provider()
+        provider = planner_provider()
+        api_style = provider._api_style
         configured = True
     except (ValueError, RuntimeError):
         pass
     return {"implemented": True, "status": "ready" if configured else "not_configured", "configured": configured,
         "configuration_only": True,
-        "model_id": "gpt-6.1-sol", "api_style": "responses", "max_output_tokens": 16384,
+        "model_id": "gpt-6.1-sol", "api_style": api_style, "upstream_api_style": "responses", "max_output_tokens": 16384,
         "reasoning": {"effort": "low"}, "modes": ["narrated", "raw_highlight"],
         "framing_presets": ["cinema_canvas", "center_crop"], "count_bounds": [3, 10],
         "duration_bounds": [30, 60], "source_duration_bounds": [60, 14400],
@@ -88,7 +90,7 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
         chosen_provider = provider or planner_provider()
         job = {"production_id": production_id, "batch_id": batch_id, "request_id": request.request_id,
             "request_hash": content_hash(request), "request": request.model_dump(mode="json"), "status": "planning",
-            "created_at": timestamp(), "updated_at": timestamp(), "llm_calls": 0,
+            "created_at": timestamp(), "updated_at": timestamp(), "llm_calls": 0, "llm_successful_calls": 0,
             "uploads": 0, "stt_calls": 0, "vision_calls": 0, "units": {}, "render_requests": {}}
         save_job(production_id, batch_id, job, root)
         with _GUARD:
@@ -97,9 +99,12 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
         try:
             def dispatch():
                 job["llm_calls"] = 1  # Marker precedes the ONLY provider dispatch.
+                job["planner_transport"] = {"api_style": getattr(chosen_provider, "_api_style", None),
+                    "max_output_tokens": 16384, "reasoning_effort": "low"}
                 save_job(production_id, batch_id, job, root)
             def received(response):
                 atomic_json(directory / "planner_response.json", {"model": response.model, "content": response.content})
+                job["llm_successful_calls"] = 1
             plan = plan_once(evidence, request, batch_id, provider=chosen_provider, on_response=received, on_dispatch=dispatch)
             atomic_json(directory / "candidate.json", plan)
             plan = commit_repurpose_batch(plan, root=root)
@@ -111,6 +116,15 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
             job.update(status="uncertain" if uncertain else "failed", updated_at=timestamp(),
                 error={"code": getattr(exc, "code", "PLANNING_FAILED"),
                        "message": "One-call planning failed; inspect the saved response. No request was retried.", "type": type(exc).__name__})
+            category = getattr(exc, "category", None)
+            if category in {"timeout", "invalid_request", "capability", "content_moderation"}:
+                job["error"]["category"] = category
+            detail = getattr(exc, "diagnostics", None)
+            if isinstance(detail, dict):
+                job["error"]["diagnostics"] = {key: detail[key] for key in
+                    ("http_status", "error_code", "message", "request_id", "api_style", "transport", "timeout_seconds") if key in detail}
+                prefix = "One-call planner outcome uncertain: " if uncertain else "One-call planner rejected: "
+                job["error"]["message"] = prefix + detail.get("message", "Inspect upstream diagnostics") + ". No request was retried."
         finally:
             save_job(production_id, batch_id, job, root)
             with _GUARD:

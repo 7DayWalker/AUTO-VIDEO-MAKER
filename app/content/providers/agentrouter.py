@@ -17,6 +17,7 @@ import requests
 from app.content.exceptions import (
     LLMAuthenticationError, LLMConnectionError, LLMModelUnavailableError,
     LLMOutputTruncatedError, LLMQuotaError, LLMRateLimitError, LLMResponseError,
+    LLMInvalidRequestError, provider_diagnostics, with_provider_diagnostics,
 )
 from app.content.providers.base import BaseLLMProvider, LLMResponse
 
@@ -123,6 +124,33 @@ class AgentRouterProvider(BaseLLMProvider):
         # Even an empty multimodal call is rejected before any HTTP request.
         raise LLMModelUnavailableError()
 
+    def _raise_for_status(self, response):
+        """Keep safe rejection evidence; a parameter 400 is not model unavailability."""
+        status = response.status_code
+        if status == 200:
+            return
+        detail = provider_diagnostics(response, secrets=(self._api_key,))
+        detail.update(api_style=self._api_style,
+                      transport="local_proxy" if self._api_style == "chat_completions" else "direct")
+        message = (detail["error_code"] + " " + detail["message"]).lower()
+        if status in (401, 403):
+            error = LLMAuthenticationError(self.name)
+        elif status == 402:
+            error = LLMQuotaError(self.name)
+        elif status == 429:
+            error = LLMRateLimitError(self.name)
+        elif status >= 500:
+            error = LLMConnectionError(self.name, f"Server error: {status}")
+        elif status == 404 or (status == 400 and any(marker in message for marker in (
+            "model_not_found", "model not found", "model is not found", "model does not exist", "model does not support",
+        ))):
+            error = LLMModelUnavailableError()
+        elif status in (400, 413, 422):
+            error = LLMInvalidRequestError("Provider rejected the request parameters")
+        else:
+            error = LLMResponseError(f"HTTP {status}")
+        raise with_provider_diagnostics(error, detail)
+
     def generate_json(self, prompt, system_prompt=None, temperature=0.7, max_tokens=16384, reasoning=None):
         return self.generate(prompt, system_prompt=system_prompt, response_schema=dict,
                              temperature=temperature, max_tokens=max_tokens, reasoning=reasoning)
@@ -172,23 +200,22 @@ class AgentRouterProvider(BaseLLMProvider):
         except requests.exceptions.Timeout:
             error = LLMConnectionError(self.name, "Request timed out")
             error.category = "timeout"
-            raise error from None
+            raise with_provider_diagnostics(error, {
+                "http_status": None, "error_code": "REQUEST_TIMEOUT",
+                "message": "No complete response before the client timeout; upstream outcome is uncertain",
+                "api_style": self._api_style,
+                "transport": "local_proxy" if self._api_style == "chat_completions" else "direct",
+                "timeout_seconds": self._timeout,
+            }) from None
         except requests.exceptions.RequestException:
-            raise LLMConnectionError(self.name, "Transport request failed") from None
+            raise with_provider_diagnostics(LLMConnectionError(self.name, "Transport request failed"), {
+                "http_status": None, "error_code": "TRANSPORT_FAILURE",
+                "message": "No complete provider response was received; upstream outcome is uncertain",
+                "api_style": self._api_style,
+                "transport": "local_proxy" if self._api_style == "chat_completions" else "direct",
+            }) from None
+        self._raise_for_status(response)
         status = response.status_code
-        if status in (401, 403):
-            raise LLMAuthenticationError(self.name)
-        if status == 402:
-            raise LLMQuotaError(self.name)
-        if status == 429:
-            raise LLMRateLimitError(self.name)
-        if status >= 500:
-            raise LLMConnectionError(self.name, f"Server error: {status}")
-        if status in (400, 404):
-            # Never include an upstream body: it can echo credentials/payloads.
-            raise LLMModelUnavailableError()
-        if status != 200:
-            raise LLMResponseError(f"HTTP {status}")
         try:
             data = response.json()
             if not isinstance(data, dict) or data.get("error"):

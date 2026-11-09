@@ -56,7 +56,9 @@ def main():
     args.report.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     if job["status"] in {"failed", "uncertain", "interrupted"}:
         print(json.dumps({"batch_id": batch_id, "status": job["status"], "error": job.get("error"),
-            "llm_calls": job["llm_calls"]}, indent=2), flush=True)
+            "llm_calls": job["llm_calls"], "llm_successful_calls": job.get("llm_successful_calls", 0),
+            "planner_transport": job.get("planner_transport"), "uploads": job["uploads"],
+            "stt_calls": job["stt_calls"], "vision_calls": job["vision_calls"]}, indent=2), flush=True)
         return 1
     assert all(job[k] == value for k, value in {"llm_calls": 1, "uploads": 0, "stt_calls": 0, "vision_calls": 0}.items())
     missing = [c["unit_id"] for c in job["clips"] if not c.get("render")]
@@ -77,6 +79,7 @@ def main():
             "media_url": "http://127.0.0.1:8787"+clip["media_url"], "project_id": promotion["project_id"]})
     report = {"ok": len(rows) == 3, "production_id": pid, "batch_id": batch_id,
         "llm_calls": job["llm_calls"], "uploads": job["uploads"], "stt_calls": job["stt_calls"], "vision_calls": job["vision_calls"],
+        "llm_successful_calls": job.get("llm_successful_calls", 0), "planner_transport": job.get("planner_transport"),
         "clips": rows, "units": job["units"], "published": False}
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)

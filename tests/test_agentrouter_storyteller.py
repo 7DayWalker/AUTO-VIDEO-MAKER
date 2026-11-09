@@ -88,7 +88,9 @@ def test_errors_never_echo_credentials_or_upstream_body(monkeypatch, status):
     with pytest.raises(Exception) as error:
         AgentRouterProvider(api_key=credential).generate("probe")
     assert credential not in str(error.value)
-    assert not response.json.called
+    assert response.json.called
+    assert credential not in str(error.value.diagnostics)
+    assert error.value.diagnostics["http_status"] == status
 
 
 def test_transport_error_is_not_chained_or_exposed(monkeypatch):

@@ -99,13 +99,13 @@ def test_actual_adapter_posts_one_responses_envelope(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("base", ["http://127.0.0.1:8318", "http://localhost:8318/v1"])
-def test_planner_bypasses_chat_only_loopback_without_probe_or_retry(tmp_path, monkeypatch, base):
+def test_planner_matches_summary_loopback_without_probe_or_retry(tmp_path, monkeypatch, base):
     from unittest.mock import Mock
     from app.repurpose.planner import planner_provider
 
     evidence = source_fixture(tmp_path)
-    response = SimpleNamespace(status_code=200, json=lambda: {"model": "gpt-6.1-sol", "status": "completed",
-        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": json.dumps(output_fixture())}]}]})
+    response = SimpleNamespace(status_code=200, json=lambda: {"model": "gpt-6.1-sol",
+        "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(output_fixture())}}]})
     post = Mock(return_value=response)
     monkeypatch.setenv("AGENTROUTER_API_KEY", "synthetic-only")
     monkeypatch.setenv("AGENTROUTER_BASE_URL", base)
@@ -113,9 +113,11 @@ def test_planner_bypasses_chat_only_loopback_without_probe_or_retry(tmp_path, mo
     monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
     plan_once(evidence, request_fixture(evidence), "rpb-"+"a"*24, provider=planner_provider())
     assert post.call_count == 1
-    assert post.call_args.args == ("https://agentrouter.org/v1/responses",)
+    assert post.call_args.args == (base.rstrip("/") + ("" if base.endswith("/v1") else "/v1") + "/chat/completions",)
     sent = post.call_args.kwargs
-    assert sent["json"]["max_output_tokens"] == 16384
-    assert sent["json"]["reasoning"] == {"effort": "low"}
+    assert sent["json"]["max_tokens"] == 16384
+    assert sent["json"]["reasoning_effort"] == "low"
+    assert sent["json"]["response_format"] == {"type": "json_object"}
+    assert sent["json"]["temperature"] == .35
     assert sent["headers"]["User-Agent"] == "codex_cli_rs/0.1.0"
     assert sent["allow_redirects"] is False
