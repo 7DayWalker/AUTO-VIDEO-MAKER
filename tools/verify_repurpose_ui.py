@@ -34,7 +34,14 @@ def main():
             page.goto("http://127.0.0.1:5173", wait_until="networkidle", timeout=60000)
             page.get_by_role("button", name="Repurpose Studio", exact=True).click()
             page.locator("[data-repurpose-studio]").wait_for()
-            page.get_by_label("Existing production", exact=True).select_option(report["production_id"])
+            presets = page.get_by_label("Target length", exact=True).locator("option").evaluate_all("nodes => nodes.map(n => Number(n.value))")
+            assert presets == [30, 45, 60, 90, 120, 150, 180], presets
+            # A cold health/list probe can time out before the collection is
+            # loaded. Explicitly refresh the existing READ seam, never commands.
+            options = page.get_by_label("Existing production", exact=True).locator("option").evaluate_all("nodes => nodes.map(n => n.value)")
+            if report["production_id"] not in options:
+                page.evaluate("async () => { const {useStore} = await import('/src/store.js'); await useStore.getState().loadCoreProductions(); }")
+            page.get_by_label("Existing production", exact=True).select_option(report["production_id"], timeout=90000)
             page.get_by_label("Cached film", exact=True).select_option("src-001")
             field = page.get_by_label("Inspect an existing batch", exact=True)
             field.fill(report["batch_id"]); field.press("Tab")
@@ -56,10 +63,18 @@ def main():
             assert len(grid.split()) == (2 if width > 850 else 1), grid
             assert page.locator(".rp-clip").count() == 3
             measured = page.locator(".rp-phone video").evaluate("v => ({duration:v.duration,error:v.error?.code ?? null})")
-            assert 30 <= measured["duration"] <= 60.1 and measured["error"] is None
+            assert 30 <= measured["duration"] <= 180.1 and measured["error"] is None
+            previews = []
+            for index, item in enumerate(report["clips"]):
+                page.locator(".rp-clip-select").nth(index).click()
+                page.wait_for_function("uid => { const v=document.querySelector('.rp-phone video'); return v?.src.includes(uid) && v.readyState >= 2; }",
+                    arg=item["unit_id"], timeout=45000)
+                preview = page.locator(".rp-phone video").evaluate("v => ({duration:v.duration,error:v.error?.code ?? null})")
+                assert 30 <= preview["duration"] <= 180.1 and preview["error"] is None
+                previews.append({"unit_id": item["unit_id"], **preview})
             assert not errors and not writes, {"errors": errors, "writes": writes}
             page.screenshot(path=str(args.report_dir/f"repurpose-{width}.png"), full_page=True)
-            checks.append({"width": width, "grid": grid, "clips": 3, "video": measured, "errors": errors, "writes": writes})
+            checks.append({"width": width, "grid": grid, "clips": 3, "target_presets": presets, "previews": previews, "errors": errors, "writes": writes})
             if width > 850:
                 # The already accepted promotion is replayed as a READ fixture;
                 # the button must open the exact third short, never publish it.
@@ -72,7 +87,7 @@ def main():
                 page.route(f"**/api/productions/{pid}/units/{uid}/repurpose-video/promote", accepted_promotion)
                 page.locator(".rp-clip").nth(2).get_by_role("button", name="Promote & Open Export").click()
                 page.get_by_role("button", name="Publish to YouTube", exact=True).wait_for(timeout=45000)
-                selected_unit = page.get_by_label("Target unit", exact=True).input_value()
+                selected_unit = page.get_by_label("Target unit", exact=False).input_value()
                 assert selected_unit == uid, selected_unit
                 checks.append({"export_unit": uid, "project_id": project, "published": False})
             context.close()

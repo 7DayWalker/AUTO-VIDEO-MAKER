@@ -112,3 +112,30 @@ def test_invalid_identity_never_creates_lock_files(tmp_path, pid, uid):
     with pytest.raises(RepurposeError):
         promote_short(pid, uid, root=tmp_path, projects_root=tmp_path/"projects")
     assert list(tmp_path.rglob("*")) == before
+
+
+def test_180_second_raw_master_passes_canonical_handoff(tmp_path,monkeypatch):
+    root,projects=tmp_path/"productions",tmp_path/"projects"
+    evidence=source_fixture(root)
+    from tests.repurpose_fixtures import output_fixture
+    output=output_fixture("raw_highlight")
+    for clip in output["clips"]:
+        clip["cuts"]=[{"start_seconds":i*30,"end_seconds":(i+1)*30,"transcript_segment_ids":[i*6]} for i in range(6)]
+    job=create_batch(PID,request_fixture(evidence,target_seconds=180,mode="raw_highlight",allow_overlap=True).model_dump(mode="json"),
+        root=root,background=False,provider=FakePlanner(output))
+    assert job["status"]=="planned",job
+    uid="unit-short-001";folder=unit_dir(PID,uid,root);folder.mkdir(parents=True)
+    media=folder/"short.mp4";media.write_bytes(b"synthetic-180s-media-probe-is-mocked")
+    cuts=[{**c,"output_start":i*30,"output_duration":30} for i,c in enumerate(job["clips"][0]["cuts"])]
+    artifact=RenderArtifact(production_id=PID,unit_id=uid,batch_id=job["batch_id"],plan_hash=job["plan_hash"],mode="raw_highlight",
+        framing="cinema_canvas",output_path=f"units/{uid}/repurpose/short.mp4",file_fingerprint=compute_content_hash(media),
+        file_size=media.stat().st_size,duration_seconds=180,cuts=cuts,captions_precision="segment_estimated_phrases",
+        loudness={"integrated_lufs":-14,"true_peak_db":-1.5},validation={"valid":True,"decode_errors":0,"captions_burned":True,"hook_banner_burned":True})
+    atomic_json(folder/"render.json",artifact);(folder/"captions.ass").write_text("[Script Info]\nPlayResX: 1080\nPlayResY: 1920")
+    atomic_json(folder/"caption_timing.json",{"entries":[],"precision":"segment_estimated_phrases"})
+    info=SimpleNamespace(width=1080,height=1920,duration=180,has_video=True,has_audio=True,video_codec="h264",audio_codec="aac",
+        file_size=media.stat().st_size,audio_sample_rate=48000,audio_channels=2,audio_duration=180,audio_stream_count=1,video_stream_count=1,sample_rate=48000,channels=2)
+    monkeypatch.setattr(oracle,"check_ffprobe_available",lambda:True);monkeypatch.setattr(oracle,"probe_media",lambda path:info)
+    directory,manifest,_=promote_short(PID,uid,root=root,projects_root=projects)
+    validate_repurpose_handoff(manifest,directory)
+    assert oracle.reconcile_project(directory.name,directory,persist=False).complete

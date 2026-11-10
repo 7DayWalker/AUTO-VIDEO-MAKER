@@ -66,3 +66,15 @@ def test_chunked_transcription_preserves_shifted_word_times():
     assert rows[0]["words"][0]["start"] == 720.2
     with pytest.raises(ValueError):
         _segments([{"text": "Bad", "start": 720, "end": 722, "words": [{"word": "Bad", "start": 700, "end": 721}]}], 720, 1440)
+
+
+@pytest.mark.parametrize("target", [30,45,60,90,120,150,180])
+def test_render_duration_contract_scales_without_exceeding_180(target):
+    from app.repurpose.models import RenderArtifact, rendered_duration_bounds
+
+    low,high=rendered_duration_bounds(target)
+    assert 30<=low<=target<=high<=180
+    artifact=RenderArtifact(production_id="fixture",unit_id="unit-short-001",batch_id="rpb-"+"a"*24,
+        plan_hash="a"*64,mode="raw_highlight",framing="cinema_canvas",output_path="units/unit-short-001/repurpose/short.mp4",
+        file_fingerprint="b"*64,file_size=1,duration_seconds=target,cuts=[],captions_precision="word",loudness={},validation={})
+    assert artifact.duration_seconds==target

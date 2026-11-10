@@ -17,7 +17,7 @@ from app.orchestrator.production_execution import BRIEF_FILE, META_FILE, PLAN_FI
 from app.production.models import SourceAsset, SourceTranscript
 from app.production.storage import compute_content_hash, production_dir, production_revision_lock, unit_plan_dir
 from app.repurpose.cache import load_evidence
-from app.repurpose.models import PlannerOutput, RepurposeError, RepurposePlan, RenderArtifact, timestamp
+from app.repurpose.models import PlannerOutput, RepurposeError, RepurposePlan, RenderArtifact, timestamp, rendered_duration_bounds
 from app.repurpose.planner import validate_output
 from app.repurpose.storage import atomic_json, content_hash, load_render, load_unit_plan, read_json, unit_dir
 
@@ -108,6 +108,9 @@ def validate_repurpose_handoff(manifest, directory):
         offset += actual["output_duration"]
     if abs(offset-render.duration_seconds) > .15:
         raise ValueError("Short output timeline duration mismatch")
+    minimum, maximum = rendered_duration_bounds(plan.request.target_seconds)
+    if not minimum <= render.duration_seconds <= maximum+.1:
+        raise ValueError("Short output duration is outside its editorial target bounds")
     levels = render.loudness
     if any(not isinstance(levels.get(key), (int, float)) or not math.isfinite(levels[key])
            for key in ("integrated_lufs", "true_peak_db")):

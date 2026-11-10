@@ -143,7 +143,8 @@ def test_compact_prompt_uses_flat_wire_shape_and_bounded_evidence(tmp_path):
     assert metrics["recap_beats"] == 54 and metrics["evidence_lines"] <= 120
     packet = evidence_packet(evidence)
     assert all(f"[b{i+1} " in packet["notes"] for i in range(54))
-    assert '"evidence_ids"' in prompt and '"narration"' in prompt and '"start"' in prompt
+    assert '"evidence_ids"' in prompt and '"narration"' in prompt
+    assert '"cuts"' not in prompt and '"start"' not in prompt and '"end"' not in prompt
     assert '"transcript_segment_ids"' not in prompt and '"$defs"' not in prompt and '"source_refs"' not in prompt
 
 
@@ -284,9 +285,70 @@ def test_duration_adjustment_does_not_extend_into_another_clip():
 def test_compact_prompt_defers_exact_arithmetic_to_python(tmp_path):
     evidence = source_fixture(tmp_path)
     prompt, _, metrics = compact_prompt(evidence, request_fixture(evidence))
-    assert "do not stall on exact floating-point arithmetic" in prompt
-    assert "Python adjusts small timing differences" in prompt
+    assert "NEVER count words or calculate timestamps in reasoning" in prompt
+    assert "Python builds the video cuts" in prompt
     assert metrics["timeout_seconds"] == 660
+
+
+def evidence_only_output():
+    output = compact_output_fixture()
+    for i, clip in enumerate(output["clips"]):
+        clip.pop("cuts")
+        clip["evidence_ids"] = [f"w{i*3+1}", f"w{i*3+2}", f"w{i*3+3}"]
+    return output
+
+
+def test_evidence_only_plan_derives_all_cuts_and_never_requests_coordinates(tmp_path):
+    evidence = source_fixture(tmp_path)
+    output = evidence_only_output()
+    provider = FakePlanner(output)
+    plan = plan_once(evidence, request_fixture(evidence), "rpb-"+"a"*24, provider=provider)
+    assert len(provider.calls) == 1 and '"cuts"' not in provider.calls[0][0]
+    footage = []
+    for clip in plan.clips:
+        assert abs(sum(c.end_seconds-c.start_seconds for c in clip.cuts)-45) < .01
+        for cut in clip.cuts:
+            assert 0 <= cut.start_seconds < cut.end_seconds <= evidence.asset.duration
+            assert cut.transcript_segment_ids or cut.visual_frame_timestamps
+            assert not any(min(cut.end_seconds,b)>max(cut.start_seconds,a) for a,b in footage)
+            footage.append((cut.start_seconds,cut.end_seconds))
+
+
+@pytest.mark.parametrize("target", [30,45,60,90,120,150,180])
+def test_evidence_only_duration_presets_are_bounded_and_deterministic(tmp_path,target):
+    from app.production.models import TranscriptSegment
+    from app.repurpose.models import rendered_duration_bounds, maximum_shot_seconds
+
+    evidence=source_fixture(tmp_path)
+    evidence.asset=evidence.asset.model_copy(update={"duration":1800})
+    evidence.transcript.segments=[TranscriptSegment(text=f"Source event {i}",start=i*5,end=i*5+5) for i in range(360)]
+    evidence.beats=[{"title":f"Arc {i}","source_refs":[{"start_seconds":i*240,"end_seconds":i*240+210}]} for i in range(7)]
+    output=evidence_only_output()
+    for clip in output["clips"]: clip["evidence_ids"]=["b1","b3","b5"]
+    provider=FakePlanner(output)
+    request=request_fixture(evidence,target_seconds=target)
+    plan=plan_once(evidence,request,"rpb-"+"a"*24,provider=provider)
+    again=plan_from_response(SimpleNamespace(model="gpt-6.1-sol",content=json.dumps(output)),evidence,request,"rpb-"+"a"*24)
+    for clip, second in zip(plan.clips,again.clips):
+        assert clip.cuts==second.cuts and len(clip.cuts)<=16
+        assert abs(sum(c.end_seconds-c.start_seconds for c in clip.cuts)-target)<.01
+        assert max(c.end_seconds-c.start_seconds for c in clip.cuts)<=maximum_shot_seconds(target)+.001
+    assert rendered_duration_bounds(target)[1]<=180
+    assert len(provider.calls)==1
+
+
+def test_evidence_only_raw_highlight_has_empty_narration(tmp_path):
+    evidence=source_fixture(tmp_path)
+    output=evidence_only_output()
+    for clip in output["clips"]: clip["narration"]=""
+    plan=plan_once(evidence,request_fixture(evidence,mode="raw_highlight"),"rpb-"+"a"*24,provider=FakePlanner(output))
+    assert all(not c.narration_text for c in plan.clips)
+
+
+@pytest.mark.parametrize("target", [29,181,float('nan'),float('inf')])
+def test_duration_outside_30_180_is_rejected(tmp_path,target):
+    evidence=source_fixture(tmp_path)
+    with pytest.raises(ValueError):request_fixture(evidence,target_seconds=target)
 
 
 def test_stream_incomplete_preserves_safe_reason_and_counts(monkeypatch):

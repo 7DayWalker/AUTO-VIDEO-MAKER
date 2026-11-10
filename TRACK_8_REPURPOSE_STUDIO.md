@@ -2,6 +2,10 @@
 
 ## Contracts
 
+Current closeout (2026-11-10): evidence-only planning and 30–180-second targets
+are implemented. The Dragon Queen acceptance below completed in one streamed
+Sol call; historical failure sections are retained as incident history.
+
 `app/repurpose/` is a cached-source execution surface, not a scene generator.
 `ProductionUnit.repurpose_plan_reference` points at an immutable batch plan;
 units retain source-segment lineage. Batch commits use the existing canonical
@@ -22,6 +26,10 @@ There are no fabricated summary narration files or generated-scene checkpoints.
   commit a retained valid response after interruption; it never calls an LLM.
 * Four-hour evidence is reduced with whole-source timestamp coverage, including
   the ending. No claim of guaranteed virality or fresh vision is made.
+* New model output contains only title/hook/narration/rationale/evidence IDs.
+  Python derives disjoint grounded cuts, with up to 16 cuts on long targets.
+  No timestamp arithmetic or word counting is requested from the LLM; legacy
+  cut-bearing responses remain loadable. Completed plans are saved before TTS.
 
 ### Rendering
 
@@ -37,10 +45,15 @@ There are no fabricated summary narration files or generated-scene checkpoints.
   opt into `AVM_WHISPER_WORD_TIMESTAMPS=1` without modifying old caches.
 * Acceptance checks encoded duration/resolution/audio, full decoding, −14 LUFS
   ±0.5 and true peak ≤−1 dBTP. TTS synthesis is separate from the one LLM call.
+* Targets: 30, 45, 60, 90, 120, 150 or 180 seconds (continuous API bounds 30–180).
+  Measured complete speech stays in target-relative bounds and never exceeds
+  180 seconds. The target is editorial, not permission to truncate speech.
 
 ## API
 
 * GET `/api/capabilities`: `repurpose` configuration-only readiness.
+  Includes `min_target_seconds=30`, `max_target_seconds=180` and
+  `target_duration_presets=[30,45,60,90,120,150,180]`.
 * GET `/api/productions/{p}/repurpose/sources`: ready source/evidence revisions.
 * POST `/api/productions/{p}/repurpose/batches`: confirmed idempotent planning.
 * GET `/api/productions/{p}/repurpose/batches/{b}`: read-only job/clip inspection.
@@ -148,3 +161,39 @@ original uncertain batch is preserved without rewriting its history.
 
 The final focused AgentRouter/Repurpose/Gemini-diagnostic regressions passed
 **161 tests**, with zero external network attempts. K3 was untouched.
+
+## Completed evidence-only Dragon Queen acceptance — 2026-11-10
+
+The user-authorized request `track8-dragon-evidence-only-v6` produced batch
+`rpb-9acb97d5a5a400ccbb011f62`. A single streamed `gpt-6.1-sol` completion returned
+2,581 characters of JSON in **211.485 seconds**, with approximately 3,394 input
+tokens. The model supplied scripts and ordered evidence IDs, not cut coordinates.
+Python derived the source cuts and pinned the plan before rendering.
+
+Counters: **LLM calls=1, successful calls=1, uploads=0, STT=0, vision=0**. No
+automatic LLM repair/retry was performed. The third short's initial Edge TTS
+attempt received no audio; a render-only recovery reused the same saved plan.
+
+| Unit | Title | Cuts | Encoded duration | LUFS | dBTP | Accepted project |
+|---|---|---:|---:|---:|---:|---|
+| unit-short-001 | The Baby Breathes Fire | 6 | 35.566667s | -14.01 | -1.92 | short_e45235b6204392a2d7f08b9d |
+| unit-short-002 | Ash Holds the Bridge | 6 | 37.072938s | -14.06 | -1.49 | short_f7eefde5477080519857107e |
+| unit-short-003 | A Name Isn't Control | 8 | 38.933333s | -14.02 | -2.89 | short_cb6769bad0b447e21f6d10d0 |
+
+Every accepted output is 1080×1920, H.264/AAC, has burned-in word-timed ASS
+captions and a hook banner, and passed independent full decoding with zero
+errors. Narration is Andrew Multilingual at +15%; source bed is 0.05 with ducking.
+All units report COMPLETED with AVAILABLE canonical masters and matching
+promotion fingerprints. No platform publication was initiated.
+
+Real desktop/mobile K3 verification played all three shorts without errors,
+checked the seven 30–180s target options, and verified exact `unit-short-003`
+Export navigation with no real publishing writes. Frozen Summary Studio hashes
+remain unchanged. Local verification reports are under `temp/` and excluded
+from commits.
+
+Final verification: **93 Repurpose tests**, **189 Repurpose + AgentRouter
+tests**, and **94 existing source/summary/API compatibility tests** passed, all
+with zero external network attempts. K3: **235 passed**, production build passed.
+The 180-second raw publishing handoff is covered hermetically with media probing
+mocked; the live media acceptance used the requested 45-second editorial target.

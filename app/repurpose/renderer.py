@@ -11,7 +11,7 @@ from app.production.storage import compute_content_hash, production_dir, product
 from app.production.synthesis import BROADCAST_VOCAL_CHAIN, measured_loudnorm_filter, measure_audio_loudness
 from app.repurpose.cache import load_evidence
 from app.repurpose.captions import build_ass, group_words, narration_words, transcript_captions
-from app.repurpose.models import RenderArtifact, RepurposeError
+from app.repurpose.models import RenderArtifact, RepurposeError, rendered_duration_bounds
 from app.repurpose.storage import atomic_json, content_hash, load_render, load_unit_plan, read_json, unit_dir
 
 
@@ -77,8 +77,9 @@ def _render_short(production_id, unit_id, *, root=None):
         original_duration = probe_media(narration).duration
         speed = max(.85, min(1.20, original_duration / plan.request.target_seconds))
         duration = original_duration / speed
-        if not 30 <= duration <= 60:
-            raise RepurposeError("NARRATION_DURATION_OUT_OF_BOUNDS", "Complete narration falls outside 30–60s; no speech was truncated", 422)
+        minimum, maximum = rendered_duration_bounds(plan.request.target_seconds)
+        if not minimum <= duration <= maximum:
+            raise RepurposeError("NARRATION_DURATION_OUT_OF_BOUNDS", "Complete narration falls outside the target-specific 30–180s bounds; no speech was truncated", 422)
         words = narration_words(read_json(timing)["boundaries"], speed=speed, duration=duration)
         if not words:
             raise RepurposeError("NARRATION_TIMING_MISSING", "TTS did not retain word boundaries", 422)
@@ -154,7 +155,8 @@ def _render_short(production_id, unit_id, *, root=None):
                 or final_levels.get("true_peak_db") is None or final_levels["true_peak_db"] > -1):
             raise RepurposeError("SHORT_AUDIO_VALIDATION_FAILED", "Encoded audio did not meet −14 LUFS ±0.5 / ≤−1 dBTP", 422)
         info = probe_media(output)
-        if not info.has_video or not info.has_audio or (info.width, info.height) != (1080, 1920) or not 30 <= info.duration <= 60.1:
+        minimum, maximum = rendered_duration_bounds(plan.request.target_seconds)
+        if not info.has_video or not info.has_audio or (info.width, info.height) != (1080, 1920) or not minimum <= info.duration <= maximum+.1:
             raise RepurposeError("SHORT_MEDIA_VALIDATION_FAILED", "Encoded short failed resolution, audio or duration validation", 422)
         decoded = run_ffmpeg(["-v", "error", "-xerror", "-threads", "2", "-i", str(output), "-map", "0:v:0", "-map", "0:a:0",
             "-f", "null", "-"], "verifying complete short decoding", timeout=180)

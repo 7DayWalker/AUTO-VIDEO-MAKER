@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
@@ -10,6 +11,18 @@ MODEL_ID = "gpt-6.1-sol"
 OUTPUT_TOKENS = 16384
 Mode = Literal["narrated", "raw_highlight"]
 Framing = Literal["cinema_canvas", "center_crop"]
+TARGET_PRESETS = (30, 45, 60, 90, 120, 150, 180)
+MIN_TARGET_SECONDS = 30
+MAX_TARGET_SECONDS = 180
+
+
+def rendered_duration_bounds(target):
+    """Allow measured complete speech near the editorial target, never over 180s."""
+    return max(30.0, target * .70), min(180.0, target * 1.30)
+
+
+def maximum_shot_seconds(target):
+    return max(8.0, math.ceil(target / 16))
 
 
 def timestamp():
@@ -34,7 +47,7 @@ class BatchRequest(Contract):
     evidence_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
     mode: Mode = "narrated"
     count: StrictInt = Field(default=3, ge=3, le=10)
-    target_seconds: float = Field(default=45, ge=30, le=60)
+    target_seconds: float = Field(default=45, ge=30, le=180)
     framing: Framing = "cinema_canvas"
     model_id: Literal["gpt-6.1-sol"] = MODEL_ID
     cache_only: Literal[True] = True
@@ -65,7 +78,7 @@ class SourceCut(Contract):
 class ClipIntent(Contract):
     title: str = Field(min_length=1, max_length=100)
     hook: str = Field(min_length=1, max_length=140)
-    narration_text: str | None = Field(default=None, max_length=2200)
+    narration_text: str | None = Field(default=None, max_length=6500)
     rationale: str = Field(min_length=1, max_length=900)
     cuts: list[SourceCut] = Field(min_length=1, max_length=24)
     unit_id: str | None = Field(default=None, pattern=r"^unit-short-\d{3}$")
@@ -118,7 +131,7 @@ class RenderArtifact(Contract):
     output_path: str
     file_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     file_size: int = Field(gt=0)
-    duration_seconds: float = Field(ge=30, le=60.1)
+    duration_seconds: float = Field(ge=30, le=180.1)
     width: Literal[1080] = 1080
     height: Literal[1920] = 1920
     cuts: list[dict[str, Any]]

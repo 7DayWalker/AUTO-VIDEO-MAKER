@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.production.storage import commit_repurpose_batch, production_revision_lock
 from app.repurpose.cache import load_evidence, sources_payload
-from app.repurpose.models import BatchRequest, RenderRequest, RepurposeError, timestamp
+from app.repurpose.models import BatchRequest, RenderRequest, RepurposeError, timestamp, TARGET_PRESETS
 from app.repurpose.planner import MAX_INPUT_TOKENS, PLANNER_TIMEOUT_SECONDS, plan_once, planner_provider
 from app.repurpose.storage import atomic_json, batch_dir, content_hash, load_job, load_plan, load_render, save_job, unit_dir
 
@@ -32,11 +32,12 @@ def readiness():
         "configuration_only": True,
         "model_id": "gpt-6.1-sol", "api_style": api_style, "upstream_api_style": "responses", "max_output_tokens": 16384,
         "planner_input_token_limit": MAX_INPUT_TOKENS, "planner_timeout_seconds": PLANNER_TIMEOUT_SECONDS,
-        "planner_wire_schema": "compact-v1",
+        "planner_wire_schema": "evidence-only-v2",
         "planner_streaming": True,
         "reasoning": {"effort": "low"}, "modes": ["narrated", "raw_highlight"],
         "framing_presets": ["cinema_canvas", "center_crop"], "count_bounds": [3, 10],
-        "duration_bounds": [30, 60], "source_duration_bounds": [60, 14400],
+        "duration_bounds": [30, 180], "min_target_seconds": 30, "max_target_seconds": 180,
+        "target_duration_presets": list(TARGET_PRESETS), "source_duration_bounds": [60, 14400],
         "default_framing": "cinema_canvas", "cache_only": True, "auto_publish": False}
 
 
