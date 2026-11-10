@@ -90,7 +90,7 @@ class AgentRouterProvider(BaseLLMProvider):
             self._timeout = float(timeout if timeout is not None else os.getenv("AGENTROUTER_REQUEST_TIMEOUT", "300"))
         except (ValueError, TypeError):
             raise ValueError("Invalid AgentRouter endpoint or timeout configuration") from None
-        if not valid or not math.isfinite(self._timeout) or not 0 < self._timeout <= 600:
+        if not valid or not math.isfinite(self._timeout) or not 0 < self._timeout <= 660:
             raise ValueError("Invalid AgentRouter endpoint or timeout configuration")
         if not parsed.path or parsed.path == "/":
             self._base_url += "/v1"
@@ -163,12 +163,12 @@ class AgentRouterProvider(BaseLLMProvider):
         envelope goes through the same model/completion checks as non-streaming.
         """
         started = time.monotonic()
-        pieces, size, model, finish, usage, terminal = [], 0, None, None, None, None
+        pieces, size, model, finish, usage, terminal, incomplete = [], 0, None, None, None, None, None
         event_lines = []
         response.encoding = "utf-8"
 
         def event(payload):
-            nonlocal size, model, finish, usage, terminal
+            nonlocal size, model, finish, usage, terminal, incomplete
             if payload == "[DONE]":
                 return True
             data = json.loads(payload)
@@ -180,6 +180,9 @@ class AgentRouterProvider(BaseLLMProvider):
                 model = data["model"]
             if isinstance(data.get("usage"), dict):
                 usage = data["usage"]
+            if isinstance(data.get("incomplete_details"), dict):
+                reason = data["incomplete_details"].get("reason")
+                incomplete = {"reason": reason if reason in {"max_output_tokens", "content_filter"} else "unknown"}
             if self._api_style == "responses":
                 if isinstance(data.get("response"), dict):
                     reported = data["response"].get("model")
@@ -239,7 +242,21 @@ class AgentRouterProvider(BaseLLMProvider):
             return terminal
         if finish is None:
             raise LLMResponseError("Chat stream ended without a finish reason")
-        return {"model": model, "choices": [{"finish_reason": finish, "message": {"content": "".join(pieces)}}], "usage": usage}
+        return {"model": model, "choices": [{"finish_reason": finish, "message": {"content": "".join(pieces)}}],
+                "usage": usage, "incomplete_details": incomplete}
+
+    def _truncated(self, data, status, finish):
+        """Fixed/count-only incomplete diagnostics; no partial draft is accepted."""
+        raw_reason = (data.get("incomplete_details") or {}).get("reason")
+        reason = raw_reason if raw_reason in {"max_output_tokens", "content_filter"} else "unknown"
+        usage = _normalize_usage(data.get("usage"), responses=self._api_style == "responses") or {}
+        tokens = usage.get("completion_tokens")
+        message = f"Upstream response incomplete (reason={reason}, finish={finish}); partial output was not accepted"
+        if tokens is not None:
+            message += f"; reported output tokens={tokens}"
+        raise with_provider_diagnostics(LLMOutputTruncatedError(), {"http_status": status,
+            "error_code": "OUTPUT_INCOMPLETE", "message": message, "api_style": self._api_style,
+            "transport": "local_proxy" if self._api_style == "chat_completions" else "direct"})
 
     def _response_data(self, response):
         try:
@@ -336,7 +353,7 @@ class AgentRouterProvider(BaseLLMProvider):
                 response_status = data.get("status")
                 incomplete_reason = (data.get("incomplete_details") or {}).get("reason")
                 if response_status == "incomplete" and incomplete_reason != "content_filter":
-                    raise LLMOutputTruncatedError()
+                    self._truncated(data, status, "incomplete")
                 if incomplete_reason == "content_filter":
                     finish = "content_filter"
                 elif response_status != "completed":
@@ -353,7 +370,7 @@ class AgentRouterProvider(BaseLLMProvider):
                 finish = choice.get("finish_reason")
                 content = choice["message"].get("content")
             if finish in {"length", "max_tokens", "max_output_tokens"}:
-                raise LLMOutputTruncatedError()
+                self._truncated(data, status, finish)
             if finish == "content_filter":
                 error = LLMResponseError("Response blocked by provider content policy")
                 error.category = "content_moderation"

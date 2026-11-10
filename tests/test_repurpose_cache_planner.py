@@ -121,7 +121,7 @@ def test_planner_matches_summary_loopback_without_probe_or_retry(tmp_path, monke
     assert sent["json"]["temperature"] == .35
     assert sent["headers"]["User-Agent"] == "codex_cli_rs/0.1.0"
     assert sent["allow_redirects"] is False
-    assert sent["timeout"] == 600
+    assert sent["timeout"] == 660
     assert sent["stream"] is True and sent["json"]["stream"] is True
 
 
@@ -185,10 +185,10 @@ def test_planner_timeout_extended_without_changing_default_adapter(monkeypatch):
 
     monkeypatch.setenv("AGENTROUTER_API_KEY", "synthetic-only")
     monkeypatch.delenv("AGENTROUTER_REQUEST_TIMEOUT", raising=False)
-    assert planner_provider()._timeout == 600
+    assert planner_provider()._timeout == 660
     assert AgentRouterProvider(api_key="synthetic-only")._timeout == 300
     with pytest.raises(ValueError):
-        AgentRouterProvider(api_key="synthetic-only", timeout=601)
+        AgentRouterProvider(api_key="synthetic-only", timeout=661)
 
 
 def test_high_density_candidates_retain_beginning_middle_and_finale(tmp_path):
@@ -241,9 +241,72 @@ def test_loopback_sse_is_one_request_with_validated_model_and_json(tmp_path, mon
     monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
     plan = plan_once(evidence, request_fixture(evidence), "rpb-"+"a"*24, provider=planner_provider())
     assert len(plan.clips) == 3 and post.call_count == 1
-    assert post.call_args.kwargs["timeout"] == 600 and post.call_args.kwargs["stream"] is True
+    assert post.call_args.kwargs["timeout"] == 660 and post.call_args.kwargs["stream"] is True
     assert post.call_args.kwargs["json"]["max_tokens"] == 16384
     response.json.assert_not_called()
+    response.close.assert_called_once()
+
+
+@pytest.mark.parametrize("delta", [-2.0, -.2, .2, 2.0])
+def test_minor_duration_variance_is_adjusted_without_an_llm_call(tmp_path, delta):
+    evidence = source_fixture(tmp_path)
+    output = compact_output_fixture()
+    output["clips"][0]["cuts"][-1]["end"] += delta
+    if delta > .5:
+        output["clips"][0]["cuts"] = [{"start": j*8, "end": j*8+47/6} for j in range(6)]
+    provider = FakePlanner(output)
+    plan = plan_once(evidence, request_fixture(evidence), "rpb-"+"a"*24, provider=provider)
+    assert len(provider.calls) == 1
+    assert abs(sum(c.end_seconds-c.start_seconds for c in plan.clips[0].cuts)-45) < .01
+    assert all(0 <= c.start_seconds < c.end_seconds <= evidence.asset.duration and c.end_seconds-c.start_seconds <= 8
+               for c in plan.clips[0].cuts)
+
+
+def test_major_duration_variance_is_not_hidden_as_local_adjustment(tmp_path):
+    evidence = source_fixture(tmp_path)
+    output = compact_output_fixture()
+    output["clips"][0]["cuts"] = [{"start": j*5, "end": j*5+4} for j in range(6)]
+    provider = FakePlanner(output)
+    with pytest.raises(RepurposeError, match="adjustment budget"):
+        plan_once(evidence, request_fixture(evidence), "rpb-"+"a"*24, provider=provider)
+    assert len(provider.calls) == 1
+
+
+def test_duration_adjustment_does_not_extend_into_another_clip():
+    from app.repurpose.planner import _WireCut, _adjust_cut_windows
+
+    cuts = [_WireCut(start=i*8, end=i*8+7) for i in range(6)]
+    rows = _adjust_cut_windows(cuts, 45, 60, [(0, 60)], [(47.2, 52)])
+    assert abs(sum(r["end"]-r["start"] for r in rows)-45) < .01
+    assert all(r["end"] <= 47.2 and r["end"]-r["start"] <= 8 for r in rows)
+
+
+def test_compact_prompt_defers_exact_arithmetic_to_python(tmp_path):
+    evidence = source_fixture(tmp_path)
+    prompt, _, metrics = compact_prompt(evidence, request_fixture(evidence))
+    assert "do not stall on exact floating-point arithmetic" in prompt
+    assert "Python adjusts small timing differences" in prompt
+    assert metrics["timeout_seconds"] == 660
+
+
+def test_stream_incomplete_preserves_safe_reason_and_counts(monkeypatch):
+    from unittest.mock import Mock
+    from app.content.providers.agentrouter import AgentRouterProvider
+    from app.content.exceptions import LLMOutputTruncatedError
+
+    event = {"model": "gpt-6.1-sol", "choices": [{"delta": {}, "finish_reason": "length"}],
+             "incomplete_details": {"reason": "max_output_tokens"}, "usage": {"completion_tokens": 16384}}
+    response = Mock(status_code=200, headers={"Content-Type": "text/event-stream"})
+    response.iter_lines.return_value = iter(["data: "+json.dumps(event), "", "data: [DONE]", ""])
+    post = Mock(return_value=response)
+    monkeypatch.setattr("app.content.providers.agentrouter.requests.post", post)
+    provider = AgentRouterProvider(api_key="synthetic-only", base_url="http://127.0.0.1:8318/v1", timeout=660, stream=True)
+    with pytest.raises(LLMOutputTruncatedError) as caught:
+        provider.generate_json("Return JSON", max_tokens=16384, reasoning={"effort": "low"})
+    assert caught.value.diagnostics["http_status"] == 200
+    assert caught.value.diagnostics["error_code"] == "OUTPUT_INCOMPLETE"
+    assert "reason=max_output_tokens" in caught.value.diagnostics["message"]
+    assert "16384" in caught.value.diagnostics["message"] and post.call_count == 1
     response.close.assert_called_once()
 
 

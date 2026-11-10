@@ -12,7 +12,7 @@ from app.production.token_budget import text_token_budget
 from app.repurpose.models import MODEL_ID, OUTPUT_TOKENS, PlannerOutput, RepurposeError, RepurposePlan
 
 MAX_INPUT_TOKENS = 3500
-PLANNER_TIMEOUT_SECONDS = 600
+PLANNER_TIMEOUT_SECONDS = 660
 WIRE_SCHEMA = {
     "clips": [{"title": "<=60 characters", "hook": "<=90 characters", "narration": "complete spoken script",
                "rationale": "one sentence <=120 characters", "evidence_ids": ["b1", "w1"],
@@ -127,7 +127,8 @@ def compact_prompt(evidence, request):
     word_max = round(115*request.target_seconds/45)
     instructions = (f"Make {request.count} {request.mode} clips; target {request.target_seconds:g}s. "
         "title<=60 chars; hook<=90; rationale one sentence<=120; evidence_ids 2-5 supplied IDs. "
-        "cuts 4-8 {start,end} seconds, each<=8s; sum to target within 0.25s. For 45s use six 7.5s cuts. "
+        "cuts 4-8 {start,end} seconds, each<=8s; aim near target (Python adjusts small timing differences). "
+        "For 45s use six cuts around 7.5s. Draft directly; do not stall on exact floating-point arithmetic. "
         "Cuts must intersect cited notes and retained dialogue/action; keep cuts and clips nonoverlapping. "
         + (f"English narration {word_min}-{word_max} words per clip, includes spoken hook. " if request.mode == "narrated"
            else "narration=null; retain original audio and complete dialogue. ")
@@ -154,27 +155,75 @@ def compact_prompt(evidence, request):
             raise RepurposeError("EVIDENCE_BUDGET_EXCEEDED", "All grounded beat IDs cannot fit the compact one-call budget", 422)
 
 
+def _adjust_cut_windows(cuts, target, duration, cited_intervals, occupied):
+    """Bounded deterministic trim/extension; never conceal invalid source edits.
+
+    At most 8%/three seconds total is corrected. Source/evidence bounds and
+    disjoint footage remain authoritative. No text or provider call is changed.
+    """
+    rows = [{"start": c.start, "end": c.end} for c in cuts]
+    original_total = sum(row["end"]-row["start"] for row in rows)
+    for row in rows:
+        if not 0 <= row["start"] < row["end"] <= duration:
+            raise RepurposeError("INVALID_CLIP_PLAN", "Compact cut extends outside the source", 422)
+        if row["end"]-row["start"] > 8.5:
+            raise RepurposeError("INVALID_CLIP_PLAN", "Source cut exceeds bounded short pacing", 422)
+        if row["end"]-row["start"] > 8:
+            row["end"] = row["start"]+8
+    for i, row in enumerate(rows):
+        if any(min(row["end"], right)-max(row["start"], left) > .05 for left, right in occupied):
+            raise RepurposeError("INVALID_CLIP_PLAN", "Distinct clips overlap without explicit consent", 422)
+        if any(min(row["end"], other["end"])-max(row["start"], other["start"]) > .05 for other in rows[:i]):
+            raise RepurposeError("INVALID_CLIP_PLAN", "A clip cannot repeat source footage", 422)
+    total = sum(row["end"]-row["start"] for row in rows)
+    delta = target-total
+    if abs(target-original_total) > max(3, target*.08):
+        raise RepurposeError("INVALID_CLIP_PLAN", "Source duration variance exceeds local adjustment budget", 422)
+    for row in reversed(rows):
+        if delta <= 0:
+            change = max(delta, -(row["end"]-row["start"]-1))
+        else:
+            boundaries = [duration, row["start"]+8]
+            boundaries += [other["start"] for other in rows if other["start"] >= row["end"]]
+            boundaries += [left for left, _ in occupied if left >= row["end"]]
+            ends = [right for left, right in cited_intervals if left < row["end"] and right > row["start"]]
+            if ends:
+                boundaries.append(max(ends))
+            change = min(delta, max(0, min(boundaries)-row["end"]))
+        row["end"] += change
+        delta -= change
+        if abs(delta) <= .01:
+            break
+    if abs(delta) > .25 or any(row["end"]-row["start"] > 8+.001 for row in rows):
+        raise RepurposeError("INVALID_CLIP_PLAN", "Source bounds prevent safe duration adjustment", 422)
+    return rows
+
+
 def _hydrate_wire(data, evidence, request):
     wire = _WireOutput.model_validate(data)
     beats, windows = _source_catalog(evidence)
     advertised = set(compact_prompt(evidence, request)[2]["evidence_ids"])
     catalog = {row["id"]: row for row in [*beats, *windows] if row["id"] in advertised}
     clips = []
+    occupied = []
     for clip in wire.clips:
         if len(set(clip.evidence_ids)) != len(clip.evidence_ids) or any(i not in catalog for i in clip.evidence_ids):
             raise RepurposeError("INVALID_CLIP_PLAN", "Unknown or duplicate compact evidence ID", 422)
         if request.mode == "narrated" and (not clip.narration or not max(60, round(85*request.target_seconds/45)) <= len(clip.narration.split()) <= round(115*request.target_seconds/45)):
             raise RepurposeError("INVALID_CLIP_PLAN", "Compact narration word count is outside its target range", 422)
+        intervals = [span for i in clip.evidence_ids for span in catalog[i]["intervals"]]
+        adjusted = _adjust_cut_windows(clip.cuts, request.target_seconds, evidence.asset.duration, intervals,
+                                      [] if request.allow_overlap else occupied)
         cuts = []
-        for cut in clip.cuts:
-            if not cut.start < cut.end <= evidence.asset.duration:
-                raise RepurposeError("INVALID_CLIP_PLAN", "Compact cut extends outside the source", 422)
-            if not any(left < cut.end and right > cut.start for i in clip.evidence_ids for left, right in catalog[i]["intervals"]):
+        for row in adjusted:
+            start, end = row["start"], row["end"]
+            if not any(left < end and right > start for left, right in intervals):
                 raise RepurposeError("INVALID_CLIP_PLAN", "Compact cut does not intersect a cited evidence interval", 422)
-            cuts.append({"start_seconds": cut.start, "end_seconds": cut.end,
-                "transcript_segment_ids": [i for i, s in enumerate(evidence.transcript.segments) if s.start < cut.end and s.end > cut.start],
+            cuts.append({"start_seconds": start, "end_seconds": end,
+                "transcript_segment_ids": [i for i, s in enumerate(evidence.transcript.segments) if s.start < end and s.end > start],
                 "visual_frame_timestamps": [n["timestamp_seconds"] for n in evidence.visuals
-                    if n.get("citable", True) and cut.start <= n["timestamp_seconds"] <= cut.end]})
+                    if n.get("citable", True) and start <= n["timestamp_seconds"] <= end]})
+        occupied.extend((row["start"], row["end"]) for row in adjusted)
         clips.append({"title": clip.title, "hook": clip.hook, "narration_text": clip.narration,
                       "rationale": clip.rationale, "cuts": cuts})
     return PlannerOutput.model_validate({"clips": clips})
