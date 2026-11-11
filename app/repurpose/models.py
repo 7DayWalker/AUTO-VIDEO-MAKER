@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator, model_serializer, field_validator
 
 MODEL_ID = "gpt-6.1-sol"
 OUTPUT_TOKENS = 16384
+MODEL_IDS = ("gpt-6.1-sol", "gpt-6-astra")
+REASONING_BUDGETS = {"low": 16384, "medium": 32768, "high": 32768}
 Mode = Literal["narrated", "raw_highlight"]
 Framing = Literal["cinema_canvas", "center_crop"]
 TARGET_PRESETS = (30, 45, 60, 90, 120, 150, 180)
@@ -39,6 +41,17 @@ class RepurposeError(ValueError):
         self.code, self.status = code, status
 
 
+def normalize_editorial_text(value, limit):
+    """Cosmetic metadata can be shortened; spoken/citation evidence never is."""
+    if not isinstance(value, str):
+        return value
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    shortened = text[:limit - 1].rsplit(" ", 1)[0]
+    return (shortened or text[:limit - 1]).rstrip(" ,;:") + "…"
+
+
 class BatchRequest(Contract):
     request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{8,100}$")
     confirm: Literal[True]
@@ -49,9 +62,20 @@ class BatchRequest(Contract):
     count: StrictInt = Field(default=3, ge=3, le=10)
     target_seconds: float = Field(default=45, ge=30, le=180)
     framing: Framing = "cinema_canvas"
-    model_id: Literal["gpt-6.1-sol"] = MODEL_ID
+    model_id: Literal["gpt-6.1-sol", "gpt-6-astra"] = MODEL_ID
+    reasoning_effort: Literal["low", "medium", "high"] = "low"
+    story_version: Literal[1, 2] = 1
     cache_only: Literal[True] = True
     allow_overlap: StrictBool = False
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_hash(self, handler):
+        data = handler(self)
+        # Absent new fields must not invalidate pinned v1 requests/plans.
+        for key in ("reasoning_effort", "story_version"):
+            if key not in self.model_fields_set:
+                data.pop(key, None)
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -75,6 +99,30 @@ class SourceCut(Contract):
         return self
 
 
+class StoryBeat(Contract):
+    beat_id: str | None = Field(default=None, pattern=r"^beat-\d{2}$")
+    order: StrictInt = Field(ge=1, le=6)
+    spoken_text: str = Field(min_length=1, max_length=1800)
+    evidence_id: str = Field(pattern=r"^a-[a-f0-9]{16}$")
+    visual_anchor_id: str | None = Field(default=None, pattern=r"^a-[a-f0-9]{16}$")
+    source_refs: list[SourceCut] = Field(default_factory=list)
+    focal_source_seconds: float = Field(ge=0)
+    focal_source_pts: int | None = None
+    source_time_base: str | None = Field(default=None, pattern=r"^\d+/\d+$")
+    coverage_end_seconds: float = Field(gt=0)
+    anchor_precision: Literal["operator_verified_action", "frame_verified_action"] = "operator_verified_action"
+
+    @model_validator(mode="after")
+    def coverage(self):
+        if self.coverage_end_seconds <= self.focal_source_seconds:
+            raise ValueError("An action anchor needs positive verified coverage")
+        if self.beat_id is None:
+            self.beat_id = f"beat-{self.order:02d}"
+        if self.visual_anchor_id is None:
+            self.visual_anchor_id = self.evidence_id
+        return self
+
+
 class ClipIntent(Contract):
     title: str = Field(min_length=1, max_length=100)
     hook: str = Field(min_length=1, max_length=140)
@@ -82,6 +130,19 @@ class ClipIntent(Contract):
     rationale: str = Field(min_length=1, max_length=900)
     cuts: list[SourceCut] = Field(min_length=1, max_length=24)
     unit_id: str | None = Field(default=None, pattern=r"^unit-short-\d{3}$")
+    beats: list[StoryBeat] | None = Field(default=None, min_length=4, max_length=6)
+
+    @field_validator("title", "hook", "rationale", mode="before")
+    @classmethod
+    def editorial_metadata(cls, value, info):
+        return normalize_editorial_text(value, {"title": 100, "hook": 140, "rationale": 900}[info.field_name])
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_hash(self, handler):
+        data = handler(self)
+        if self.beats is None:
+            data.pop("beats", None)
+        return data
 
 
 class PlannerOutput(Contract):
@@ -89,7 +150,7 @@ class PlannerOutput(Contract):
 
 
 class RepurposePlan(Contract):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     production_id: str
     batch_id: str = Field(pattern=r"^rpb-[a-f0-9]{24}$")
     request: BatchRequest
@@ -98,6 +159,16 @@ class RepurposePlan(Contract):
     clips: list[ClipIntent] = Field(min_length=3, max_length=10)
     evidence_notes: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=timestamp)
+
+    @model_validator(mode="after")
+    def versioned_story(self):
+        if self.schema_version != self.request.story_version:
+            raise ValueError("Plan/request story versions differ")
+        if self.schema_version == 2 and self.request.mode == "narrated" and any(not c.beats for c in self.clips):
+            raise ValueError("Narrated v2 plans require measured-audio story beats")
+        if (self.schema_version == 1 or self.request.mode == "raw_highlight") and any(c.beats for c in self.clips):
+            raise ValueError("Legacy/raw plans cannot carry narrated v2 beats")
+        return self
 
 
 class RenderRequest(Contract):

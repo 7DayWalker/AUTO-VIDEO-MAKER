@@ -324,7 +324,8 @@ class SourceRepurposeHandoff(BaseModel):
         import re
         expected = {"repurpose_plan.json", "render.json", "source_asset.json", "transcript.json",
                     "evidence.json", "captions.ass", "caption_timing.json"}
-        if set(value) != expected or any(not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in value.values()):
+        # v2 pins its measured execution clock in addition to all legacy evidence.
+        if set(value) not in (expected, expected | {"execution.json"}) or any(not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in value.values()):
             raise ValueError("Short handoff requires complete evidence snapshot hashes")
         return value
 

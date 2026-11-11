@@ -1,0 +1,44 @@
+{
+  "ok": true,
+  "pipeline_version": "beat-locked-v2.3",
+  "llm_calls": 0,
+  "stt_calls": 0,
+  "vision_calls": 0,
+  "live_tts_calls": 0,
+  "duration_seconds": 40.133333,
+  "beats": [
+    {
+      "beat": 1,
+      "output_start_frame": 0,
+      "frame_count": 301,
+      "expected_audio_sample": 0,
+      "measured_marker_sample": 0,
+      "delta_ms": 0.0
+    },
+    {
+      "beat": 2,
+      "output_start_frame": 301,
+      "frame_count": 271,
+      "expected_audio_sample": 481600,
+      "measured_marker_sample": 481565,
+      "delta_ms": -0.7291666666666666
+    },
+    {
+      "beat": 3,
+      "output_start_frame": 572,
+      "frame_count": 331,
+      "expected_audio_sample": 915200,
+      "measured_marker_sample": 915165,
+      "delta_ms": -0.7291666666666666
+    },
+    {
+      "beat": 4,
+      "output_start_frame": 903,
+      "frame_count": 301,
+      "expected_audio_sample": 1444800,
+      "measured_marker_sample": 1444765,
+      "delta_ms": -0.7291666666666666
+    }
+  ],
+  "maximum_boundary_delta_ms": 0.7291666666666666
+}

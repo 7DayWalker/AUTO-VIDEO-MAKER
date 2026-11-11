@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.production.storage import commit_repurpose_batch, production_revision_lock
 from app.repurpose.cache import load_evidence, sources_payload
-from app.repurpose.models import BatchRequest, RenderRequest, RepurposeError, timestamp, TARGET_PRESETS
+from app.repurpose.models import BatchRequest, RenderRequest, RepurposeError, timestamp, TARGET_PRESETS, MODEL_IDS, REASONING_BUDGETS
 from app.repurpose.planner import MAX_INPUT_TOKENS, PLANNER_TIMEOUT_SECONDS, plan_once, planner_provider
-from app.repurpose.storage import atomic_json, batch_dir, content_hash, load_job, load_plan, load_render, save_job, unit_dir
+from app.repurpose.storage import atomic_json, batch_dir, content_hash, load_job, load_plan, load_render, save_job, unit_dir, safe_production_dir, read_json
 
 _WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="repurpose")
 _ACTIVE = set()
@@ -30,9 +30,14 @@ def readiness():
         pass
     return {"implemented": True, "status": "ready" if configured else "not_configured", "configured": configured,
         "configuration_only": True,
+        "models": [{"id": m, "label": "GPT-6.1 Sol" if m == MODEL_IDS[0] else "GPT-6 Astra",
+            "cost_tier": "standard" if m == MODEL_IDS[0] else "premium"} for m in MODEL_IDS],
+        "reasoning_efforts": [{"id": effort, "max_output_tokens": budget, "cost_tier": tier}
+            for (effort, budget), tier in zip(REASONING_BUDGETS.items(), ("standard", "higher", "premium"))],
+        "default_reasoning_effort": "low", "story_version": 2, "upload_limit_bytes": 16 * 1024**3,
         "model_id": "gpt-6.1-sol", "api_style": api_style, "upstream_api_style": "responses", "max_output_tokens": 16384,
         "planner_input_token_limit": MAX_INPUT_TOKENS, "planner_timeout_seconds": PLANNER_TIMEOUT_SECONDS,
-        "planner_wire_schema": "evidence-only-v2",
+        "planner_wire_schema": "beat-locked-v2",
         "planner_streaming": True,
         "reasoning": {"effort": "low"}, "modes": ["narrated", "raw_highlight"],
         "framing_presets": ["cinema_canvas", "center_crop"], "count_bounds": [3, 10],
@@ -64,6 +69,8 @@ def batch_status(production_id, batch_id, *, root=None):
                 error=job.get("units", {}).get(clip.unit_id, {}).get("error"))
             try:
                 artifact = load_render(production_id, clip.unit_id, root)
+                if artifact.plan_hash != content_hash(plan) or artifact.batch_id != batch_id:
+                    raise RepurposeError("RENDER_PLAN_MISMATCH", "Rendered media belongs to another plan", 422)
                 row["render"] = artifact.model_dump(mode="json")
                 row["media_url"] = f"/api/productions/{production_id}/units/{clip.unit_id}/repurpose-video/media"
                 from app.repurpose.storage import read_json
@@ -77,6 +84,58 @@ def batch_status(production_id, batch_id, *, root=None):
     return job
 
 
+def list_batches(production_id, *, asset_id=None, limit=20, cursor=None, root=None):
+    """Read-only stable keyset pagination; selection never recovers or dispatches."""
+    import base64
+    import json
+    import re
+    directory = safe_production_dir(production_id, root)
+    if not (directory / "production.json").is_file():
+        raise RepurposeError("PRODUCTION_NOT_FOUND", "Production not found", 404)
+    if type(limit) is not int or not 1 <= limit <= 100 or (asset_id and not re.fullmatch(r"src-\d{3}", asset_id)):
+        raise RepurposeError("INVALID_BATCH_QUERY", "Invalid batch page settings", 400)
+    boundary = None
+    if cursor:
+        try:
+            boundary = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            if not isinstance(boundary, list) or len(boundary) != 2 or not all(isinstance(v, str) for v in boundary):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise RepurposeError("INVALID_BATCH_QUERY", "Invalid batch cursor", 400) from None
+    rows = []
+    for path in (directory / "repurpose" / "batches").glob("rpb-*/job.json"):
+        if not re.fullmatch(r"rpb-[a-f0-9]{24}", path.parent.name):
+            continue
+        try:
+            job = batch_status(production_id, path.parent.name, root=root)
+            if (job.get("production_id"), job.get("batch_id")) != (production_id, path.parent.name):
+                continue
+            request = job.get("request", {})
+            if asset_id and request.get("source_asset_id") != asset_id:
+                continue
+            clips = job.get("clips", [])
+            def valid_clip(c):
+                render = c.get("render", {})
+                media = unit_dir(production_id, c["unit_id"], root) / "short.mp4"
+                return render.get("validation", {}).get("valid") is True and media.is_file() and media.stat().st_size == render.get("file_size")
+            valid_render = bool(clips) and all(valid_clip(c) for c in clips)
+            rows.append({"batch_id": job["batch_id"], "production_id": production_id,
+                "created_at": job.get("created_at", ""), "updated_at": job.get("updated_at", ""),
+                "status": job["status"], "request": request, "rendered_count": sum(bool(c.get("render")) for c in clips),
+                "clip_count": len(clips), "completed": job["status"] == "rendered" and valid_render,
+                "error": job.get("error")})
+        except (ValueError, OSError, KeyError):
+            continue
+    rows.sort(key=lambda r: (r["created_at"], r["batch_id"]), reverse=True)
+    latest = next((r["batch_id"] for r in rows if r["completed"]), None)
+    remaining = [r for r in rows if boundary is None or (r["created_at"], r["batch_id"]) < tuple(boundary)]
+    page = remaining[:limit]
+    next_cursor = None
+    if len(remaining) > limit:
+        next_cursor = base64.urlsafe_b64encode(json.dumps([page[-1]["created_at"], page[-1]["batch_id"]]).encode()).decode().rstrip("=")
+    return {"production_id": production_id, "batches": page, "latest_rendered_batch_id": latest, "next_cursor": next_cursor}
+
+
 def create_batch(production_id, body, *, root=None, background=True, provider=None):
     request = BatchRequest.model_validate(body)
     batch_id = "rpb-" + hashlib.sha256(f"{production_id}\0{request.request_id}".encode()).hexdigest()[:24]
@@ -87,12 +146,15 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
             if job["request_hash"] != content_hash(request):
                 raise RepurposeError("REQUEST_ID_CONFLICT", "Request ID already belongs to different settings")
             return batch_status(production_id, batch_id, root=root)
-        evidence = load_evidence(production_id, request.source_asset_id, request.source_unit_id, root=root)
+        evidence = load_evidence(production_id, request.source_asset_id, request.source_unit_id, root=root, include_prepared=request.story_version == 2)
         if evidence.revision != request.evidence_revision:
             raise RepurposeError("STALE_EVIDENCE", "Reload the source evidence before planning")
         if not request.allow_overlap and evidence.asset.duration < request.count * request.target_seconds:
             raise RepurposeError("INSUFFICIENT_DISTINCT_MOMENTS", "Source is too short for distinct requested clips", 422)
-        chosen_provider = provider or planner_provider()
+        if request.story_version == 2 and request.mode == "narrated":
+            from app.repurpose.planner import beat_prompt
+            beat_prompt(evidence, request)  # Fail readiness before a paid dispatch.
+        chosen_provider = provider or planner_provider(request.model_id)
         job = {"production_id": production_id, "batch_id": batch_id, "request_id": request.request_id,
             "request_hash": content_hash(request), "request": request.model_dump(mode="json"), "status": "planning",
             "created_at": timestamp(), "updated_at": timestamp(), "llm_calls": 0, "llm_successful_calls": 0,
@@ -109,7 +171,7 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
             def dispatch():
                 job["llm_calls"] = 1  # Marker precedes the ONLY provider dispatch.
                 job["planner_transport"] = {"api_style": getattr(chosen_provider, "_api_style", None),
-                    "max_output_tokens": 16384, "reasoning_effort": "low",
+                    "model_id": request.model_id, "max_output_tokens": REASONING_BUDGETS[request.reasoning_effort], "reasoning_effort": request.reasoning_effort,
                     "timeout_seconds": getattr(chosen_provider, "_timeout", PLANNER_TIMEOUT_SECONDS)}
                 job["planner_transport"]["stream"] = getattr(chosen_provider, "streaming", False)
                 save_job(production_id, batch_id, job, root)
@@ -132,7 +194,8 @@ def create_batch(production_id, body, *, root=None, background=True, provider=No
             uncertain = getattr(exc, "category", None) == "timeout" or type(exc).__name__ == "LLMConnectionError"
             job.update(status="uncertain" if uncertain else "failed", updated_at=timestamp(),
                 error={"code": getattr(exc, "code", "PLANNING_FAILED"),
-                       "message": "One-call planning failed; inspect the saved response. No request was retried.", "type": type(exc).__name__})
+                       "message": (str(exc)[:700] + ". No request was retried.") if isinstance(exc, RepurposeError)
+                           else "One-call planning failed; inspect the saved response. No request was retried.", "type": type(exc).__name__})
             category = getattr(exc, "category", None)
             if category in {"timeout", "invalid_request", "capability", "content_moderation"}:
                 job["error"]["category"] = category
@@ -224,7 +287,7 @@ def recover_batch(production_id, batch_id, *, root=None):
             response_path = directory / "planner_response.json"
             if not response_path.is_file():
                 raise RepurposeError("PLANNER_OUTCOME_UNCERTAIN", "No retained planner response; no resubmission is permitted")
-            evidence = load_evidence(production_id, request.source_asset_id, request.source_unit_id, root=root)
+            evidence = load_evidence(production_id, request.source_asset_id, request.source_unit_id, root=root, include_prepared=request.story_version == 2)
             if evidence.revision != request.evidence_revision:
                 raise RepurposeError("STALE_EVIDENCE", "Recovery evidence changed")
             plan = plan_from_response(SimpleNamespace(**read_json(response_path)), evidence, request, batch_id)

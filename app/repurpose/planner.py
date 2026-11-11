@@ -1,15 +1,15 @@
-"""One text-only Sol request. No retries, observers, chapter calls or repairs."""
+"""One selected text-only planner request. No retries, observers or LLM repairs."""
 from __future__ import annotations
 
 import json
 import math
 import re
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.content.providers.agentrouter import AgentRouterProvider
 from app.production.token_budget import text_token_budget
-from app.repurpose.models import MODEL_ID, OUTPUT_TOKENS, PlannerOutput, RepurposeError, RepurposePlan, maximum_shot_seconds
+from app.repurpose.models import MODEL_ID, OUTPUT_TOKENS, REASONING_BUDGETS, PlannerOutput, RepurposeError, RepurposePlan, maximum_shot_seconds, normalize_editorial_text
 
 MAX_INPUT_TOKENS = 3500
 PLANNER_TIMEOUT_SECONDS = 660
@@ -41,19 +41,24 @@ class _WireClip(BaseModel):
     # requests contain no cuts, timestamps, numeric constraints or word counts.
     cuts: list[_WireCut] | None = Field(default=None, min_length=1, max_length=24)
 
+    @field_validator("title", "hook", "rationale", mode="before")
+    @classmethod
+    def normalize_metadata(cls, value, info):
+        return normalize_editorial_text(value, {"title": 60, "hook": 90, "rationale": 120}[info.field_name])
+
 
 class _WireOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     clips: list[_WireClip] = Field(min_length=3, max_length=10)
 
 
-def planner_provider():
+def planner_provider(model_id=MODEL_ID):
     # Match Summary's default adapter exactly: Chat on loopback (translated to
     # Responses upstream), native Responses for direct HTTPS. No route probes,
     # forced direct bypass, endpoint fallback or private transport mutation.
-    provider = AgentRouterProvider(model=MODEL_ID, timeout=PLANNER_TIMEOUT_SECONDS, stream=True)
+    provider = AgentRouterProvider(model=model_id, timeout=PLANNER_TIMEOUT_SECONDS, stream=True)
     if not provider.is_available():
-        raise RepurposeError("PLANNER_NOT_CONFIGURED", "Sol planner credentials are not configured", 503)
+        raise RepurposeError("PLANNER_NOT_CONFIGURED", "Planner credentials are not configured", 503)
     return provider
 
 
@@ -124,8 +129,10 @@ def evidence_packet(evidence, *, text_limit=64, max_windows=None):
 
 
 def compact_prompt(evidence, request):
+    if request.story_version == 2 and request.mode == "narrated":
+        return beat_prompt(evidence, request)
     instructions = (f"Make {request.count} {request.mode} clips; target {request.target_seconds:g}s. "
-        "Return short titles, punchy hooks, one-sentence rationales and ordered evidence_ids anchoring each story arc. "
+        "Return titles (<=60 characters), hooks (<=90), rationales (<=120), and at least THREE ordered evidence_ids per clip. "
         "Choose distinct moments. Python builds the video cuts; do not output cuts or timestamps. "
         "Treat length as a rough editorial feel; NEVER count words or calculate timestamps in reasoning—write JSON immediately. "
         + ("Write natural English narration including the spoken hook and a complete payoff; use the target as a loose speaking-length guide. " if request.mode == "narrated"
@@ -308,6 +315,10 @@ def validate_output(output, evidence, request):
     available_visuals = {round(n["timestamp_seconds"], 3) for n in evidence.visuals}
     previous = []
     for clip in output.clips:
+        if request.story_version == 2 and request.mode == "narrated":
+            validate_beats(clip, evidence, request, previous)
+            previous.extend((c.start_seconds, c.end_seconds) for c in clip.cuts)
+            continue
         if clip.unit_id or any(c.source_segment_id for c in clip.cuts):
             raise RepurposeError("INVALID_CLIP_PLAN", "Provider cannot allocate storage identities", 422)
         if any("\x00" in text for text in (clip.title, clip.hook, clip.rationale, clip.narration_text or "")):
@@ -348,9 +359,9 @@ def validate_output(output, evidence, request):
 
 
 def plan_once(evidence, request, batch_id, *, provider=None, on_response=None, on_dispatch=None, on_prompt=None):
-    provider = provider or planner_provider()
-    if provider.model != MODEL_ID or getattr(provider, "_api_style", "responses") not in {"responses", "chat_completions"}:
-        raise RepurposeError("PLANNER_CONTRACT_INVALID", "Only the configured Sol Summary transport is permitted", 503)
+    provider = provider or planner_provider(request.model_id)
+    if provider.model != request.model_id or getattr(provider, "_api_style", "responses") not in {"responses", "chat_completions"}:
+        raise RepurposeError("PLANNER_CONTRACT_INVALID", "Provider must match the selected planner model and admitted transport", 503)
     prompt, system, metrics = compact_prompt(evidence, request)
     if on_prompt:
         on_prompt(metrics)
@@ -360,7 +371,7 @@ def plan_once(evidence, request, batch_id, *, provider=None, on_response=None, o
     if not callable(generate):
         generate = provider.generate
     response = generate(prompt=prompt, system_prompt=system, temperature=.35,
-        max_tokens=OUTPUT_TOKENS, reasoning={"effort": "low"})
+        max_tokens=REASONING_BUDGETS[request.reasoning_effort], reasoning={"effort": request.reasoning_effort})
     if on_response:
         on_response(response)
     return plan_from_response(response, evidence, request, batch_id)
@@ -368,7 +379,7 @@ def plan_once(evidence, request, batch_id, *, provider=None, on_response=None, o
 
 def plan_from_response(response, evidence, request, batch_id):
     """Parse a persisted response for explicit restart recovery, not LLM repair."""
-    if response.model != MODEL_ID:
+    if response.model != request.model_id:
         raise RepurposeError("PLANNER_MODEL_MISMATCH", "Provider returned a different model; no repair was attempted", 422)
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.content.strip(), flags=re.I)
     try:
@@ -377,12 +388,136 @@ def plan_from_response(response, evidence, request, batch_id):
         compact = isinstance(rows, list) and any(isinstance(row, dict) and ("evidence_ids" in row or "narration" in row) for row in rows)
         # Old responses/checkpoints remain loadable; new requests only advertise
         # the compact schema. Both paths are deterministic, never LLM repairs.
-        output = _hydrate_wire(data, evidence, request) if compact else PlannerOutput.model_validate(data)
+        output = (hydrate_beats(data, evidence, request) if request.story_version == 2 and request.mode == "narrated"
+                  else _hydrate_wire(data, evidence, request) if compact else PlannerOutput.model_validate(data))
     except RepurposeError:
         raise
+    except ValidationError as exc:
+        details = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in exc.errors(include_input=False, include_context=False)[:6])
+        raise RepurposeError("INVALID_CLIP_PLAN", "Planner contract failed: " + details + ". No repair was attempted", 422) from None
     except ValueError:
         raise RepurposeError("INVALID_CLIP_PLAN", "Planner JSON did not satisfy the clip contract; no repair was attempted", 422) from None
     validate_output(output, evidence, request)
-    return RepurposePlan(production_id=evidence.production.production_id, batch_id=batch_id,
+    return RepurposePlan(schema_version=request.story_version, production_id=evidence.production.production_id, batch_id=batch_id,
         request=request, source_sha256=evidence.asset.sha256, transcript_sha256=evidence.identity["transcript_sha256"],
         clips=output.clips, evidence_notes=[] if evidence.visuals else ["Dialogue/recap evidence only; no retained visual observations."])
+
+
+class _WireBeat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    spoken_text: str = Field(min_length=1, max_length=1800)
+    evidence_id: str = Field(pattern=r"^a-[a-f0-9]{16}$")
+    visual_anchor_id: str | None = Field(default=None, pattern=r"^a-[a-f0-9]{16}$")
+
+
+class _BeatClip(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=100)
+    hook: str = Field(min_length=1, max_length=140)
+    rationale: str = Field(min_length=1, max_length=900)
+    beats: list[_WireBeat] = Field(min_length=4, max_length=6)
+
+    @field_validator("title", "hook", "rationale", mode="before")
+    @classmethod
+    def normalize_metadata(cls, value, info):
+        return normalize_editorial_text(value, {"title": 100, "hook": 140, "rationale": 900}[info.field_name])
+
+
+class _BeatOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    clips: list[_BeatClip] = Field(min_length=3, max_length=10)
+
+
+def beat_prompt(evidence, request):
+    anchors = getattr(evidence, "anchors", [])
+    if len(anchors) < (4 if request.allow_overlap else request.count * 4):
+        raise RepurposeError("VERIFIED_ACTIONS_REQUIRED", "Verify at least four action anchors per distinct short before beat-locked planning", 422)
+    if not request.allow_overlap:
+        distinct, right = [], -1
+        for anchor in sorted(anchors, key=lambda a: (a["end_seconds"], a["start_seconds"])):
+            if anchor["start_seconds"] >= right:
+                distinct.append(anchor)
+                right = anchor["end_seconds"]
+        if len(distinct) < request.count * 4:
+            raise RepurposeError("INSUFFICIENT_DISTINCT_ACTIONS", "Verified coverage cannot supply four non-overlapping actions per short", 422)
+    rows = _spread(anchors, min(60, len(anchors)))
+    schema = {"clips": [{"title": "Title", "hook": "Hook", "rationale": "Why it works",
+        "beats": [{"spoken_text": "Speak the visible action immediately.", "evidence_id": "a-0000000000000000", "visual_anchor_id": "a-0000000000000000"}]}]}
+    instructions = (f"Plan exactly {request.count} standalone English shorts, roughly {request.target_seconds:g}s each. "
+        "Each has FOUR to SIX ordered story beats: hook, context, escalation, payoff. "
+        "Each beat cites exactly one supplied verified action ID and describes THAT action immediately; the first beat supports the spoken hook. "
+        "Write complete, punchy stories, about a hundred words per short. Brief anchors need one short sentence; normal anchors can have two. "
+        "Copy evidence_id into visual_anchor_id. The hook banner is the first beat's spoken_text. "
+        "Write JSON immediately. Do NOT calculate timestamps, durations, word counts, allocations or timing in reasoning. "
+        "Python owns all measured speech timing, frame allocation and bounded scene slowdown. "
+        + ("Different shorts may share anchors. " if request.allow_overlap else "Never share an anchor or source coverage between shorts. ")
+        + "Return JSON only, no extra fields. Shape: " + json.dumps(schema))
+    limit = 240
+    while True:
+        notes = [{"evidence_id": a["evidence_id"], "action": _short_text(a["action"], limit),
+            "speech_length": "brief" if a["end_seconds"] - a["start_seconds"] < 3.5 else "normal"} for a in rows]
+        prompt = instructions + "\n" + json.dumps({"film": evidence.production.title, "actions": notes}, ensure_ascii=False)
+        tokens = text_token_budget(prompt + COMPACT_SYSTEM)
+        if tokens < MAX_INPUT_TOKENS:
+            return prompt, COMPACT_SYSTEM, {"wire_schema": "beat-locked-v2", "input_tokens_estimated": tokens,
+                "prompt_characters": len(prompt), "system_characters": len(COMPACT_SYSTEM), "evidence_lines": len(rows),
+                "recap_beats": len(evidence.beats), "evidence_ids": [a["evidence_id"] for a in rows], "timeout_seconds": PLANNER_TIMEOUT_SECONDS}
+        if limit > 64:
+            limit -= 32
+        elif len(rows) > request.count * 4:
+            rows = _spread(rows, max(request.count * 4, len(rows) - 4))
+        else:
+            raise RepurposeError("EVIDENCE_BUDGET_EXCEEDED", "Verified action catalog exceeds the planner input budget", 422)
+
+
+def hydrate_beats(data, evidence, request):
+    wire = _BeatOutput.model_validate(data)
+    advertised = set(beat_prompt(evidence, request)[2]["evidence_ids"])
+    catalog = {a["evidence_id"]: a for a in evidence.anchors if a["evidence_id"] in advertised}
+    clips = []
+    for clip in wire.clips:
+        beats, cuts = [], []
+        for order, beat in enumerate(clip.beats, 1):
+            anchor = catalog.get(beat.evidence_id)
+            if anchor is None:
+                raise RepurposeError("INVALID_CLIP_PLAN", "Unknown or unadvertised verified action ID", 422)
+            start, end = anchor["start_seconds"], anchor["end_seconds"]
+            if beat.visual_anchor_id not in (None, beat.evidence_id):
+                raise RepurposeError("INVALID_CLIP_PLAN", "Visual anchor must match its cited verified action", 422)
+            reserved = {"start_seconds": start, "end_seconds": end,
+                "transcript_segment_ids": [i for i, s in enumerate(evidence.transcript.segments) if s.start < end and s.end > start]}
+            beats.append({"beat_id": f"beat-{order:02d}", "order": order, "spoken_text": beat.spoken_text, "evidence_id": beat.evidence_id,
+                "visual_anchor_id": beat.evidence_id, "focal_source_seconds": start, "coverage_end_seconds": end,
+                "focal_source_pts": anchor.get("focal_source_pts"), "source_time_base": anchor.get("source_time_base"),
+                "anchor_precision": anchor.get("anchor_precision", "operator_verified_action"), "source_refs": [reserved]})
+            cuts.append(reserved)
+        clips.append({"title": clip.title, "hook": normalize_editorial_text(clip.beats[0].spoken_text, 140), "rationale": clip.rationale, "beats": beats,
+            "narration_text": " ".join(b.spoken_text for b in clip.beats), "cuts": cuts})
+    return PlannerOutput.model_validate({"clips": clips})
+
+
+def validate_beats(clip, evidence, request, occupied):
+    catalog = {a["evidence_id"]: a for a in getattr(evidence, "anchors", [])}
+    if not clip.beats or len(clip.cuts) != len(clip.beats) or [b.order for b in clip.beats] != list(range(1, len(clip.beats) + 1)):
+        raise RepurposeError("INVALID_CLIP_PLAN", "Ordered beats must pair one-to-one with reserved coverage", 422)
+    if clip.unit_id or any(c.source_segment_id for c in clip.cuts):
+        raise RepurposeError("INVALID_CLIP_PLAN", "Provider cannot allocate storage identities", 422)
+    if clip.narration_text != " ".join(b.spoken_text for b in clip.beats) or not 20 <= len(clip.narration_text.split()) <= max(240, math.ceil(request.target_seconds * 4)):
+        raise RepurposeError("INVALID_CLIP_PLAN", "Beat scripts must form a complete bounded narration", 422)
+    local = []
+    for beat, cut in zip(clip.beats, clip.cuts):
+        a = catalog.get(beat.evidence_id)
+        if not a or (beat.focal_source_seconds, beat.coverage_end_seconds) != (a["start_seconds"], a["end_seconds"]):
+            raise RepurposeError("INVALID_CLIP_PLAN", "Beat anchor differs from verified source evidence", 422)
+        if beat.visual_anchor_id != beat.evidence_id or beat.beat_id != f"beat-{beat.order:02d}":
+            raise RepurposeError("INVALID_CLIP_PLAN", "Beat/visual anchor identity mismatch", 422)
+        if (beat.focal_source_pts, beat.source_time_base) != (a.get("focal_source_pts"), a.get("source_time_base")):
+            raise RepurposeError("INVALID_CLIP_PLAN", "Beat focal PTS differs from verified action evidence", 422)
+        if (cut.start_seconds, cut.end_seconds) != (beat.focal_source_seconds, beat.coverage_end_seconds) or cut.end_seconds > evidence.asset.duration:
+            raise RepurposeError("INVALID_CLIP_PLAN", "Reserved beat coverage changed", 422)
+        if "\x00" in beat.spoken_text:
+            raise RepurposeError("INVALID_CLIP_PLAN", "Beat text contains null controls", 422)
+        blocked = local + ([] if request.allow_overlap else occupied)
+        if any(min(cut.end_seconds, b) - max(cut.start_seconds, a) > .05 for a, b in blocked):
+            raise RepurposeError("INVALID_CLIP_PLAN", "Verified beat coverage overlaps without consent", 422)
+        local.append((cut.start_seconds, cut.end_seconds))

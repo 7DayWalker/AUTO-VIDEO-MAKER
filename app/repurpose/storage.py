@@ -84,7 +84,10 @@ def read_json(path):
 
 def load_job(production_id, batch_id, root=None):
     try:
-        return read_json(batch_dir(production_id, batch_id, root) / "job.json")
+        job = read_json(batch_dir(production_id, batch_id, root) / "job.json")
+        if (job.get("production_id"), job.get("batch_id")) != (production_id, batch_id):
+            raise RepurposeError("JOB_IDENTITY_MISMATCH", "Stored batch ownership changed", 422)
+        return job
     except FileNotFoundError:
         raise RepurposeError("BATCH_NOT_FOUND", "Repurpose batch not found", 404) from None
 

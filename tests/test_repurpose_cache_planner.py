@@ -168,6 +168,11 @@ def test_compact_wire_errors_fail_after_one_call(tmp_path, case):
     if case == "narration_length": output["clips"][0]["narration"] = "One short phrase"
     if case == "overlap": output["clips"][1]["cuts"] = output["clips"][0]["cuts"]
     provider = FakePlanner(output)
+    if case == "long_title":
+        plan = plan_once(evidence, request_fixture(evidence), "rpb-"+"a"*24, provider=provider)
+        assert len(plan.clips[0].title) <= 60
+        assert len(provider.calls) == 1
+        return
     with pytest.raises(RepurposeError):
         plan_once(evidence, request_fixture(evidence), "rpb-"+"a"*24, provider=provider)
     assert len(provider.calls) == 1

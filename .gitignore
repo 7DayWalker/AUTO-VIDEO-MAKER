@@ -92,3 +92,9 @@ diagnostics/summary_creator*_browser_*/
 diagnostics/dragon-queen-*.json
 diagnostics/publishing-recovery-ui-*/
 diagnostics/observer-contract-*.json
+# Repurpose live acceptance artifacts and workstation logs remain local.
+diagnostics/dragon-v2-*.json
+diagnostics/dragon-v2-*.log
+diagnostics/repurpose-*.log
+diagnostics/repurpose-proxy-approved-sha256.json
+diagnostics/repurpose-v2-preservation-baseline.json

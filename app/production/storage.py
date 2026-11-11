@@ -599,9 +599,13 @@ def commit_repurpose_batch(plan, *, root=None):
         for index, clip in enumerate(plan.clips):
             lineage = SourceLineage(unit_id=clip.unit_id, asset_id=asset.asset_id,
                 source_path=asset.stored_path, source_segment_ids=[c.source_segment_id for c in clip.cuts])
+            content_intent = {"hook": clip.hook, "output_intent": "youtube_shorts", "repurpose_mode": plan.request.mode}
+            if plan.schema_version == 2 and clip.beats:
+                content_intent.update(source_cut_role="reserved_verified_coverage",
+                    measured_execution_path=f"units/{clip.unit_id}/repurpose/execution.json")
             units.append(ProductionUnit(unit_id=clip.unit_id, ordinal=ordinal + index + 1,
                 unit_type="repurpose_short", title=clip.title, premise=clip.rationale,
-                content_intent={"hook": clip.hook, "output_intent": "youtube_shorts", "repurpose_mode": plan.request.mode},
+                content_intent=content_intent,
                 source_lineage=lineage, repurpose_plan_reference=RepurposePlanReference(batch_id=plan.batch_id,
                     clip_index=index, plan_path=f"repurpose/batches/{plan.batch_id}/plan.json", plan_hash=digest)))
             lineages.append(lineage)

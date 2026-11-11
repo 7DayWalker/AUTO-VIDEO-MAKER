@@ -98,9 +98,9 @@ class AgentRouterProvider(BaseLLMProvider):
         # No speculative Messages/remote Chat readiness is advertised.
         self._api_style = "chat_completions" if loopback else "responses"
         if use_responses_api is True and loopback:
-            # The operator's loopback bridge serves Chat locally and translates
-            # it to Responses upstream; it does NOT serve /v1/responses itself.
-            # Native Responses is selected BEFORE dispatch, never by probing,
+            # Preserve the historic opt-in direct route. The current loopback
+            # bridge also passes native Responses through, but defaults remain
+            # unchanged for Summary callers. Select BEFORE dispatch, never probe,
             # retrying a local 404, or changing existing summary callers.
             self._base_url = DEFAULT_AGENTROUTER_BASE_URL
             self._api_style = "responses"
@@ -381,6 +381,13 @@ class AgentRouterProvider(BaseLLMProvider):
             if (self._api_style == "responses" or returned_model) and returned_model != self._model:
                 raise LLMResponseError("Response model does not match the locked canonical model")
             usage = _normalize_usage(data.get("usage"), responses=self._api_style == "responses")
+        except LLMResponseError as exc:
+            if not getattr(exc, "diagnostics", None):
+                from app.content.exceptions import safe_provider_text
+                raise with_provider_diagnostics(exc, {"http_status": status,
+                    "error_code": "INVALID_COMPLETION", "message": safe_provider_text(exc.reason, secrets=(self._api_key,)),
+                    "api_style": self._api_style, "transport": "local_proxy" if self._api_style == "chat_completions" else "direct"}) from None
+            raise
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             raise LLMResponseError("Malformed text completion envelope") from None
         return LLMResponse(

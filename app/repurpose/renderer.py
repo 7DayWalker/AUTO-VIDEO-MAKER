@@ -4,15 +4,132 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import wave
+import json
+import subprocess
+import array
+import time
 from pathlib import Path
 
 from app.assembly.ffmpeg import get_ffmpeg_runner, probe_media, run_ffmpeg
 from app.production.storage import compute_content_hash, production_dir, production_revision_lock
 from app.production.synthesis import BROADCAST_VOCAL_CHAIN, measured_loudnorm_filter, measure_audio_loudness
 from app.repurpose.cache import load_evidence
-from app.repurpose.captions import build_ass, group_words, narration_words, transcript_captions
+from app.repurpose.captions import build_ass, group_words, narration_words, transcript_captions, beat_caption_entries
 from app.repurpose.models import RenderArtifact, RepurposeError, rendered_duration_bounds
 from app.repurpose.storage import atomic_json, content_hash, load_render, load_unit_plan, read_json, unit_dir
+from app.repurpose.timeline import FPS, SAMPLE_RATE, PIPELINE_VERSION, TTS_CACHE_VERSION, resolve_timeline, narration_tempo
+
+
+def _verify_beat_media(path, frame_count, *, require_audio_duration=False):
+    """Count decoded frames and check mux origins before claiming a beat clock."""
+    runner = get_ffmpeg_runner()
+    runner.ensure_ffprobe()
+    result = subprocess.run([runner.ffprobe_path, "-v", "error", "-count_frames", "-show_entries",
+        "stream=codec_type,nb_read_frames,start_time,duration", "-of", "json", str(path)],
+        capture_output=True, text=True, timeout=180)
+    try:
+        streams = json.loads(result.stdout)["streams"]
+        video = next(s for s in streams if s.get("codec_type") == "video")
+        if result.returncode or int(video["nb_read_frames"]) != frame_count or abs(float(video.get("start_time", 0))) > 1 / FPS:
+            raise ValueError
+        audio = next(s for s in streams if s.get("codec_type") == "audio")
+        if abs(float(audio.get("start_time", 0))) > 1 / FPS:
+            raise ValueError
+        if require_audio_duration and abs(float(audio["duration"]) - frame_count / FPS) > 1 / FPS:
+            raise ValueError
+    except (ValueError, KeyError, StopIteration, TypeError):
+        raise RepurposeError("BEAT_MEDIA_CLOCK_INVALID", "Encoded frame count or audio/video origin differs from the measured beat clock", 422) from None
+
+
+def _verified_leading_silence(pcm):
+    """Keep a 5ms guard before the first signal; never trim by word guesses."""
+    with wave.open(str(pcm), "rb") as stream:
+        channels = stream.getnchannels()
+        values = array.array("h", stream.readframes(min(stream.getnframes(), SAMPLE_RATE)))
+    # A conservative -66 dBFS threshold finds phoneme starts before loud vowels.
+    onset = next((i // channels for i, value in enumerate(values) if abs(value) > 16), 0)
+    return max(0, onset - round(.005 * SAMPLE_RATE))
+
+
+def _beat_audio(clip, directory, *, target_seconds=None):
+    """Cache independently measured PCM; never infer a beat from word counts."""
+    from app.voice.providers.edge_tts import EdgeTTSProvider
+    paths, samples, words_by_beat = [], [], []
+    for beat in clip.beats:
+        key = content_hash({"text": beat.spoken_text, "voice": "en-US-AndrewMultilingualNeural",
+            "rate": "+15%", "pipeline": TTS_CACHE_VERSION})
+        folder = directory / "beats" / key
+        folder.mkdir(parents=True, exist_ok=True)
+        mp3, pcm, metadata = folder / "speech.mp3", folder / "speech.wav", folder / "audio.json"
+        timing = mp3.with_suffix(".mp3.timing.json")
+        saved = read_json(metadata) if metadata.is_file() else {}
+        if not pcm.is_file() or saved.get("decode_policy") != "verified-leading-silence-v1":
+            if not mp3.is_file() or not timing.is_file():
+                marker = mp3.with_suffix(".mp3.capture-timing")
+                marker.touch()
+                try:
+                    # A fresh provider call is only for a missing beat. Completed
+                    # source audio is reused even after a render interruption.
+                    time.sleep(1.5)
+                    asyncio.run(EdgeTTSProvider().generate(beat.spoken_text, mp3,
+                        voice="en-US-AndrewMultilingualNeural", rate="+15%"))
+                finally:
+                    marker.unlink(missing_ok=True)
+            boundaries = read_json(timing)["boundaries"]
+            words = narration_words(boundaries, duration=probe_media(mp3).duration)
+            if not words:
+                raise RepurposeError("NARRATION_TIMING_MISSING", "Every beat requires retained TTS word timing", 422)
+            decoded = folder / "speech.decoded.wav"
+            run_ffmpeg(["-y", "-i", str(mp3), "-ar", str(SAMPLE_RATE), "-ac", "2", "-c:a", "pcm_s16le", str(decoded)],
+                "measuring verified beat leading silence", timeout=180)
+            leading = _verified_leading_silence(decoded)
+            temporary = folder / "speech.tmp.wav"
+            with wave.open(str(decoded), "rb") as source, wave.open(str(temporary), "wb") as out:
+                out.setparams(source.getparams())
+                source.setpos(leading)
+                count = source.getnframes() - leading
+                out.writeframes(source.readframes(count))
+            decoded.unlink(missing_ok=True)
+            shifted = [{**w, "start": max(0, w["start"] - leading / SAMPLE_RATE),
+                "end": min(count / SAMPLE_RATE, w["end"] - leading / SAMPLE_RATE)} for w in words]
+            os.replace(temporary, pcm)
+            atomic_json(metadata, {"samples": count, "words": shifted, "pcm_sha256": compute_content_hash(pcm),
+                "leading_trim_samples": leading, "decode_policy": "verified-leading-silence-v1"})
+        saved = read_json(metadata)
+        if saved["pcm_sha256"] != compute_content_hash(pcm):
+            raise RepurposeError("BEAT_AUDIO_CHANGED", "Cached beat PCM fingerprint changed", 422)
+        paths.append(pcm); samples.append(saved["samples"]); words_by_beat.append(saved["words"])
+    original_samples = list(samples)
+    tempo = narration_tempo(clip.beats, samples, target_seconds) if target_seconds is not None else 1.0
+    if abs(tempo - 1.0) > 1e-8:
+        for i, (pcm, words) in enumerate(zip(paths, words_by_beat)):
+            paced = pcm.with_name(f"speech-paced-{tempo:.9f}.wav")
+            if not paced.is_file():
+                run_ffmpeg(["-y", "-i", str(pcm), "-af", f"atempo={tempo:.9f}", "-ar", str(SAMPLE_RATE), "-ac", "2",
+                    "-c:a", "pcm_s16le", str(paced)], "applying bounded complete-beat speech pacing", timeout=180)
+            with wave.open(str(paced), "rb") as stream:
+                measured = stream.getnframes()
+            scale = measured / samples[i]
+            words_by_beat[i] = [{**w, "start": w["start"] * scale, "end": min(measured / SAMPLE_RATE, w["end"] * scale)} for w in words]
+            paths[i], samples[i] = paced, measured
+    timeline = resolve_timeline(clip.beats, samples)
+    for cut, original in zip(timeline, original_samples):
+        cut.update(original_audio_samples=original, audio_tempo_factor=tempo)
+    narration = directory / "narration.wav"
+    temporary = directory / "narration.tmp.wav"
+    entries = []
+    with wave.open(str(temporary), "wb") as out:
+        out.setnchannels(2); out.setsampwidth(2); out.setframerate(SAMPLE_RATE)
+        for pcm, cut, words in zip(paths, timeline, words_by_beat):
+            with wave.open(str(pcm), "rb") as source:
+                if (source.getnchannels(), source.getsampwidth(), source.getframerate(), source.getnframes()) != (2, 2, SAMPLE_RATE, cut["audio_samples"]):
+                    raise RepurposeError("INVALID_BEAT_AUDIO", "Cached beat PCM format/count changed", 422)
+                out.writeframes(source.readframes(source.getnframes()))
+            out.writeframes(b"\0" * cut["tail_padding_samples"] * 4)
+            entries.extend(beat_caption_entries(words, output_start=cut["output_start"], beat_order=cut["beat_order"]))
+    os.replace(temporary, narration)
+    return narration, timeline, entries
 
 
 def framing_filter(mode):
@@ -44,13 +161,20 @@ def _render_short(production_id, unit_id, *, root=None):
     try:
         previous = load_render(production_id, unit_id, root)
         media = directory / "short.mp4"
-        if previous.plan_hash == content_hash(plan) and media.is_file() and compute_content_hash(media) == previous.file_fingerprint:
+        current_pipeline = plan.schema_version == 1 or previous.validation.get("pipeline_version") == PIPELINE_VERSION
+        if current_pipeline and previous.plan_hash == content_hash(plan) and media.is_file() and compute_content_hash(media) == previous.file_fingerprint:
+            if plan.schema_version == 2 and clip.beats:
+                from app.repurpose.timeline import validate_execution
+                execution = read_json(directory / "execution.json")
+                if content_hash(execution) != previous.validation.get("execution_hash") or execution["cuts"] != previous.cuts:
+                    raise RepurposeError("BEAT_EXECUTION_CHANGED", "Cached beat execution fingerprint changed", 422)
+                validate_execution(clip, previous.cuts)
             return previous
     except FileNotFoundError:
         pass
     if (directory / "promotion.json").is_file():
         raise RepurposeError("ACCEPTED_MASTER_PROTECTED", "Use a new unit for changed accepted media")
-    evidence = load_evidence(production_id, plan.request.source_asset_id, plan.request.source_unit_id, root=root)
+    evidence = load_evidence(production_id, plan.request.source_asset_id, plan.request.source_unit_id, root=root, include_prepared=plan.schema_version == 2)
     if evidence.revision != plan.request.evidence_revision or evidence.asset.sha256 != plan.source_sha256:
         raise RepurposeError("STALE_EVIDENCE", "Source evidence changed after planning")
     if compute_content_hash(evidence.media) != plan.source_sha256:
@@ -61,7 +185,15 @@ def _render_short(production_id, unit_id, *, root=None):
     duration = sum(c.end_seconds-c.start_seconds for c in clip.cuts)
     entries, precision, speed = [], "segment_estimated_phrases", 1.0
     narration = directory / "narration.mp3"
-    if plan.request.mode == "narrated":
+    beat_locked = bool(clip.beats) and plan.schema_version == 2 and plan.request.mode == "narrated"
+    if beat_locked:
+        narration, output_cuts, entries = _beat_audio(clip, directory, target_seconds=plan.request.target_seconds)
+        duration = sum(c["output_duration"] for c in output_cuts)
+        minimum, maximum = rendered_duration_bounds(plan.request.target_seconds)
+        if not minimum <= duration <= maximum:
+            raise RepurposeError("NARRATION_DURATION_OUT_OF_BOUNDS", "Measured complete beat audio is outside the editorial duration bounds; revise the script", 422)
+        precision = "word"
+    elif plan.request.mode == "narrated":
         from app.voice.providers.edge_tts import EdgeTTSProvider
 
         marker = narration.with_suffix(".mp3.capture-timing")
@@ -87,11 +219,17 @@ def _render_short(production_id, unit_id, *, root=None):
                     "text": " ".join(w["text"] for w in g), "words": g} for g in group_words(words)]
         precision = "word"
     total_source = sum(c.end_seconds-c.start_seconds for c in clip.cuts)
-    output_cuts, offset = [], 0.0
-    for cut in clip.cuts:
-        output_duration = (cut.end_seconds-cut.start_seconds) * duration / total_source
-        output_cuts.append({**cut.model_dump(mode="json"), "output_start": offset, "output_duration": output_duration})
-        offset += output_duration
+    if not beat_locked:
+        output_cuts, offset = [], 0.0
+        for cut in clip.cuts:
+            output_duration = (cut.end_seconds-cut.start_seconds) * duration / total_source
+            output_cuts.append({**cut.model_dump(mode="json"), "output_start": offset, "output_duration": output_duration})
+            offset += output_duration
+    else:
+        for planned, cut in zip(clip.cuts, output_cuts):
+            cut.update(source_segment_id=planned.source_segment_id,
+                transcript_segment_ids=[i for i, s in enumerate(evidence.transcript.segments)
+                    if s.start < cut["end_seconds"] and s.end > cut["start_seconds"]], visual_frame_timestamps=[])
     if plan.request.mode == "raw_highlight":
         entries, precision = transcript_captions(evidence.transcript, output_cuts)
     if not entries:
@@ -113,7 +251,11 @@ def _render_short(production_id, unit_id, *, root=None):
                 "-af", f"asetpts=PTS-STARTPTS,atempo={1/factor:.9f},apad,atrim=duration={cut['output_duration']:.6f}",
                 "-t", f"{cut['output_duration']:.6f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-threads", "2", name]
+            if beat_locked:
+                args[-1:-1] = ["-frames:v", str(cut["frame_count"])]
             run_ffmpeg(args, "rendering a bounded source cut", cwd=scratch, timeout=300)
+            if beat_locked:
+                _verify_beat_media(scratch / name, cut["frame_count"])
             concat_lines.append(f"file '{name}'")
         (scratch / "cuts.txt").write_text("\n".join(concat_lines), encoding="ascii")
         edit = scratch / "edit.mkv"
@@ -122,22 +264,34 @@ def _render_short(production_id, unit_id, *, root=None):
         mix = scratch / "mix.wav"
         if plan.request.mode == "narrated":
             voice = scratch / "voice.wav"
-            run_ffmpeg(["-y", "-i", str(narration), "-af", f"atempo={speed:.9f},{BROADCAST_VOCAL_CHAIN}",
+            vocal_filter = BROADCAST_VOCAL_CHAIN if beat_locked else f"atempo={speed:.9f},{BROADCAST_VOCAL_CHAIN}"
+            run_ffmpeg(["-y", "-i", str(narration), "-af", vocal_filter,
                 "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(voice)], "preparing complete short narration", timeout=180)
             normalized = scratch / "voice-master.wav"
             run_ffmpeg(["-y", "-i", str(voice), "-af", measured_loudnorm_filter(measure_audio_loudness(voice)),
                 "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(normalized)], "mastering Andrew short narration", timeout=180)
+            if beat_locked:
+                expected_samples = sum(c["padded_audio_samples"] for c in output_cuts)
+                for pcm in (voice, normalized):
+                    with wave.open(str(pcm), "rb") as stream:
+                        if stream.getnframes() != expected_samples:
+                            raise RepurposeError("BEAT_AUDIO_CLOCK_CHANGED", "Audio mastering changed the measured beat sample clock", 422)
             graph = ("[1:a]asplit=2[narrator][sc];[0:a]volume=0.05,highpass=f=100,lowpass=f=8000[bed];"
                 "[bed][sc]sidechaincompress=threshold=0.08:ratio=2:attack=12:release=180:knee=2:makeup=1[duck];"
                 "[narrator][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]")
             run_ffmpeg(["-y", "-i", str(edit), "-i", str(normalized), "-filter_complex", graph, "-map", "[mix]",
                 "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", str(mix)], "mixing narration with 0.05 ducked movie audio", timeout=180)
+            if beat_locked:
+                with wave.open(str(mix), "rb") as stream:
+                    if stream.getnframes() != expected_samples:
+                        raise RepurposeError("BEAT_AUDIO_CLOCK_CHANGED", "Audio mixing changed the exact sample clock", 422)
         else:
             run_ffmpeg(["-y", "-i", str(edit), "-vn", "-c:a", "pcm_s16le", str(mix)], "preparing original highlight audio", timeout=180)
         levels = measure_audio_loudness(mix)
         output = scratch / "short.mp4"
         run_ffmpeg(["-hide_banner", "-y", "-threads", "2", "-i", str(edit), "-i", str(mix),
-            "-filter_complex_threads", "2", "-filter_complex", framing_filter(plan.request.framing), "-map", "[v]", "-map", "1:a:0",
+            "-filter_complex_threads", "2", "-filter_complex", (("[0:v]setpts=N/(30*TB)[clock];" + framing_filter(plan.request.framing).replace("[0:v]", "[clock]", 1))
+                if beat_locked else framing_filter(plan.request.framing)), "-map", "[v]", "-map", "1:a:0",
             "-af", measured_loudnorm_filter(levels), "-t", f"{duration:.6f}", "-r", "30", "-c:v", "libx264",
             "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-threads", "2", "-c:a", "aac", "-b:a", "192k",
             "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(output)],
@@ -155,6 +309,8 @@ def _render_short(production_id, unit_id, *, root=None):
                 or final_levels.get("true_peak_db") is None or final_levels["true_peak_db"] > -1):
             raise RepurposeError("SHORT_AUDIO_VALIDATION_FAILED", "Encoded audio did not meet −14 LUFS ±0.5 / ≤−1 dBTP", 422)
         info = probe_media(output)
+        if beat_locked:
+            _verify_beat_media(output, sum(c["frame_count"] for c in output_cuts), require_audio_duration=True)
         minimum, maximum = rendered_duration_bounds(plan.request.target_seconds)
         if not info.has_video or not info.has_audio or (info.width, info.height) != (1080, 1920) or not minimum <= info.duration <= maximum+.1:
             raise RepurposeError("SHORT_MEDIA_VALIDATION_FAILED", "Encoded short failed resolution, audio or duration validation", 422)
@@ -173,6 +329,13 @@ def _render_short(production_id, unit_id, *, root=None):
                 "background_volume": .05 if plan.request.mode == "narrated" else 1.0,
                 "audio_mix_method": "narration_ducked_movie" if plan.request.mode == "narrated" else "original_audio",
                 "source_sha256": plan.source_sha256})
+        if beat_locked:
+            execution = {"pipeline_version": PIPELINE_VERSION, "plan_hash": content_hash(plan), "cuts": output_cuts,
+                "sample_rate": SAMPLE_RATE, "frame_rate": FPS, "narration_sha256": compute_content_hash(narration)}
+            artifact.validation.update(pipeline_version=PIPELINE_VERSION, sync_method="measured_beat_audio",
+                anchor_precision="frame_verified_action" if all(b.anchor_precision == "frame_verified_action" for b in clip.beats)
+                    else "operator_verified_action", execution_hash=content_hash(execution))
+            atomic_json(directory / "execution.json", execution)
         os.replace(output, directory / "short.mp4")
         (directory / "captions.ass").write_text(ass, encoding="utf-8")
         atomic_json(directory / "caption_timing.json", {"precision": precision, "entries": entries, "duration": duration})

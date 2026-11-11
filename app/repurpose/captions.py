@@ -39,6 +39,13 @@ def narration_words(boundaries, *, speed=1.0, duration):
             for b in boundaries if b.get("kind") == "WordBoundary" and b["start"] / speed < duration]
 
 
+def beat_caption_entries(words, *, output_start, beat_order):
+    """Group only within this measured beat; never merge across a story cut."""
+    shifted = [{**word, "start": output_start + word["start"], "end": output_start + word["end"]} for word in words]
+    return [{"start": group[0]["start"], "end": group[-1]["end"], "text": " ".join(word["text"] for word in group),
+        "words": group, "beat_order": beat_order} for group in group_words(shifted)]
+
+
 def transcript_captions(transcript, cuts):
     entries, precision = [], "word"
     for cut in cuts:

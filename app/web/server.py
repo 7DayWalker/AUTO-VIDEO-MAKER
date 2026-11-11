@@ -1616,7 +1616,11 @@ def _redact_secrets(value):
         return {
             key: (
                 "<redacted>"
-                if _SECRET_KEY_PATTERN.search(str(key))
+                if _SECRET_KEY_PATTERN.search(str(key)) and not (
+                    key in {"max_output_tokens", "planner_input_token_limit", "input_tokens", "output_tokens", "prompt_tokens",
+                        "completion_tokens", "total_tokens", "reasoning_tokens", "cached_tokens",
+                        "prompt_tokens_details_cached_tokens", "completion_tokens_details_reasoning_tokens"}
+                    and type(item) is int and 0 <= item <= 10_000_000)
                 else _redact_secrets(item)
             )
             for key, item in value.items()
@@ -4953,12 +4957,25 @@ def repurpose_promote_payload(production_id, unit_id, body):
     return _repurpose_call(promote)
 
 
-def _serve_repurpose_media(handler, production_id, unit_id, *, head=False):
+def _serve_repurpose_media(handler, production_id, unit_id, *, head=False, source_asset_id=None):
     from app.production.storage import compute_content_hash
     from app.repurpose.storage import load_render, load_unit_plan, unit_dir
     from app.repurpose.models import RepurposeError
 
     def resolve():
+        if source_asset_id is not None:
+            from app.repurpose.storage import safe_production_dir
+            from app.production.storage import load_production, source_artifact_path
+            directory = safe_production_dir(production_id, PRODUCTIONS_DIR)
+            production = load_production(production_id, root=PRODUCTIONS_DIR)
+            asset = next((a for a in production.source_assets or [] if a.asset_id == source_asset_id and a.source_kind != "sandbox_fixture"), None)
+            if asset is None:
+                raise RepurposeError("SOURCE_NOT_FOUND", "Source not found", 404)
+            media = source_artifact_path(production_id, asset.stored_path, PRODUCTIONS_DIR).resolve()
+            media.relative_to(directory)
+            if not media.is_file() or (asset.file_size is not None and media.stat().st_size != asset.file_size):
+                raise RepurposeError("SOURCE_MEDIA_MISSING", "Source media is missing or changed", 422)
+            return media
         load_unit_plan(production_id, unit_id, PRODUCTIONS_DIR)
         artifact = load_render(production_id, unit_id, PRODUCTIONS_DIR)
         media = unit_dir(production_id, unit_id, PRODUCTIONS_DIR)/"short.mp4"
@@ -4991,7 +5008,8 @@ def _serve_repurpose_media(handler, production_id, unit_id, *, head=False):
             handler.send_response(416); handler.send_header("Content-Range", f"bytes */{size}")
             handler.send_header("Content-Length", "0"); handler.end_headers(); return
     handler.send_response(206 if rh else 200)
-    for key, value in {"Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Length": str(end-start+1),
+    mime = {".mov": "video/quicktime", ".webm": "video/webm", ".mkv": "video/x-matroska"}.get(media.suffix.lower(), "video/mp4")
+    for key, value in {"Content-Type": mime, "Accept-Ranges": "bytes", "Content-Length": str(end-start+1),
                        "Cache-Control": "no-store"}.items():
         handler.send_header(key, value)
     if rh:
@@ -5063,6 +5081,27 @@ class AVMHandler(BaseHTTPRequestHandler):
 
     # -- Phase 11 production routes (thin Command Center surface) ---------
     def _productions_get(self, path: str):
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/sources/(src-\d{3})/media/?", path)
+        if match:
+            return _serve_repurpose_media(self, match.group(1), None, source_asset_id=match.group(2))
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/sources/(src-\d{3})/preparation/?", path)
+        if match:
+            from app.repurpose.preparation import preparation_status
+            status, payload = _repurpose_call(lambda: preparation_status(match.group(1), match.group(2), root=PRODUCTIONS_DIR))
+            return self._json(status, payload)
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/batches/?", path)
+        if match:
+            from app.repurpose.service import list_batches
+            def listed():
+                try:
+                    limit = int(self._query_param("limit") or "20")
+                except ValueError:
+                    from app.repurpose.models import RepurposeError
+                    raise RepurposeError("INVALID_BATCH_QUERY", "Invalid batch page limit", 400) from None
+                return list_batches(match.group(1), asset_id=self._query_param("asset_id"), limit=limit,
+                    cursor=self._query_param("cursor"), root=PRODUCTIONS_DIR)
+            status, payload = _repurpose_call(listed)
+            return self._json(status, payload)
         match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/sources/?", path)
         if match:
             from app.repurpose.cache import sources_payload
@@ -5157,6 +5196,13 @@ class AVMHandler(BaseHTTPRequestHandler):
         return self._json(404, {"detail": "not found"})
 
     def _productions_post(self, path: str):
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/sources/(src-\d{3})/(prepare|anchors)/?", path)
+        if match:
+            from app.repurpose.preparation import prepare_source, save_anchors
+            body = self._request_json_body()
+            action = prepare_source if match.group(3) == "prepare" else save_anchors
+            status, payload = _repurpose_call(lambda: action(match.group(1), match.group(2), body, root=PRODUCTIONS_DIR))
+            return self._json(202 if status == 200 and payload.get("status") == "preparing" else status, payload)
         match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/batches/(rpb-[a-f0-9]{24})/recover/?", path)
         if match:
             from app.repurpose.service import recover_batch
@@ -5336,6 +5382,9 @@ class AVMHandler(BaseHTTPRequestHandler):
     # -- routing ----------------------------------------------------------
     def do_HEAD(self):
         path = urlparse(self.path).path
+        match = re.fullmatch(r"/api/productions/([^/]+)/repurpose/sources/(src-\d{3})/media/?", path)
+        if match:
+            return _serve_repurpose_media(self, match.group(1), None, source_asset_id=match.group(2), head=True)
         match = re.fullmatch(r"/api/productions/([^/]+)/units/([^/]+)/repurpose-video/media/?", path)
         if match:
             return _serve_repurpose_media(self, match.group(1), match.group(2), head=True)

@@ -1,7 +1,7 @@
 """Read existing source evidence; never upload, sample frames or call Whisper."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.production.models import NarrationArtifact
 from app.production.storage import load_production, source_artifact_path, unit_plan_dir
@@ -22,9 +22,10 @@ class Evidence:
     identity: dict
     revision: str
     media: object
+    anchors: list = field(default_factory=list)
 
 
-def load_evidence(production_id, asset_id, source_unit_id=None, *, root=None):
+def load_evidence(production_id, asset_id, source_unit_id=None, *, root=None, include_prepared=False):
     directory = safe_production_dir(production_id, root)
     production = load_production(production_id, root=root)
     if production.production_id != production_id:
@@ -91,8 +92,25 @@ def load_evidence(production_id, asset_id, source_unit_id=None, *, root=None):
             chosen, visuals, beats = unit.unit_id, cached, retained
             break
     identity = visual_source_identity(asset, transcript)
+    prepared = directory / "source" / f"{asset_id}.repurpose" / CACHE_FILENAME
+    prepared_visuals = load_cached_visual_evidence(prepared, asset, transcript) if include_prepared and prepared.is_file() else []
+    if prepared_visuals:
+        visuals = list({round(n["timestamp_seconds"], 3): n for n in [*visuals, *prepared_visuals]}.values())
+        visuals.sort(key=lambda n: n["timestamp_seconds"])
+    anchor_path = directory / "source" / f"{asset_id}.repurpose" / "anchors.json"
+    anchors = []
+    if include_prepared and anchor_path.is_file():
+        saved = read_json(anchor_path)
+        if saved.get("identity") != identity:
+            raise RepurposeError("STALE_ACTION_ANCHORS", "Verified action anchors belong to different source/transcript evidence", 422)
+        from app.repurpose.preparation import ActionAnchor
+        anchors = [ActionAnchor.model_validate(a).model_dump(mode="json") for a in saved.get("anchors", [])]
+        if len({a["evidence_id"] for a in anchors}) != len(anchors) or any(a["end_seconds"] > asset.duration for a in anchors):
+            raise RepurposeError("INVALID_ACTION_ANCHORS", "Saved action anchors have invalid coverage/identities", 422)
     revision = content_hash({"identity": identity, "source_unit_id": chosen, "visuals": visuals, "beats": beats})
-    return Evidence(production, asset, transcript, chosen, visuals, beats, identity, revision, media)
+    if anchors:
+        revision = content_hash({"legacy_revision": revision, "anchors": anchors})
+    return Evidence(production, asset, transcript, chosen, visuals, beats, identity, revision, media, anchors)
 
 
 def sources_payload(production_id, *, root=None):
@@ -101,13 +119,19 @@ def sources_payload(production_id, *, root=None):
     sources = []
     for asset in production.source_assets or []:
         row = {"asset_id": asset.asset_id, "filename": asset.original_filename,
-               "duration_seconds": asset.duration, "ready": False}
+                "duration_seconds": asset.duration, "source_sha256": asset.sha256, "source_kind": asset.source_kind,
+                "ready": False, "transcript_ready": False, "beat_locked_ready": False,
+                "media_url": f"/api/productions/{production_id}/repurpose/sources/{asset.asset_id}/media"}
         try:
-            evidence = load_evidence(production_id, asset.asset_id, root=root)
+            evidence = load_evidence(production_id, asset.asset_id, root=root, include_prepared=True)
             row.update(ready=True, source_unit_id=evidence.source_unit_id, evidence_revision=evidence.revision,
                 transcript_segments=len(evidence.transcript.segments), language=evidence.transcript.language,
                 captions_precision="word" if all(s.words for s in evidence.transcript.segments) else "segment_estimated_phrases",
-                visual_observations=len(evidence.visuals), recap_beats=len(evidence.beats))
+                visual_observations=len(evidence.visuals), recap_beats=len(evidence.beats), transcript_ready=True,
+                visual_evidence_ready=bool(evidence.visuals), beat_locked_ready=len(evidence.anchors) >= 4,
+                verified_actions=len(evidence.anchors), anchors=evidence.anchors,
+                observations=[{"timestamp_seconds": n["timestamp_seconds"], "action": n["action"]} for n in evidence.visuals],
+                readiness_reasons=[] if len(evidence.anchors) >= 4 else ["VERIFY_ACTION_ANCHORS"])
         except (RepurposeError, ValueError, OSError) as exc:
             row["error"] = getattr(exc, "code", "CACHE_INVALID")
         sources.append(row)

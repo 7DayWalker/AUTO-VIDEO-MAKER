@@ -40,18 +40,21 @@ def _script(clip, transcript):
     return " ".join(rows).strip()
 
 
-def _content_plan(project_id, clip, transcript, mode):
+def _content_plan(project_id, clip, transcript, mode, render=None):
     script = _script(clip, transcript)
     scenes = []
-    for cut in clip.cuts:
-        span = cut.end_seconds-cut.start_seconds
+    source_cuts = render.cuts if clip.beats and render is not None else [c.model_dump(mode="json") for c in clip.cuts]
+    for index, cut in enumerate(source_cuts):
+        span = cut["end_seconds"]-cut["start_seconds"]
+        output_span = cut.get("output_duration", span)
         pieces = max(1, math.ceil(span/MAX_SCENE_DURATION))
         for part in range(pieces):
-            start = cut.start_seconds + span*part/pieces
-            end = cut.start_seconds + span*(part+1)/pieces
+            start = cut["start_seconds"] + span*part/pieces
+            end = cut["start_seconds"] + span*(part+1)/pieces
             scenes.append(Scene(id=f"source_edit_{len(scenes)+1:03d}", sequence=len(scenes)+1,
-                narration=script, visual_prompt=f"Existing source [{start:.3f}, {end:.3f}); repurpose source edit, no scene generation.",
-                estimated_duration=max(MIN_SCENE_DURATION, min(MAX_SCENE_DURATION, end-start)), purpose="repurpose_short"))
+                narration=clip.beats[index].spoken_text if clip.beats else script,
+                visual_prompt=f"Existing source [{start:.3f}, {end:.3f}); repurpose source edit, no scene generation.",
+                estimated_duration=max(MIN_SCENE_DURATION, min(MAX_SCENE_DURATION, output_span/pieces)), purpose="repurpose_short"))
     return ProductionPlan(project_id=project_id, title=clip.title, hook=clip.hook, script=script,
         scenes=scenes, estimated_duration=sum(s.estimated_duration for s in scenes),
         metadata=ProductionMetadata(language="en" if mode == "narrated" else transcript.language or "en"))
@@ -87,22 +90,40 @@ def validate_repurpose_handoff(manifest, directory):
         raise ValueError("Short snapshot identity/fingerprint mismatch")
     from app.production.visual_cache import visual_source_identity
     identity = visual_source_identity(source, transcript)
-    if identity != evidence["identity"] or content_hash({"identity": identity, "source_unit_id": evidence["source_unit_id"],
-            "visuals": evidence["visuals"], "beats": evidence["beats"]}) != plan.request.evidence_revision:
+    revision = content_hash({"identity": identity, "source_unit_id": evidence["source_unit_id"],
+            "visuals": evidence["visuals"], "beats": evidence["beats"]})
+    if evidence.get("anchors"):
+        revision = content_hash({"legacy_revision": revision, "anchors": evidence["anchors"]})
+    if identity != evidence["identity"] or revision != plan.request.evidence_revision:
         raise ValueError("Short cached evidence revision mismatch")
     output = PlannerOutput(clips=[c.model_copy(deep=True) for c in plan.clips])
     for clip in output.clips:
         clip.unit_id = None
         for cut in clip.cuts:
             cut.source_segment_id = None
-    validate_output(output, SimpleNamespace(asset=source, transcript=transcript, visuals=evidence["visuals"]), plan.request)
+    validate_output(output, SimpleNamespace(asset=source, transcript=transcript, visuals=evidence["visuals"], anchors=evidence.get("anchors", [])), plan.request)
     clip = next((c for c in plan.clips if c.unit_id == handoff.unit_id), None)
     if clip is None or len(render.cuts) != len(clip.cuts) or render.mode != plan.request.mode:
         raise ValueError("Short unit/edit mismatch")
     offset = 0.0
+    beat_locked = plan.schema_version == 2 and bool(clip.beats)
+    if beat_locked:
+        from app.repurpose.timeline import validate_execution, PIPELINE_VERSION
+        if "execution.json" not in handoff.artifact_hashes:
+            raise ValueError("Beat handoff must pin its measured execution artifact")
+        execution = read_json(package/"execution.json")
+        if execution["plan_hash"] != content_hash(plan) or execution["pipeline_version"] != PIPELINE_VERSION or content_hash(execution) != render.validation.get("execution_hash"):
+            raise ValueError("Beat execution fingerprint changed")
+        if execution["cuts"] != render.cuts:
+            raise ValueError("Beat execution differs from rendered cuts")
+        if execution.get("sample_rate") != 48000 or execution.get("frame_rate") != 30:
+            raise ValueError("Beat execution requires the 48kHz/30fps clock")
+        validate_execution(clip, render.cuts)
     for planned, actual in zip(clip.cuts, render.cuts):
-        if any(actual.get(k) != v for k, v in planned.model_dump(mode="json").items()):
+        if not beat_locked and any(actual.get(k) != v for k, v in planned.model_dump(mode="json").items()):
             raise ValueError("Rendered source cuts differ from accepted plan")
+        if beat_locked and actual.get("source_segment_id") != planned.source_segment_id:
+            raise ValueError("Beat source lineage changed")
         if abs(actual["output_start"]-offset) > .02 or actual["output_duration"] <= 0:
             raise ValueError("Short output timing is discontinuous")
         offset += actual["output_duration"]
@@ -158,7 +179,7 @@ def promote_short(production_id, unit_id, *, root=None, projects_root=None, expe
                 raise RepurposeError("ACCEPTED_MASTER_PROTECTED", "Changed media must use a new short unit")
             validate_repurpose_handoff(bound.manifest, bound.project_dir)
             return bound.project_dir, bound.manifest, False
-        evidence = load_evidence(production_id, plan.request.source_asset_id, plan.request.source_unit_id, root=root)
+        evidence = load_evidence(production_id, plan.request.source_asset_id, plan.request.source_unit_id, root=root, include_prepared=plan.schema_version == 2)
         if evidence.revision != plan.request.evidence_revision:
             raise RepurposeError("STALE_EVIDENCE", "Cached evidence changed after rendering")
         unit_directory = unit_dir(production_id, unit_id, root)
@@ -173,7 +194,7 @@ def promote_short(production_id, unit_id, *, root=None, projects_root=None, expe
         if any((pinned/name).exists() for name in (PLAN_FILE, BRIEF_FILE, META_FILE)):
             raise RepurposeError("BOUND_PROJECT_CONFLICT", "Existing unit content plan must not be overwritten")
         stamp, snapshot_dir = timestamp(), "repurpose_handoff/"+uuid4().hex[:16]
-        content = _content_plan(project_id, clip, evidence.transcript, plan.request.mode)
+        content = _content_plan(project_id, clip, evidence.transcript, plan.request.mode, render)
         brief = ContentBrief(topic=clip.title if len(clip.title) >= 3 else f"Short: {clip.title}",
             target_duration=round(plan.request.target_seconds), number_of_scenes=max(2, min(20, len(content.scenes))),
             production_context={"unit_id": unit_id, "handoff_kind": "repurpose_short"})
@@ -185,6 +206,10 @@ def promote_short(production_id, unit_id, *, root=None, projects_root=None, expe
             snapshots = {"repurpose_plan.json": plan, "render.json": render, "source_asset.json": evidence.asset,
                 "transcript.json": evidence.transcript, "evidence.json": {"identity": evidence.identity,
                     "source_unit_id": evidence.source_unit_id, "visuals": evidence.visuals, "beats": evidence.beats}}
+            if evidence.anchors:
+                snapshots["evidence.json"]["anchors"] = evidence.anchors
+            if plan.schema_version == 2 and clip.beats:
+                snapshots["execution.json"] = read_json(unit_directory/"execution.json")
             for name, value in snapshots.items():
                 atomic_json(package/name, value)
             for name in ("captions.ass", "caption_timing.json"):
@@ -223,8 +248,8 @@ def promote_short(production_id, unit_id, *, root=None, projects_root=None, expe
             meta = {"production_id": production_id, "unit_id": unit_id,
                 "production_plan_version": binding.production_plan_version, "unit_plan_version": 1,
                 "plan_identity": project_id, "content_hash": plan_digest, "generated_at": stamp,
-                "handoff_kind": "repurpose_short", "planner_provider": "agentrouter", "planner_model": "gpt-6.1-sol",
-                "canonical_model_id": "gpt-6.1-sol", "planner_warnings": [],
+                "handoff_kind": "repurpose_short", "planner_provider": "agentrouter", "planner_model": plan.request.model_id,
+                "canonical_model_id": plan.request.model_id, "planner_warnings": [],
                 "source_repurpose_handoff": manifest.source_repurpose_handoff.model_dump(mode="json")}
             try:
                 directory.mkdir(parents=True, exist_ok=False)

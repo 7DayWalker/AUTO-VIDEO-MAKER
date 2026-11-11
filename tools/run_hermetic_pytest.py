@@ -63,7 +63,7 @@ def _pytest_arguments(arguments):
     is tests/, including when an operator uses just -q or --tb=short.
     """
     options_with_values = {
-        "-k", "-m", "-c", "-o", "--override-ini", "--tb", "--capture", "--color",
+        "-k", "-m", "-c", "-o", "-p", "--override-ini", "--tb", "--capture", "--color",
         "--basetemp", "--junitxml", "--junit-xml", "--rootdir", "--confcutdir",
         "--log-level", "--log-cli-level", "--log-file", "--log-file-level",
         "--maxfail", "--ignore", "--ignore-glob", "--deselect", "--import-mode",
